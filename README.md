@@ -1,6 +1,6 @@
-# Capstan — Audio + MIDI Tape Recorder Firmware for M8 (`v1.0`)
+# Capstan — Audio + MIDI Tape Recorder Firmware for M8
 
-**Capstan** is an open-source, linear tape-style **4-stereo, 4-mono track audio recorder**, **8-track MIDI sequencer**, and **multi-engine synthesizer/sampler** firmware for the **M8 Model:01** (Teensy 4.0) and **M8 Model:02** (Teensy MicroMod).
+**Capstan** is a linear tape-style **4-stereo, 4-mono track audio recorder**, **8-track MIDI sequencer**, and **multi-engine synthesizer/sampler** firmware for the **M8 Model:01** (Teensy 4.0) and **M8 Model:02** (Teensy MicroMod).
 
 ---
 
@@ -11,9 +11,9 @@ Release builds provide two firmware images:
 - **`M8_Capstan_v1.0_Model02.hex`** — for **M8 Model:02** (Teensy MicroMod, 480×320 display)
 
 To flash onto your hardware:
-1. Connect your M8 to your computer over USB and insert a formatted FAT32 or exFAT microSD card.
-2. Open **Teensy Loader** or **TyCommander**, select the `.hex` file matching your hardware model (`Model01` or `Model02`)
-3. Press the small reset button on the back of the M8 (or trigger bootloader mode)
+1. Connect your M8 to your computer over USB.
+2. Open **TyUploader**, select the `.hex` file matching your hardware model (`Model01` or `Model02`).
+3. Press the small reset button on the back of the M8.
 4. Allow the M8 and TyUploader to refresh, then upload.
 3. On first boot, Capstan automatically creates the `/Capstan` directory structure on the SD card without modifying any other folders on the card.
 
