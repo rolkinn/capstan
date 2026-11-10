@@ -32,38 +32,28 @@ To flash onto your hardware:
 - **Audio & MIDI Threshold Auto-Start**: Per-track `MAN` or `THR` (`-80 dB` to `-6 dB`) auto-start trigger and configurable 1–4 bar woodblock metronome count-in.
 
 ### 8-Track Linear MIDI Recorder & Piano Roll Editor (`480 PPQN`)
-- **8 MIDI Tracks (`M1`–`M8`)**: Up to `2,048` events per track recording `Note On`, `Note Off`, `Control Change (CC)`, and `Pitch Bend`.
+- **8 MIDI Tracks (`M1`–`M8`)**: `Note On`, `Note Off`, `Velocity`, `Control Change (CC)`, and `Pitch Bend`.
 - **Flexible Routing**: Per-track Input channel (`OFF`, `ALL`, `01`–`16`) and Output destination (`OFF`, external TRS/USB MIDI `C01`–`C16`, or internal instruments `I01`–`I08`).
 - **Interactive Piano Roll Editor**: Double-tap `EDIT` on any MIDI track waveform cell to open the 1/32nd-note grid Piano Roll editor with note placement, length adjustment, velocity editing, and auditions.
-- **Track Region Editing & Standard MIDI Files (`.mid`)**: Non-destructive region `SET PUNCH/LOOP`, `QUANTIZE` (`1/4`, `1/8`, `1/16`, `1/32`), `COPY`, `CUT`, `PASTE`, `DUPL`, `CLR`, and `.mid` clip import/export.
+- **Track Region Editing & Standard MIDI File support (`.mid`)**: Non-destructive region `SET PUNCH/LOOP`, `QUANTIZE` (`1/4`, `1/8`, `1/16`, `1/32`), `COPY`, `CUT`, `PASTE`, `DUPL`, `CLR`, and `.mid` clip import/export.
 
 ### 8-Slot Multi-Engine Synthesizer & Sampler (`I01`–`I08`)
-32-voice dynamically shared global polyphony pool (up to 8 voices per instrument) with per-instrument **Filter**, **Amp ADSR**, **Drive**, and **Chorus / Delay / Reverb** sends:
-1. **2-Op FM (`FM2`)**: Operator A & B with 3 algorithms (`[A][B]`, `[B]>[A]`, `[A]>[B]`), `0.00`–`24.00` frequency ratios, feedback, and per-operator ADSR envelopes.
-2. **Phase Distortion (`PD`)**: 8 classic waveforms (`Saw`, `Square`, `Pulse`, `Double Sine`, `Saw-Pulse`, `Resonance I/II/III`) with dual-line combinations (`Line 1`, `Line 2`, `Line 2 > Line 1`).
-3. **4-Octave SD Card WAV Sampler (`SMP`)**: 48 keys (`C3`–`B6`) per sampler instance with direct SD `.WAV` streaming, live audio-input sample recording (auto-threshold or manual), and 4 trigger modes (`STOP`, `ONCE`, `REP`, `REPTHRU`).
-4. **Noise Texture Drone (`NTD`)**: 3-section atmospheric synth (`DRONE OSC`, `NOISE BED`, `CRACKLE & MOD`) with `Gate`, `Latch`, and `Auto` drone modes.
+32-voice dynamically shared global polyphony pool (up to 8 voices per instrument) with per-instrument **Amp** & **Filter ADSR**, **Drive**, **Chorus**, **Delay**, **Reverb** sends:
+1. **2-Op FM synth**: Operator A & B with 3 algorithms (`[A] [B]`, `[B]>[A]`, `[A]>[B]`), `0.00`–`24.00` frequency ratios, feedback, and per-operator ADSR envelopes.
+2. **Phase Distortion synth**: 8 waveforms (`Saw`, `Square`, `Pulse`, `Double Sine`, `Saw-Pulse`, `Resonance I/II/III`) with dual-line combinations (`Line 1`, `Line 2`, `Line 2 > Line 1`).
+3. **4-Octave SD Card WAV Sampler**: 48 keys (`C3`–`B6`) per sampler instance with direct SD `.WAV` streaming, live audio-input sample recording, and 4 trigger modes (`STOP`, `ONCE`, `REP`, `REPTHRU`).
+4. **Noise Texture Drone synth**: 3-section atmospheric synth (`DRONE OSC`, `NOISE BED`, `CRACKLE & MOD`) with `Gate`, `Latch`, and `Auto` drone modes.
 
 ### Master Effects, Mixing, & USB Connectivity
 - **Master Page**: 8-track Audio (`VOL`, `BAL`/`PAN`, `M`, `S`) and MIDI (`IN`, `OUT`, `M`, `S`) console strips plus a 5-slot Master FX chain (`CHOR -> DLAY -> D.FB -> RVRB -> TAPE -> COMP`) and Master `VOL`.
-- **Global & Per-Instrument MIDI CC Mapping**: Map any external MIDI CC (or routed MIDI track CC automation) to Transport, Track Mixer, Master FX, Navigation, or any Synthesizer/Sampler parameter with 1-touch **MIDI Learn** (`OPT + EDIT`).
+- **Global & Per-Instrument MIDI CC Mapping**: Map any external MIDI CC to Transport, Track Mixer, Master FX, Navigation, or any Synthesizer/Sampler parameter.
 - **Composite USB Device**: Simultaneous **USB Audio** (14-channel output: Master L/R + Tracks 1–4 Stereo + Tracks 5–8 Mono; 2-channel stereo input), **USB MIDI**, **USB Serial**, and **USB Mass Storage Drive** mode.
 
 ---
 
-## 3. 9-Page Spatial Navigation & Core Controls
+## 3. Navigation & Core Controls
 
-Hold **`SHIFT` + Directional Arrows** to navigate between pages:
-
-```text
-                        [ System Settings ]
-                                 ^
-                                 |
-      [ Song Settings ] <--- [  Main  ] ---> [ Instruments ] ---> [ Instrument Edit ] ---> [ Inst MIDI Map ]
-                                 |
-                                 v
-      [  Master Page  ] <--- [ Audio  ] ---> [    MIDI     ]
-```
+Hold **`SHIFT` + Directional Arrows** to navigate between pages
 
 | Shortcut | Action |
 |---|---|
@@ -107,7 +97,7 @@ Capstan stores all system settings, songs, projects, and presets inside `/Capsta
             └── *.WAV                 # Recorded sampler key audio files
 ```
 
-> **Note**: Songs use **manual save only** from the **Main (`SAVED SONGS`)** page (`[ SAVE ]`), ensuring experimental changes never overwrite a saved song unless explicitly saved.
+> **Note**: Songs use **manual save only** from the **Main (`SAVED SONGS`)** page (`[ SAVE ]`).
 
 ---
 
