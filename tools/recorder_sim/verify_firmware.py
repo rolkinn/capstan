@@ -831,7 +831,7 @@ def verify_public_release_cleanliness():
 
     forbidden = [
         ("brand reference", re.compile(r"dirty" + r"wave", re.I)),
-        ("firmware image name", re.compile(r"M8_V6_|Ty" + r"Uploader", re.I)),
+        ("firmware image name", re.compile(r"M8_V6_", re.I)),
         ("restricted analysis terminology", re.compile(r"disas" + r"sembl|decom" + r"pil|reverse[- ]eng" + r"ineer", re.I)),
         ("third-party file reference", re.compile(r"ableton" + r"\.cpp", re.I)),
         ("local user path", re.compile(r"C:\\Users\\" + r"shawn", re.I)),

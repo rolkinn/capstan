@@ -1,10 +1,25 @@
-# Capstan — 8-Track Audio + 8-Track MIDI Tape Recorder Firmware for M8 (`v1.0`)
+# Capstan — Audio + MIDI Tape Recorder Firmware for M8 (`v1.0`)
 
-**Capstan** is an open-source, linear tape-style **8-track audio recorder**, **8-track MIDI sequencer**, and **8-slot multi-engine synthesizer/sampler** firmware for the **M8 Model:01** (Teensy 4.0) and **M8 Model:02** (Teensy MicroMod).
+**Capstan** is an open-source, linear tape-style **4-stereo, 4-mono track audio recorder**, **8-track MIDI sequencer**, and **multi-engine synthesizer/sampler** firmware for the **M8 Model:01** (Teensy 4.0) and **M8 Model:02** (Teensy MicroMod).
 
 ---
 
-## 1. Key Features
+## 1. Installing Pre-Built Firmware (`.hex`)
+
+Release builds provide two firmware images:
+- **`M8_Capstan_v1.0_Model01.hex`** — for **M8 Model:01** (Teensy 4.0, 320×240 display)
+- **`M8_Capstan_v1.0_Model02.hex`** — for **M8 Model:02** (Teensy MicroMod, 480×320 display)
+
+To flash onto your hardware:
+1. Connect your M8 to your computer over USB and insert a formatted FAT32 or exFAT microSD card.
+2. Open **Teensy Loader** or **TyCommander**, select the `.hex` file matching your hardware model (`Model01` or `Model02`)
+3. Press the small reset button on the back of the M8 (or trigger bootloader mode)
+4. Allow the M8 and TyUploader to refresh, then upload.
+3. On first boot, Capstan automatically creates the `/Capstan` directory structure on the SD card without modifying any other folders on the card.
+
+---
+
+## 2. Key Features
 
 ### 8-Track Linear Audio Tape Recorder (`44.1 kHz / 16-Bit`)
 - **4 Stereo + 4 Mono Audio Tracks (`A1`–`A8`)**: Up to **666 seconds** (11 minutes, 6 seconds) of uncompressed 44.1 kHz 16-bit PCM audio per track streamed directly to and from the SD card.
@@ -33,19 +48,6 @@
 - **Master Page**: 8-track Audio (`VOL`, `BAL`/`PAN`, `M`, `S`) and MIDI (`IN`, `OUT`, `M`, `S`) console strips plus a 5-slot Master FX chain (`CHOR -> DLAY -> D.FB -> RVRB -> TAPE -> COMP`) and Master `VOL`.
 - **Global & Per-Instrument MIDI CC Mapping**: Map any external MIDI CC (or routed MIDI track CC automation) to Transport, Track Mixer, Master FX, Navigation, or any Synthesizer/Sampler parameter with 1-touch **MIDI Learn** (`OPT + EDIT`).
 - **Composite USB Device**: Simultaneous **USB Audio** (14-channel output: Master L/R + Tracks 1–4 Stereo + Tracks 5–8 Mono; 2-channel stereo input), **USB MIDI**, **USB Serial**, and **USB Mass Storage Drive** mode.
-
----
-
-## 2. Installing Pre-Built Firmware (`.hex`)
-
-Release builds provide two firmware images:
-- **`M8_Capstan_v1.0_Model01.hex`** — for **M8 Model:01** (Teensy 4.0, 320×240 display)
-- **`M8_Capstan_v1.0_Model02.hex`** — for **M8 Model:02** (Teensy MicroMod, 480×320 display)
-
-To flash onto your hardware:
-1. Connect your M8 to your computer over USB and insert a formatted FAT32 or exFAT microSD card.
-2. Open **Teensy Loader** or **TyCommander**, select the `.hex` file matching your hardware model (`Model01` or `Model02`), press the physical bootloader button (or trigger bootloader mode), and upload.
-3. On first boot, Capstan automatically creates the `/Capstan` directory structure on the SD card without modifying any other folders on the card.
 
 ---
 
