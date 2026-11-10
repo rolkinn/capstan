@@ -1,0 +1,14 @@
+build/
+dist/
+.pio/
+.vscode/
+.agents/
+GEMINI.md
+*.hex
+*.elf
+*.bin
+*.o
+*.d
+*.a
+__pycache__/
+*.pyc
