@@ -15,7 +15,7 @@ static int songSetCol = 0;
 static int songSetScroll = 0;
 
 FLASHMEM static int songSettingColCount(int row) {
-  if (row == PSET_REC_SRC) return 3;
+  if (row == PSET_REC_SRC) return 2;
   if (row == PSET_MONITOR) return 2;
   return 1;
 }
@@ -105,7 +105,7 @@ FLASHMEM static void songSettingsDrawPage(bool full) {
 
   const SongSettings &ps = songSettings();
   PROGMEM static const char *const LABELS[PSET_COUNT] = {
-    "REC LINE/USB/INSTR",
+    "RECORD LINE/USB",
     "MONITOR LINE/USB",
     "REC TRIG THRESH",
     "MIDI CLOCK OUT",
@@ -123,17 +123,15 @@ FLASHMEM static void songSettingsDrawPage(bool full) {
     bool sel = (songSetRow == i);
 
     if (i == PSET_REC_SRC) {
-      const char *vals[3] = {
+      const char *vals[2] = {
         ps.recLineIn ? "ON" : "OFF",
-        ps.recUsbIn ? "ON" : "OFF",
-        ps.recInternalInstr ? "ON" : "OFF"
+        ps.recUsbIn ? "ON" : "OFF"
       };
-      const bool offs[3] = {
+      const bool offs[2] = {
         !ps.recLineIn,
-        !ps.recUsbIn,
-        !ps.recInternalInstr
+        !ps.recUsbIn
       };
-      drawMultiToggleSettingsRow(y, (uint32_t)i, LABELS[i], 3, vals, offs,
+      drawMultiToggleSettingsRow(y, (uint32_t)i, LABELS[i], 2, vals, offs,
                                  sel, songSetCol, prevSongSettingsKey[vis], full);
       keepStreaming();
       continue;
@@ -255,10 +253,9 @@ FLASHMEM static void songSettingsOnOptAdjust(int dx, int dy, int delta) {
   SongSettings &ps = songSettings();
   switch (songSetRow) {
     case PSET_REC_SRC: {
-      int col = constrain(songSetCol, 0, 2);
+      int col = constrain(songSetCol, 0, 1);
       if (col == 0) ps.recLineIn = !ps.recLineIn;
-      else if (col == 1) ps.recUsbIn = !ps.recUsbIn;
-      else ps.recInternalInstr = !ps.recInternalInstr;
+      else ps.recUsbIn = !ps.recUsbIn;
       applySongSettings();
       saveSessionWhenIdle();
       break;
@@ -386,10 +383,9 @@ FLASHMEM static void songSettingsOnResetParam() {
   SongSettings &ps = songSettings();
   switch (songSetRow) {
     case PSET_REC_SRC: {
-      int col = constrain(songSetCol, 0, 2);
+      int col = constrain(songSetCol, 0, 1);
       if (col == 0) ps.recLineIn = true;
-      else if (col == 1) ps.recUsbIn = false;
-      else ps.recInternalInstr = true;
+      else ps.recUsbIn = false;
       applySongSettings();
       break;
     }

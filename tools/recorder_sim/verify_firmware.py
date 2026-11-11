@@ -250,7 +250,7 @@ def verify_dma_and_storage_source_invariants():
     )
     check(
         all(lbl in page_song_cpp for lbl in (
-            '"REC LINE/USB/INSTR"',
+            '"RECORD LINE/USB"',
             '"MONITOR LINE/USB"',
             '"REC TRIG THRESH"',
             '"MIDI CLOCK OUT"',
@@ -260,9 +260,11 @@ def verify_dma_and_storage_source_invariants():
             '"MANAGE"',
             '"ARM"',
         ))
+        and "if (row == PSET_REC_SRC) return 2;" in page_song_cpp
         and "MIN_THRESH_DB = -80" in config_h
         and "DEFAULT_THRESH_DB = -60" in config_h
         and all(removed not in page_song_cpp for removed in (
+            '"REC LINE/USB/INSTR"',
             '"AUDIO INPUT SOURCE"',
             '"LINE INPUT MONITOR"',
             '"USB INPUT MONITOR"',
@@ -275,7 +277,7 @@ def verify_dma_and_storage_source_invariants():
             '"PUNCH-IN POINT"',
             '"PUNCH-OUT POINT"',
         )),
-        "page_song_settings.cpp exposes the song settings (REC LINE/USB/INSTR, MONITOR LINE/USB with ON/ARM/OFF, REC TRIG THRESH -80dB, MIDI CLOCK OUT/SOURCE/THRU, SONG INSTRUMENTS, EXPORT MIDI TRACKS, EXPORT MASTER OUT)",
+        "page_song_settings.cpp exposes the song settings (RECORD LINE/USB, MONITOR LINE/USB with ON/ARM/OFF, REC TRIG THRESH -80dB, MIDI CLOCK OUT/SOURCE/THRU, SONG INSTRUMENTS, EXPORT MIDI TRACKS, EXPORT MASTER OUT)",
     )
     check(
         '"SCREEN BRIGHTNESS"' in page_sys_cpp
@@ -510,23 +512,32 @@ def verify_dma_and_storage_source_invariants():
         "Modular Track Edit Mode (SET PUNCH REGION, MIDI QUANTIZE 4th/8th/16th/32nd, COPY, CUT, PASTE, DUPL, DEL) with +/-2 bar auto-adjust and SD temp clipboard is configured",
     )
 
-    # 1m. Audio Track Resampling ("RES", Pre/Post Master FX modal, mute during recording & unmute on stop) invariants
+    # 1m. Per-Track Audio Recording Source ("SRC" split above "TRG": SRC, LIN, USB, M01-M08, A01-A08, PRE, PST + auto-mute) invariants
     engine_h = (SRC_DIR / "engine.h").read_text(encoding="utf-8")
     page_audio_cpp = (SRC_DIR / "page_audio.cpp").read_text(encoding="utf-8")
     check(
-        "Resample = 2" in engine_h
-        and "resamplePostFx" in engine_h
+        "enum class AudioRecSrc : uint8_t" in engine_h
+        and "isAutoMuteRecSrc(" in engine_h
+        and "Resample = 2" not in engine_h
+        and "AUD_CELL_SRC  = 1" in app_h
+        and "AUD_CELL_TRIG = 2" in app_h
+        and "AUD_CELL_COUNT = 6" in app_h
+        and all(lbl in app_cpp for lbl in ('"SRC"', '"LIN"', '"USB"', '"M01"', '"M08"', '"A01"', '"A08"', '"PRE"', '"PST"'))
+        and "stepAudioRecSrc(" in app_cpp
+        and "drawTrackSrcBadgeCell(" in ui_cpp
+        and "drawTrackSrcBadgeCell(" in page_audio_cpp
+        and "drawTrackTrigBadgeCell(" in page_audio_cpp
+        and '"RES"' not in ui_cpp
+        and "drawResampleModal" not in ui_cpp
+        and "openResampleModal" not in app_cpp
+        and "TrigMode::Resample" not in page_audio_cpp
         and "preFxL" in engine_cpp
         and "postFxL" in engine_cpp
-        and '"RES"' in ui_cpp
-        and '"PRE-MASTER FX"' in ui_cpp
-        and '"POST-MASTER FX"' in ui_cpp
-        and "drawResampleModal(" in ui_cpp
-        and "openResampleModal(" in app_cpp
-        and "resampleModalConfirm(" in app_cpp
-        and "TrigMode::Resample" in page_audio_cpp
-        and "TrigMode::Resample" in storage_cpp,
-        "Audio track Resampling ('RES' trigger option, Pre/Post-Master FX modal, mute while recording & unmute on stop) is configured",
+        and "midiCapL" in engine_cpp
+        and "srcAudioL" in engine_cpp
+        and "recording.autoMute" in engine_cpp
+        and "recording.autoMute" in storage_cpp,
+        "Per-track Audio Recording Source ('SRC' split above 'TRG': SRC/LIN/USB/M01..M08/A01..A08/PRE/PST with isolated MIDI/Audio paths & auto-mute) is configured",
     )
 
     # 1n. Master Page 8-Track Strips (Audio V/BAL/PAN/M/S & MIDI IN/OUT/M/S + double-tap OPT toggle + bottom FX/VOL)

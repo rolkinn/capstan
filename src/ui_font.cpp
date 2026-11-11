@@ -1286,14 +1286,14 @@ struct GlyphLut {
 };
 PROGMEM static constexpr GlyphLut GLYPH_LUT{};
 
-const Glyph *glyphFor(char c) {
+FLASHMEM const Glyph *glyphFor(char c) {
   uint8_t uc = (uint8_t)c;
   if (uc >= 128) return nullptr;
   int8_t idx = GLYPH_LUT.idx[uc];
   return (idx >= 0) ? &GLYPHS[idx] : nullptr;
 }
 
-int textWidth(const char *text) {
+FLASHMEM int textWidth(const char *text) {
   int w = 0;
   for (const char *p = text; *p; p++)
     if (const Glyph *g = glyphFor(*p))

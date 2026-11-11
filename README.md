@@ -61,11 +61,11 @@ To flash onto your hardware:
 
 | Keys | Action |
 |---|---|
-| `SHIFT + UP / DOWN / LEFT / RIGHT` | Navigate between pages in the spatial map.<br>**NOTE:** When on `Audio` & `MIDI` pages, cursor first navigates to top timeline or bottom transport bars before moving to other pages above/below |
+| `SHIFT + UP/DOWN/LEFT/RIGHT` | Navigate between pages in the spatial map.<br>**NOTE:** When on `Audio` & `MIDI` pages, cursor first navigates to top timeline or bottom transport bars before moving to other pages above/below |
 | in File browser, overlays, confirmations<br>- `OPT` | Cancel/exit |
 | `PLAY` | Start / Stop transport at current playhead position |
 | `SHIFT + PLAY` | Start transport from beginning |
-| `EDIT + UP / DOWN / LEFT / RIGHT` | Coarse/fine adjust selected parameter |
+| `EDIT + UP/DOWN/LEFT/RIGHT` | Coarse/fine adjust selected parameter |
 | `EDIT` | Toggle button, cycle option, or open modal/editor |
 | `OPT + EDIT` | Reset parameter to default |
 | on top timeline bar<br>- `EDIT+UP/DOWN/LEFT/RIGHT`<br>- `SHIFT+EDIT` | - Coarse/fine adjust selected time or beat.bar.8th.16th.32nd granularity<br>- Toggles seek to punch/loop start and end times |

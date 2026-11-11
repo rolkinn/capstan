@@ -12,7 +12,36 @@ namespace looper {
 enum class TrackState : uint8_t { Empty, Playing, Muted };
 enum class ArmMode : uint8_t { Off = 0, Record = 1, Overdub = 2 };
 enum class MonoInput : uint8_t { Left = 0, Right = 1, SumLR = 2 };
-enum class TrigMode : uint8_t { Manual = 0, Threshold = 1, Resample = 2 };
+enum class TrigMode : uint8_t { Manual = 0, Threshold = 1 };
+
+enum class AudioRecSrc : uint8_t {
+  Off          = 0,  // "SRC" — off / no recording of any audio
+  Line         = 1,  // "LIN" — analog Line-In audio
+  Usb          = 2,  // "USB" — USB-In audio
+  Midi1        = 3,  // "M01" — MIDI track 1 audio path
+  Midi2        = 4,  // "M02"
+  Midi3        = 5,  // "M03"
+  Midi4        = 6,  // "M04"
+  Midi5        = 7,  // "M05"
+  Midi6        = 8,  // "M06"
+  Midi7        = 9,  // "M07"
+  Midi8        = 10, // "M08" — MIDI track 8 audio path
+  Audio1       = 11, // "A01" — Audio track 1 output
+  Audio2       = 12, // "A02"
+  Audio3       = 13, // "A03"
+  Audio4       = 14, // "A04"
+  Audio5       = 15, // "A05"
+  Audio6       = 16, // "A06"
+  Audio7       = 17, // "A07"
+  Audio8       = 18, // "A08" — Audio track 8 output
+  ResamplePre  = 19, // "PRE" — Pre-Master FX mix bus
+  ResamplePost = 20, // "PST" — Post-Master FX mix bus
+  Count        = 21
+};
+
+constexpr bool isAutoMuteRecSrc(AudioRecSrc s) {
+  return s >= AudioRecSrc::Midi1 && s <= AudioRecSrc::ResamplePost;
+}
 enum class TransportMode : uint8_t { Stopped = 0, WaitThreshold = 1, CountIn = 2, Running = 3 };
 enum class ClockSource : uint8_t {
   Internal     = 0,
@@ -58,6 +87,7 @@ struct Track {
   volatile ArmMode armMode = ArmMode::Off;
   volatile MonoInput monoInput = MonoInput::Left;
   volatile bool solo = false;
+  volatile AudioRecSrc recSrc = AudioRecSrc::Off;
   TrigMode trigMode = TrigMode::Manual;
   int8_t threshDb = DEFAULT_THRESH_DB;             // -60 .. -6 dB
 
@@ -132,8 +162,8 @@ struct Recording {
   volatile Mode mode = Idle;
   volatile int track = -1;                         // 0..7, or -1 if no audio track armed
   volatile bool overdub = false;                   // true = Sound-on-Sound mix; false = Replace
-  volatile bool resample = false;                  // true = record Master Audio Out instead of input source
-  volatile bool resamplePostFx = true;             // true = Post-Master FX, false = Pre-Master FX
+  volatile AudioRecSrc src = AudioRecSrc::Off;     // per-track audio recording source
+  volatile bool autoMute = false;                  // true = temporarily mute track while recording (M01..PST)
   volatile bool reverse = false;                   // true = recording in reverse (-1.00x)
   volatile MonoInput monoInput = MonoInput::Left;  // for mono tracks (4..7): Left (T), Right (R), or SumLR
   volatile bool activeInWindow = false;            // ISR: currently inside record/punch window

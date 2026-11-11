@@ -1110,31 +1110,6 @@ FLASHMEM void pollKeys() {
     return;
   }
 
-  // Modal Resample Pre/Post Master FX Overlay input handling
-  if (isResampleModalOpen()) {
-    uint8_t activeDir = pollDirectionalRepeat(pressed, now, ms, 85);
-    if (activeDir) {
-      int step = ((activeDir & (BTN_DOWN | BTN_RIGHT)) ? 1 : 0) -
-                 ((activeDir & (BTN_UP | BTN_LEFT)) ? 1 : 0);
-      if (step != 0) {
-        resampleModalMove(step);
-      }
-    }
-    if (pressed & BTN_EDIT) {
-      resampleModalConfirm();
-      editUsedAsModifier = true;
-    } else if (released & BTN_PLAY) {
-      resampleModalConfirm();
-      playUsedAsModifier = true;
-    } else if (pressed & BTN_OPT) {
-      closeResampleModal(true);
-      optUsedAsModifier = true;
-      lastOptTapMs = 0;
-    }
-    prevKeys = now;
-    return;
-  }
-
   // Modal Clear Track Recording & Quick Transport/Punch/Loop Overlay input handling
   if (isClearTrackModalOpen() || isClearTrackModalRevealing()) {
     uint8_t activeDir = pollDirectionalRepeat(pressed, now, ms, 85);
@@ -1618,7 +1593,7 @@ static NavCursorSnapshot navSnapshot = {};
 FLASHMEM uint32_t inputCurrentRepeatIntervalMs() {
   if (isSamplerKeyModalOpen() || isInstSaveToModalOpen() ||
       (isSysPresetsModalOpen() && isSysPresetDeleteConfirmOpen()) ||
-      isUsbSavePromptModalOpen() || isResampleModalOpen() || isClearTrackModalOpen()) {
+      isUsbSavePromptModalOpen() || isClearTrackModalOpen()) {
     return 85u;
   }
   if (isSaveKeyboardOpen() || isSamplerBrowserOpen() || isInstBrowserOpen() ||
@@ -1835,15 +1810,6 @@ FLASHMEM void inputTriggerNav(uint8_t dirBit, bool withShift) {
     return;
   }
 
-  if (isResampleModalOpen()) {
-    if (!withShift) {
-      int step = ((dirBit & (BTN_DOWN | BTN_RIGHT)) ? 1 : 0) -
-                 ((dirBit & (BTN_UP | BTN_LEFT)) ? 1 : 0);
-      if (step != 0) resampleModalMove(step);
-    }
-    return;
-  }
-
   if (isClearTrackModalOpen() || isClearTrackModalRevealing()) {
     if (!withShift) {
       int dx = ((dirBit & BTN_RIGHT) ? 1 : 0) - ((dirBit & BTN_LEFT) ? 1 : 0);
@@ -1954,7 +1920,7 @@ FLASHMEM bool inputStartMidiEditHoldAction() {
   if (!isSaveKeyboardOpen() && !isSamplerKeyModalOpen() && !isSamplerBrowserOpen() &&
       !isInstBrowserOpen() && !isInstSaveToModalOpen() && !isSysPresetsModalOpen() &&
       !isSysProjectsModalOpen() && !isSysMidiMapModalOpen() && !isUsbSavePromptModalOpen() &&
-      !isTypePresetModalOpen() && !isResampleModalOpen() && !isClearTrackModalOpen() &&
+      !isTypePresetModalOpen() && !isClearTrackModalOpen() &&
       !isMidiClipBrowserOpen() && !trackEditIsModalOpen() &&
       trackEditPhase() != TrackEditPhase::DuplReveal && !isMidiNoteEditorOpen()) {
     if (currentPage() == Page::InstrumentEdit &&
@@ -1994,7 +1960,7 @@ FLASHMEM void inputTriggerMidiOptEdit() {
 
   if (isSaveKeyboardOpen() || isSamplerKeyModalOpen() || isSamplerBrowserOpen() ||
       isInstBrowserOpen() || isInstSaveToModalOpen() || isSysPresetsModalOpen() ||
-      isUsbSavePromptModalOpen() || isTypePresetModalOpen() || isResampleModalOpen() ||
+      isUsbSavePromptModalOpen() || isTypePresetModalOpen() ||
       isClearTrackModalOpen() || isMidiClipBrowserOpen() || trackEditIsModalOpen() ||
       trackEditPhase() == TrackEditPhase::DuplReveal) {
     return;
@@ -2109,11 +2075,6 @@ FLASHMEM void inputTriggerMidiEditTap() {
     if (!shiftHeld) {
       confirmTypePresetSelection();
     }
-    return;
-  }
-
-  if (isResampleModalOpen()) {
-    resampleModalConfirm();
     return;
   }
 

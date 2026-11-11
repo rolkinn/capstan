@@ -185,13 +185,6 @@ int saveKeyboardCol = 0;
 static bool saveKeyboardActive = false;
 static KeyboardTarget kbTarget = KeyboardTarget::Song;
 
-static bool resampleModalActive = false;
-static int resampleModalCursorIdx = 0; // 0 = PRE-MASTER FX, 1 = POST-MASTER FX
-static int resampleModalTrackIdx = 0;
-static bool resampleModalStartTransport = true;
-static bool resampleModalUseCountIn = true;
-static bool resamplePostFxChoice = false;
-
 static bool clearTrackModalActive = false;
 static bool clearTrackModalReveal = false;
 static uint32_t clearTrackModalRevealUntilMs = 0;
@@ -229,7 +222,6 @@ FLASHMEM void setPage(Page p) {
     midiRememberTrackCursor();
   }
   saveKeyboardActive = false;
-  resampleModalActive = false;
   clearTrackModalActive = false;
   clearTrackModalReveal = false;
   instSaveToModalActive = false;
@@ -273,7 +265,6 @@ FLASHMEM KeyboardTarget saveKeyboardTarget() {
 
 FLASHMEM static void openKeyboardModal(KeyboardTarget target, const char *initialText, bool startInGrid) {
   deleteConfirmPending = false;
-  resampleModalActive = false;
   instSaveToModalActive = false;
   closeSamplerBrowser();
   closeSamplerKeyModal();
@@ -302,7 +293,6 @@ FLASHMEM void openInstrumentKeyboard(int instIdx, bool startInGrid) {
 
 FLASHMEM void openProjectKeyboard(bool isRename, const char *initialText, bool startInGrid) {
   deleteConfirmPending = false;
-  resampleModalActive = false;
   instSaveToModalActive = false;
   closeSamplerBrowser();
   closeSamplerKeyModal();
@@ -324,22 +314,6 @@ FLASHMEM void closeSaveKeyboard() {
   uiForceRedraw();
 }
 
-FLASHMEM bool isResampleModalOpen() {
-  return resampleModalActive;
-}
-
-FLASHMEM int resampleModalCursor() {
-  return resampleModalCursorIdx;
-}
-
-FLASHMEM int resampleModalTrack() {
-  return resampleModalTrackIdx;
-}
-
-FLASHMEM bool isResamplePostFx() {
-  return resamplePostFxChoice;
-}
-
 FLASHMEM static void startTransportConfirmed(bool useCountInAndThresh) {
   if (anyTrackArmed()) {
     appEnsureValidRecordingSpeed();
@@ -348,7 +322,9 @@ FLASHMEM static void startTransportConfirmed(bool useCountInAndThresh) {
   bool waitMidi = false;
   if (useCountInAndThresh) {
     for (int t = 0; t < NUM_AUDIO_TRACKS; t++) {
-      if (tracks[t].armMode != ArmMode::Off && tracks[t].trigMode == TrigMode::Threshold) {
+      if (tracks[t].armMode != ArmMode::Off &&
+          tracks[t].recSrc != AudioRecSrc::Off &&
+          tracks[t].trigMode == TrigMode::Threshold) {
         waitAudio = true;
         break;
       }
@@ -364,54 +340,6 @@ FLASHMEM static void startTransportConfirmed(bool useCountInAndThresh) {
   }
   bool useCountIn = useCountInAndThresh && anyTrackArmed() && !waitAudio && !waitMidi && (songCfg.countInBeats > 0);
   storageStartTransport(useCountIn, waitAudio, waitMidi);
-}
-
-FLASHMEM void openResampleModal(int track, bool startTransportOnConfirm, bool useCountInAndThresh) {
-  deleteConfirmPending = false;
-  saveKeyboardActive = false;
-  resampleModalTrackIdx = constrain(track, 0, NUM_AUDIO_TRACKS - 1);
-  resampleModalStartTransport = startTransportOnConfirm;
-  resampleModalUseCountIn = useCountInAndThresh;
-  resampleModalCursorIdx = resamplePostFxChoice ? 1 : 0;
-  resampleModalActive = true;
-  inputSwallowModalKeys();
-  uiForceRedraw();
-}
-
-FLASHMEM void closeResampleModal(bool cancelled) {
-  if (!resampleModalActive) return;
-  bool wasRunningStart = !resampleModalStartTransport;
-  int trk = resampleModalTrackIdx;
-  resampleModalActive = false;
-  if (cancelled && wasRunningStart && trk >= 0 && trk < NUM_AUDIO_TRACKS) {
-    tracks[trk].armMode = ArmMode::Off;
-    storageSyncArmedAudioTrack();
-    updateMetronomeState();
-  }
-  inputSwallowModalKeys();
-  uiForceRedraw();
-}
-
-FLASHMEM void resampleModalMove(int delta) {
-  if (!resampleModalActive || delta == 0) return;
-  resampleModalCursorIdx = (resampleModalCursorIdx + delta + 2) % 2;
-  uiForceRedraw();
-}
-
-FLASHMEM void resampleModalConfirm() {
-  if (!resampleModalActive) return;
-  resamplePostFxChoice = (resampleModalCursorIdx == 1);
-  bool doStart = resampleModalStartTransport;
-  bool useCi = resampleModalUseCountIn;
-  resampleModalActive = false;
-  inputSwallowModalKeys();
-  if (doStart) {
-    startTransportConfirmed(useCi);
-  } else {
-    storageSyncArmedAudioTrack();
-    updateMetronomeState();
-  }
-  uiForceRedraw();
 }
 
 FLASHMEM bool isClearTrackModalOpen() {
@@ -506,7 +434,6 @@ FLASHMEM static int clearTrackModalRowCols(int row, Page pg) {
 FLASHMEM void openClearTrackModal(Page page, int track) {
   deleteConfirmPending = false;
   saveKeyboardActive = false;
-  resampleModalActive = false;
   clearTrackModalPageVal = page;
   clearTrackModalTrackIdx = constrain(track, 0, TRACK_ROWS - 1);
   clearTrackModalRowIdx = 0;
@@ -795,7 +722,7 @@ FLASHMEM void followTempo(uint32_t spb, float shownBpm) {
 
 FLASHMEM bool anyAudioTrackArmed() {
   for (int t = 0; t < NUM_AUDIO_TRACKS; t++) {
-    if (tracks[t].armMode != ArmMode::Off) return true;
+    if (tracks[t].armMode != ArmMode::Off && tracks[t].recSrc != AudioRecSrc::Off) return true;
   }
   return false;
 }
@@ -813,7 +740,6 @@ FLASHMEM bool anyTrackArmed() {
 
 FLASHMEM void armAudioTrack(int t, ArmMode mode) {
   if (t < 0 || t >= NUM_AUDIO_TRACKS) return;
-  ArmMode prevMode = tracks[t].armMode;
   if (mode != ArmMode::Off) {
     // Only one audio track records at a time
     for (int i = 0; i < NUM_AUDIO_TRACKS; i++) {
@@ -823,17 +749,77 @@ FLASHMEM void armAudioTrack(int t, ArmMode mode) {
     lastArmedIsMidi = false;
   }
   tracks[t].armMode = mode;
-  if (mode != ArmMode::Off) {
+  if (mode != ArmMode::Off && tracks[t].recSrc != AudioRecSrc::Off) {
     appEnsureValidRecordingSpeed();
-  }
-  if (transport.mode != TransportMode::Stopped && mode != ArmMode::Off &&
-      prevMode == ArmMode::Off && tracks[t].trigMode == TrigMode::Resample) {
-    openResampleModal(t, false, false);
-    return;
   }
   storageSyncArmedAudioTrack();
   updateMetronomeState();
   saveSessionWhenIdle();
+}
+
+PROGMEM static const char *const AUDIO_REC_SRC_LABELS[(int)AudioRecSrc::Count] = {
+  "SRC", "LIN", "USB",
+  "M01", "M02", "M03", "M04", "M05", "M06", "M07", "M08",
+  "A01", "A02", "A03", "A04", "A05", "A06", "A07", "A08",
+  "PRE", "PST"
+};
+
+FLASHMEM const char *audioRecSrcLabel(AudioRecSrc s) {
+  int idx = constrain((int)s, 0, (int)AudioRecSrc::Count - 1);
+  return AUDIO_REC_SRC_LABELS[idx];
+}
+
+FLASHMEM AudioRecSrc stepAudioRecSrc(int trackIdx, AudioRecSrc cur, int dy, int delta, bool wrap) {
+  const int selfAudio = (trackIdx >= 0 && trackIdx < NUM_AUDIO_TRACKS)
+                            ? ((int)AudioRecSrc::Audio1 + trackIdx)
+                            : -1;
+  const int defMidi = (int)AudioRecSrc::Midi1 + constrain(trackIdx, 0, NUM_MIDI_TRACKS - 1);
+  const int defAudio = (trackIdx == 0) ? (int)AudioRecSrc::Audio2 : (int)AudioRecSrc::Audio1;
+  const int maxIdx = (int)AudioRecSrc::Count - 1;
+  int c = constrain((int)cur, 0, maxIdx);
+
+  if (dy != 0) {
+    int next = c;
+    if (dy > 0) {
+      if (c == (int)AudioRecSrc::Off) next = (int)AudioRecSrc::Line;
+      else if (c == (int)AudioRecSrc::Line) next = (int)AudioRecSrc::Usb;
+      else if (c == (int)AudioRecSrc::Usb) next = defMidi;
+      else if (c <= (int)AudioRecSrc::Midi8) next = defAudio;
+      else if (c <= (int)AudioRecSrc::Audio8) next = (int)AudioRecSrc::ResamplePre;
+      else next = (int)AudioRecSrc::ResamplePost;
+    } else {
+      if (c == (int)AudioRecSrc::ResamplePost) next = (int)AudioRecSrc::ResamplePre;
+      else if (c == (int)AudioRecSrc::ResamplePre) next = defAudio;
+      else if (c >= (int)AudioRecSrc::Audio1) next = defMidi;
+      else if (c >= (int)AudioRecSrc::Midi1) next = (int)AudioRecSrc::Usb;
+      else if (c == (int)AudioRecSrc::Usb) next = (int)AudioRecSrc::Line;
+      else next = (int)AudioRecSrc::Off;
+    }
+    return (AudioRecSrc)constrain(next, 0, maxIdx);
+  }
+
+  if (delta == 0) return (AudioRecSrc)c;
+  int step = (delta > 0) ? 1 : -1;
+  int count = abs(delta);
+  for (int i = 0; i < count; i++) {
+    int next = c + step;
+    if (wrap) {
+      if (next > maxIdx) next = 0;
+      else if (next < 0) next = maxIdx;
+      if (next == selfAudio) {
+        next += step;
+        if (next > maxIdx) next = 0;
+        else if (next < 0) next = maxIdx;
+      }
+      c = next;
+    } else {
+      if (next == selfAudio) next += step;
+      if (next >= 0 && next <= maxIdx) {
+        c = next;
+      }
+    }
+  }
+  return (AudioRecSrc)c;
 }
 
 FLASHMEM const char *audioTrackArmTag(int t) {
@@ -1030,14 +1016,6 @@ FLASHMEM void toggleCursorOrLastArmedTrack() {
 }
 
 FLASHMEM void appStartTransport(bool useCountInAndThresh) {
-  if (useCountInAndThresh) {
-    for (int t = 0; t < NUM_AUDIO_TRACKS; t++) {
-      if (tracks[t].armMode != ArmMode::Off && tracks[t].trigMode == TrigMode::Resample) {
-        openResampleModal(t, true, useCountInAndThresh);
-        return;
-      }
-    }
-  }
   startTransportConfirmed(useCountInAndThresh);
 }
 

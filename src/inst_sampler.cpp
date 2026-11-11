@@ -423,9 +423,10 @@ FLASHMEM static void fillSamplerStream(SamplerStream &st, int maxPasses, bool fo
   uint8_t *rawBuf = reinterpret_cast<uint8_t *>(storageSharedChunkBuf());
   const uint32_t maxFramesPerRead = max(1u, (uint32_t)(SAMPLER_READ_BUF_BYTES / st.bytesPerFrame));
 
+  const uint32_t minFree = forceHeld ? 32u : 128u;
   for (int pass = 0; pass < maxPasses; pass++) {
     uint32_t queued = st.head - st.tail;
-    if (queued + 32 > SAMPLER_RING_FRAMES) break;
+    if (queued + minFree > SAMPLER_RING_FRAMES) break;
 
     if (st.fileFrame >= st.totalFrames) {
       const FmPatch &p = fmSynthPatch(st.instIdx);
@@ -592,33 +593,32 @@ bool samplerPrepareVoiceOn(int instIdx, uint8_t note, uint32_t &outStreamIdx, ui
   // If this (instIdx, keyIdx) is already cached and its initial frames [0..head) are intact in st.ring,
   // claim or rewind the stream in-place in < 1 us without touching SdFat or chunk.
   uint32_t irq = saveIrq();
-  if (fillingStreamIdx < 0) {
-    for (int s = 0; s < NUM_SAMPLER_STREAMS; s++) {
-      SamplerStream &st = samplerStreams[s];
-      if (st.cachedInstIdx == instIdx &&
-          st.cachedKeyIdx == keyIdx &&
-          st.totalFrames > 0 &&
-          st.head > 0 &&
-          st.head <= SAMPLER_RING_FRAMES &&
-          st.fileFrame == st.head) {
-        uint32_t gen = (streamGenCounter & 0xFFFFu) + 1u;
-        streamGenCounter = gen;
-        st.active = false;
-        st.pendingVoice = true;
-        st.prewarmed = false;
-        st.instIdx = (uint8_t)instIdx;
-        st.keyIdx = (uint8_t)keyIdx;
-        st.generation = gen;
-        st.tail = 0;
-        st.fracFp = 0;
-        st.lastL = 0;
-        st.lastR = 0;
-        st.eofReached = (st.fileFrame >= st.totalFrames);
-        restoreIrq(irq);
-        outStreamIdx = (uint32_t)s;
-        outStreamGen = gen;
-        return true;
-      }
+  for (int s = 0; s < NUM_SAMPLER_STREAMS; s++) {
+    if (s == (int)fillingStreamIdx) continue;
+    SamplerStream &st = samplerStreams[s];
+    if (st.cachedInstIdx == instIdx &&
+        st.cachedKeyIdx == keyIdx &&
+        st.totalFrames > 0 &&
+        st.head > 0 &&
+        st.head <= SAMPLER_RING_FRAMES &&
+        st.fileFrame == st.head) {
+      uint32_t gen = (streamGenCounter & 0xFFFFu) + 1u;
+      streamGenCounter = gen;
+      st.active = false;
+      st.pendingVoice = true;
+      st.prewarmed = false;
+      st.instIdx = (uint8_t)instIdx;
+      st.keyIdx = (uint8_t)keyIdx;
+      st.generation = gen;
+      st.tail = 0;
+      st.fracFp = 0;
+      st.lastL = 0;
+      st.lastR = 0;
+      st.eofReached = (st.fileFrame >= st.totalFrames);
+      restoreIrq(irq);
+      outStreamIdx = (uint32_t)s;
+      outStreamGen = gen;
+      return true;
     }
   }
   restoreIrq(irq);
@@ -759,7 +759,7 @@ FLASHMEM void samplerServiceStreams() {
   }
 }
 
-FLASHMEM void samplerSilenceInst(int instIdx) {
+void samplerSilenceInst(int instIdx) {
   for (int s = 0; s < NUM_SAMPLER_STREAMS; s++) {
     if ((int)samplerStreams[s].instIdx == instIdx &&
         (samplerStreams[s].active || samplerStreams[s].pendingVoice)) {
@@ -769,7 +769,7 @@ FLASHMEM void samplerSilenceInst(int instIdx) {
   }
 }
 
-FLASHMEM void samplerStopAllStreams() {
+void samplerStopAllStreams() {
   for (int s = 0; s < NUM_SAMPLER_STREAMS; s++) {
     samplerStreams[s].active = false;
     samplerStreams[s].pendingVoice = false;

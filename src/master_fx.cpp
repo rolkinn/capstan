@@ -1,5 +1,6 @@
 // master_fx.cpp — Modular Master Effects Bus (Chorus -> Delay -> Reverb -> Tape -> Comp)
 #include "master_fx.h"
+#include "engine.h"
 #include <math.h>
 #include <string.h>
 
@@ -115,6 +116,8 @@ struct ChorusState {
   float lfoPhase = 0.0f;
   float lpStateL = 0.0f;
   float lpStateR = 0.0f;
+  float curWetMix = 0.0f;
+  float curModDepth = 0.0f;
   uint8_t curPct = 0;
   volatile bool enabled = false;
   volatile float wetMix = 0.0f;             // 0.0f (100% dry) .. 1.0f (100% wet)
@@ -128,12 +131,14 @@ static uint8_t masterChorPct = 0;
 static uint8_t instChorPct = 0;
 
 FLASHMEM static void resetChorusUnit(ChorusState &u) {
-  noInterrupts();
+  uint32_t irq = saveIrq();
   u.writeIdx = 0;
   u.lfoPhase = 0.0f;
   u.lpStateL = 0.0f;
   u.lpStateR = 0.0f;
-  interrupts();
+  u.curWetMix = u.wetMix;
+  u.curModDepth = u.modDepthSamples;
+  restoreIrq(irq);
 
   if (u.bufL) memset(u.bufL, 0, CHORUS_BUF_LEN * sizeof(int16_t));
   if (u.bufR) memset(u.bufR, 0, CHORUS_BUF_LEN * sizeof(int16_t));
@@ -144,14 +149,16 @@ FLASHMEM static void configureChorusUnit(ChorusState &u, uint8_t pct, bool clear
   u.curPct = pct;
   if (pct == 0) {
     bool wasEnabled = u.enabled;
-    noInterrupts();
+    uint32_t irq = saveIrq();
     u.enabled = false;
     u.wetMix = 0.0f;
+    u.curWetMix = 0.0f;
     u.lfoInc = 0.0f;
     u.modDepthSamples = 0.0f;
+    u.curModDepth = 0.0f;
     u.lpStateL = 0.0f;
     u.lpStateR = 0.0f;
-    interrupts();
+    restoreIrq(irq);
     if (wasEnabled && clearBuffers) {
       if (u.bufL) memset(u.bufL, 0, CHORUS_BUF_LEN * sizeof(int16_t));
       if (u.bufR) memset(u.bufR, 0, CHORUS_BUF_LEN * sizeof(int16_t));
@@ -166,21 +173,27 @@ FLASHMEM static void configureChorusUnit(ChorusState &u, uint8_t pct, bool clear
   float lfoStep = rateHz * (1.0f / (float)SAMPLE_RATE_HZ);
   float modSamples = depthMs * ((float)SAMPLE_RATE_HZ * 0.001f);
 
-  noInterrupts();
+  uint32_t irq = saveIrq();
+  if (!u.enabled) {
+    u.curWetMix = mix;
+    u.curModDepth = modSamples;
+  }
   u.wetMix = mix;
   u.lfoInc = lfoStep;
   u.modDepthSamples = modSamples;
   u.enabled = true;
-  interrupts();
+  restoreIrq(irq);
 }
 
 static inline void processChorusUnit(ChorusState &u, float &xL, float &xR) {
   u.lfoPhase += u.lfoInc;
   if (u.lfoPhase >= 1.0f) u.lfoPhase -= 1.0f;
+  u.curWetMix += 0.002f * (u.wetMix - u.curWetMix);
+  u.curModDepth += 0.002f * (u.modDepthSamples - u.curModDepth);
 
   // Quadrature stereo modulation (90-degree phase offset between Left and Right)
   const float baseDel = u.baseDelaySamples;
-  const float modExc = u.modDepthSamples;
+  const float modExc = u.curModDepth;
   float dL = baseDel + modExc * fastSin01(u.lfoPhase);
   float dR = baseDel + modExc * fastSin01(u.lfoPhase + 0.25f);
 
@@ -195,7 +208,7 @@ static inline void processChorusUnit(ChorusState &u, float &xL, float &xR) {
   u.lpStateL += 0.76f * (wetL - u.lpStateL);
   u.lpStateR += 0.76f * (wetR - u.lpStateR);
 
-  const float mix = u.wetMix;
+  const float mix = u.curWetMix;
   const float dryG = 1.0f - 0.25f * mix;
   const float wetG = 0.85f * mix;
   xL = dryG * xL + wetG * u.lpStateL;
@@ -243,6 +256,8 @@ struct DelayState {
   float wowPhase = 0.0f;
   float lpStateL = 0.0f, lpStateR = 0.0f;
   float hpStateL = 0.0f, hpStateR = 0.0f;
+  float curWetMix = 0.0f;
+  float curWowExc = 6.0f;
   uint8_t wetPct = 0;
   uint8_t fbPct = 0;
   volatile bool enabled = false;
@@ -288,12 +303,14 @@ static inline float warmDelaySaturate(float x, float drive, float invDrive, floa
 }
 
 FLASHMEM static void resetDelayUnit(DelayState &u) {
-  noInterrupts();
+  uint32_t irq = saveIrq();
   u.writeIdx = 0;
   u.wowPhase = 0.0f;
   u.lpStateL = u.lpStateR = 0.0f;
   u.hpStateL = u.hpStateR = 0.0f;
-  interrupts();
+  u.curWetMix = u.wetMix;
+  u.curWowExc = u.wowExcursion;
+  restoreIrq(irq);
 
   if (u.bufL) memset(u.bufL, 0, u.bufLen * sizeof(int16_t));
   if (u.bufR) memset(u.bufR, 0, u.bufLen * sizeof(int16_t));
@@ -318,7 +335,10 @@ FLASHMEM static void updateDelayUnitFeedback(DelayState &u, uint8_t fbPct) {
   float invDrive = 1.0f / drive;
   float asym = 0.010f + 0.018f * fbNorm;
 
-  noInterrupts();
+  uint32_t irq = saveIrq();
+  if (!u.enabled) {
+    u.curWowExc = wowExc;
+  }
   u.fbPct = fbPct;
   u.fbGain = fb;
   u.wowExcursion = wowExc;
@@ -327,7 +347,7 @@ FLASHMEM static void updateDelayUnitFeedback(DelayState &u, uint8_t fbPct) {
   u.satDrive = drive;
   u.satInvDrive = invDrive;
   u.satAsym = asym;
-  interrupts();
+  restoreIrq(irq);
 }
 
 FLASHMEM static void configureDelayUnit(DelayState &u, uint8_t pct, bool clearBuffers = true) {
@@ -335,12 +355,13 @@ FLASHMEM static void configureDelayUnit(DelayState &u, uint8_t pct, bool clearBu
   u.wetPct = pct;
   if (pct == 0) {
     bool wasEnabled = u.enabled;
-    noInterrupts();
+    uint32_t irq = saveIrq();
     u.enabled = false;
     u.wetMix = 0.0f;
+    u.curWetMix = 0.0f;
     u.lpStateL = u.lpStateR = 0.0f;
     u.hpStateL = u.hpStateR = 0.0f;
-    interrupts();
+    restoreIrq(irq);
     if (wasEnabled && clearBuffers) {
       if (u.bufL) memset(u.bufL, 0, u.bufLen * sizeof(int16_t));
       if (u.bufR) memset(u.bufR, 0, u.bufLen * sizeof(int16_t));
@@ -349,17 +370,23 @@ FLASHMEM static void configureDelayUnit(DelayState &u, uint8_t pct, bool clearBu
   }
 
   float mix = (float)pct * 0.01f;
-  noInterrupts();
+  uint32_t irq = saveIrq();
+  if (!u.enabled) {
+    u.curWetMix = mix;
+    u.curWowExc = u.wowExcursion;
+  }
   u.wetMix = mix;
   u.enabled = true;
-  interrupts();
+  restoreIrq(irq);
 }
 
 static inline void processDelayUnit(DelayState &u, float &xL, float &xR) {
   // Slow tape capstan wow (~0.75 Hz) with slight stereo phase offset
   u.wowPhase += (0.75f / (float)SAMPLE_RATE_HZ);
   if (u.wowPhase >= 1.0f) u.wowPhase -= 1.0f;
-  const float wowExc = u.wowExcursion;
+  u.curWetMix += 0.002f * (u.wetMix - u.curWetMix);
+  u.curWowExc += 0.002f * (u.wowExcursion - u.curWowExc);
+  const float wowExc = u.curWowExc;
   float dL = u.baseL + wowExc * fastSin01(u.wowPhase);
   float dR = u.baseR + wowExc * fastSin01(u.wowPhase + 0.2f);
 
@@ -394,7 +421,7 @@ static inline void processDelayUnit(DelayState &u, float &xL, float &xR) {
   u.bufR[u.writeIdx] = floatToDelayQ15(inR + fbR);
   if (--u.writeIdx < 0) u.writeIdx = u.bufLen - 1;
 
-  const float mix = u.wetMix;
+  const float mix = u.curWetMix;
   const float dryG = 1.0f - 0.12f * mix;
   const float wetG = 0.85f * mix;
   xL = dryG * xL + wetG * tapL;
@@ -461,6 +488,8 @@ struct ReverbState {
   float lpfL = 0.0f, lpfR = 0.0f;
   float outLpL = 0.0f, outLpR = 0.0f;
   float lfoPhase = 0.0f;
+  float curModExc = 0.0f;
+  float curMix = 0.0f;
   uint8_t curPct = 0;
   volatile bool enabled = false;
   volatile float feedback = 0.0f;
@@ -529,7 +558,7 @@ FLASHMEM static void clearReverbUnitBuffers(ReverbState &u) {
 }
 
 FLASHMEM static void resetReverbUnit(ReverbState &u) {
-  noInterrupts();
+  uint32_t irq = saveIrq();
   u.idx1aL = u.idx1bL = u.idx1cL = 0;
   u.idx2L = u.idx3L = 0;
   u.idx1aR = u.idx1bR = u.idx1cR = 0;
@@ -537,7 +566,9 @@ FLASHMEM static void resetReverbUnit(ReverbState &u) {
   u.lpfL = u.lpfR = 0.0f;
   u.outLpL = u.outLpR = 0.0f;
   u.lfoPhase = 0.0f;
-  interrupts();
+  u.curModExc = u.modExcursion;
+  u.curMix = u.mix;
+  restoreIrq(irq);
 
   clearReverbUnitBuffers(u);
 }
@@ -547,16 +578,18 @@ FLASHMEM static void configureReverbUnit(ReverbState &u, uint8_t pct, bool clear
   u.curPct = pct;
   if (pct == 0) {
     bool wasEnabled = u.enabled;
-    noInterrupts();
+    uint32_t irq = saveIrq();
     u.enabled = false;
     u.feedback = 0.0f;
     u.modExcursion = 0.0f;
+    u.curModExc = 0.0f;
     u.mix = 0.0f;
+    u.curMix = 0.0f;
     u.lpfL = 0.0f;
     u.lpfR = 0.0f;
     u.outLpL = 0.0f;
     u.outLpR = 0.0f;
-    interrupts();
+    restoreIrq(irq);
     if (wasEnabled && clearBuffers) {
       clearReverbUnitBuffers(u);
     }
@@ -578,21 +611,27 @@ FLASHMEM static void configureReverbUnit(ReverbState &u, uint8_t pct, bool clear
   float modExc = ((float)SAMPLE_RATE_HZ / 500.0f) * modDepth;
   float mix = 0.14f + 0.72f * fastExp2f(0.75f * fastLog2f(v));
 
-  noInterrupts();
+  uint32_t irq = saveIrq();
+  if (!u.enabled) {
+    u.curModExc = modExc;
+    u.curMix = mix;
+  }
   u.feedback = fb;
   u.dampAlpha = damp;
   u.inGain = inG;
   u.modExcursion = modExc;
   u.mix = mix;
   u.enabled = true;
-  interrupts();
+  restoreIrq(irq);
 }
 
 static inline void processReverbUnit(ReverbState &u, float &xL, float &xR) {
   u.lfoPhase += (0.85f / (float)SAMPLE_RATE_HZ);
   if (u.lfoPhase >= 1.0f) u.lfoPhase -= 1.0f;
-  float lfoModL = u.modExcursion * fastSin01(u.lfoPhase);
-  float lfoModR = u.modExcursion * fastSin01(u.lfoPhase + 0.25f);
+  u.curModExc += 0.002f * (u.modExcursion - u.curModExc);
+  u.curMix += 0.002f * (u.mix - u.curMix);
+  float lfoModL = u.curModExc * fastSin01(u.lfoPhase);
+  float lfoModR = u.curModExc * fastSin01(u.lfoPhase + 0.25f);
 
   float d2L = 2002.14f + lfoModL;
   int d2IntL = (int)d2L;
@@ -605,7 +644,7 @@ static inline void processReverbUnit(ReverbState &u, float &xL, float &xR) {
   const float fb = u.feedback;
   const float damp = u.dampAlpha;
   const float inG = u.inGain;
-  const float vMix = u.mix;
+  const float vMix = u.curMix;
   const float dryG = 1.0f - 0.18f * vMix;
   const float wetG = 1.25f * vMix;
 
@@ -712,6 +751,7 @@ static float tapeLpf1State[2] = {}, tapeLpf2State[2] = {};
 static uint8_t tapeModSubPhase = 0;
 static float tapeCachedAlpha[2] = {0.85f, 0.85f};
 static float tapeCachedDrop[2] = {1.0f, 1.0f};
+static float tapeSmoothDrop[2] = {1.0f, 1.0f};
 
 static volatile bool tapeEnabled = false;
 static volatile float tapeSatMix = 0.0f;
@@ -771,6 +811,7 @@ FLASHMEM static void resetTapeState() {
   tapeModSubPhase = 0;
   tapeCachedAlpha[0] = tapeCachedAlpha[1] = tapeBaseLpAlpha;
   tapeCachedDrop[0] = tapeCachedDrop[1] = 1.0f;
+  tapeSmoothDrop[0] = tapeSmoothDrop[1] = 1.0f;
   interrupts();
 
   memset(tapeWowBufL, 0, sizeof(tapeWowBufL));
@@ -812,6 +853,7 @@ FLASHMEM void setMasterTape(uint8_t pct) {
     tapeModSubPhase = 0;
     tapeCachedAlpha[0] = tapeCachedAlpha[1] = 0.85f;
     tapeCachedDrop[0] = tapeCachedDrop[1] = 1.0f;
+    tapeSmoothDrop[0] = tapeSmoothDrop[1] = 1.0f;
     interrupts();
     if (wasEnabled) {
       memset(tapeWowBufL, 0, sizeof(tapeWowBufL));
@@ -873,6 +915,7 @@ FLASHMEM void setMasterTape(uint8_t pct) {
   if (!tapeEnabled) {
     tapeCachedAlpha[0] = tapeCachedAlpha[1] = baseAlpha;
     tapeCachedDrop[0] = tapeCachedDrop[1] = 1.0f;
+    tapeSmoothDrop[0] = tapeSmoothDrop[1] = 1.0f;
   }
   tapeEnabled = true;
   interrupts();
@@ -953,11 +996,12 @@ static inline void processTapeSample(float &xL, float &xR) {
     const float dropDepth = tapeDropoutDepth;
 
     for (int ch = 0; ch < 2; ch++) {
-      float rw = nextFxRandMinus1To1() + tapeRwState[ch];
+      float rw = constrain(nextFxRandMinus1To1() + tapeRwState[ch], -4.0f, 4.0f);
       tapeRwState[ch] = rw * nPole;
 
       float nz = LWR_A0 * rw + LWR_A1 * tapeNoiseX1[ch] + LWR_A2 * tapeNoiseX2[ch]
                - LWR_B1 * tapeNoiseY1[ch] - LWR_B2 * tapeNoiseY2[ch];
+      nz = constrain(nz, -4.0f, 4.0f);
       tapeNoiseX2[ch] = tapeNoiseX1[ch];
       tapeNoiseX1[ch] = rw;
       tapeNoiseY2[ch] = tapeNoiseY1[ch];
@@ -974,12 +1018,13 @@ static inline void processTapeSample(float &xL, float &xR) {
   float chIn[2] = {xL, xR};
   for (int ch = 0; ch < 2; ch++) {
     const float alpha = tapeCachedAlpha[ch];
+    tapeSmoothDrop[ch] += 0.05f * (tapeCachedDrop[ch] - tapeSmoothDrop[ch]);
     // 2-pole cascaded warm high-frequency roll-off at full 44.1 kHz audio rate
     float s1 = tapeLpf1State[ch] + alpha * (chIn[ch] - tapeLpf1State[ch]);
     float s2 = tapeLpf2State[ch] + alpha * (s1 - tapeLpf2State[ch]);
     tapeLpf1State[ch] = s1;
     tapeLpf2State[ch] = s2;
-    chIn[ch] = s2 * tapeCachedDrop[ch];
+    chIn[ch] = s2 * tapeSmoothDrop[ch];
   }
   xL = chIn[0];
   xR = chIn[1];
@@ -1258,15 +1303,17 @@ struct InstDriveState {
   float lpAlpha = 0.78f;
   float mix = 0.0f;
 };
-static InstDriveState instDrive[NUM_INSTRUMENTS];
+constexpr int INST_DRIVE_STATE_SLOTS = NUM_INSTRUMENTS * 2;
+static InstDriveState instDrive[INST_DRIVE_STATE_SLOTS];
 
 FLASHMEM void resetInstDriveState(int instIdx) {
   if (instIdx < 0 || instIdx >= NUM_INSTRUMENTS) return;
   instDrive[instIdx] = InstDriveState{};
+  instDrive[NUM_INSTRUMENTS + instIdx] = InstDriveState{};
 }
 
 FLASHMEM void resetInstFxState() {
-  for (int i = 0; i < NUM_INSTRUMENTS; i++) {
+  for (int i = 0; i < INST_DRIVE_STATE_SLOTS; i++) {
     instDrive[i] = InstDriveState{};
   }
   instChorPct = 0;
@@ -1286,7 +1333,7 @@ FLASHMEM void resetInstFxState() {
 // Signal path: 35 Hz tightener HPF -> 220 Hz warm body lift -> 2-stage asymmetric tube/oxide
 // oversaturation -> level-matched output trim -> 2-pole warm post-LPF roll-off.
 float processInstDriveSample(int instIdx, uint8_t drivePct, float x) {
-  if (drivePct == 0 || instIdx < 0 || instIdx >= NUM_INSTRUMENTS) {
+  if (drivePct == 0 || instIdx < 0 || instIdx >= INST_DRIVE_STATE_SLOTS) {
     return x;
   }
   InstDriveState &st = instDrive[instIdx];
@@ -1335,16 +1382,16 @@ void setInstFxParams(uint8_t chorusPct, uint8_t delayPct, uint8_t delayFbPct, ui
   uint8_t effVerb = max(masterVerbPct, instVerbPct);
 
   if (effChor != chor.curPct) {
-    configureChorusUnit(chor, effChor, false);
+    configureChorusUnit(chor, effChor);
   }
   if (effDfb != dly.fbPct) {
     updateDelayUnitFeedback(dly, effDfb);
   }
   if (effDly != dly.wetPct) {
-    configureDelayUnit(dly, effDly, false);
+    configureDelayUnit(dly, effDly);
   }
   if (effVerb != verb.curPct) {
-    configureReverbUnit(verb, effVerb, false);
+    configureReverbUnit(verb, effVerb);
   }
 }
 

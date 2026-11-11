@@ -846,6 +846,7 @@ FLASHMEM static void resetSongToDefaults() {
     tr.armMode = ArmMode::Off;
     tr.monoInput = MonoInput::Left;
     tr.solo = false;
+    tr.recSrc = AudioRecSrc::Off;
     tr.trigMode = TrigMode::Manual;
     tr.threshDb = ps.defaultThreshDb;
     tr.recordedFrames = 0;
@@ -1128,6 +1129,8 @@ FLASHMEM bool saveSongAs(const char *newName) {
     dp.audio[t].monoInput = (uint8_t)tr.monoInput;
     dp.audio[t].solo = tr.solo ? 1 : 0;
     dp.audio[t].recordedFrames = tr.recordedFrames;
+    dp.audio[t].overview[0] = (uint8_t)tr.recSrc;
+    dp.audio[t].overview[1] = 0xCA;
   }
   bool ok = (pf.write(chunk, sizeof(DiskSong)) == (int)sizeof(DiskSong));
   pf.truncate();
@@ -1226,8 +1229,17 @@ FLASHMEM bool loadSongByName(const char *name) {
     for (int t = 0; t < NUM_AUDIO_TRACKS; t++) {
       Track &tr = tracks[t];
       uint8_t tm = dp.audio[t].trigMode;
-      tr.trigMode = (tm == (uint8_t)TrigMode::Threshold) ? TrigMode::Threshold :
-                    (tm == (uint8_t)TrigMode::Resample)  ? TrigMode::Resample  : TrigMode::Manual;
+      tr.trigMode = (tm == (uint8_t)TrigMode::Threshold) ? TrigMode::Threshold : TrigMode::Manual;
+      uint8_t rs = 0;
+      if (dp.audio[t].overview[1] == 0xCA) {
+        rs = dp.audio[t].overview[0];
+      } else if (tm == 2) {
+        rs = (uint8_t)AudioRecSrc::ResamplePost;
+      }
+      if (rs >= (uint8_t)AudioRecSrc::Count || rs == (uint8_t)AudioRecSrc::Audio1 + t) {
+        rs = (uint8_t)AudioRecSrc::Off;
+      }
+      tr.recSrc = (AudioRecSrc)rs;
       tr.threshDb = (int8_t)constrain((int)dp.audio[t].threshDb, MIN_THRESH_DB, MAX_THRESH_DB);
       uint8_t arm = dp.audio[t].armMode;
       tr.armMode = (arm == (uint8_t)ArmMode::Record)  ? ArmMode::Record :
@@ -1872,7 +1884,10 @@ FLASHMEM static void fillTrackRing(int t, int maxChunks) {
         uint32_t toLoopEnd = transport.punchOutFrame - tr.fileFrame;
         if (toLoopEnd < n) n = toLoopEnd;
       }
-      if (tr.file.isOpen() && tr.fileFrame < tr.recordedFrames) {
+      const bool skipReplaceRead =
+          (t == recording.track && recording.activeInWindow && !recording.overdub &&
+           (!transport.punchEnabled || (tr.fileFrame >= transport.punchInFrame && tr.fileFrame + n <= transport.punchOutFrame)));
+      if (!skipReplaceRead && tr.file.isOpen() && tr.fileFrame < tr.recordedFrames) {
         uint32_t availFile = tr.recordedFrames - tr.fileFrame;
         uint32_t toRead = min(n, availFile);
         uint64_t bytePos = trackWavByteOffset(t, tr.fileFrame);
@@ -1938,8 +1953,11 @@ FLASHMEM static void fillTrackRing(int t, int maxChunks) {
         if (toLoopStart < n) n = toLoopStart;
       }
       uint32_t firstFrame = tr.fileFrame + 1u - n;
+      const bool skipReplaceRead =
+          (t == recording.track && recording.activeInWindow && !recording.overdub &&
+           (!transport.punchEnabled || (firstFrame >= transport.punchInFrame && tr.fileFrame < transport.punchOutFrame)));
 
-      if (tr.file.isOpen() && firstFrame < tr.recordedFrames) {
+      if (!skipReplaceRead && tr.file.isOpen() && firstFrame < tr.recordedFrames) {
         uint32_t availFile = min(n, tr.recordedFrames - firstFrame);
         uint64_t bytePos = trackWavByteOffset(t, firstFrame);
         if (tr.file.curPosition() == bytePos || tr.file.seekSet(bytePos)) {
@@ -2021,7 +2039,7 @@ FLASHMEM static bool padTrackFileToBytePos(FsFile &f, uint64_t targetBytePos, bo
   }
 
   while (curSize < targetBytePos) {
-    if (!f.seekSet(curSize)) return false;
+    if (f.curPosition() != curSize && !f.seekSet(curSize)) return false;
     uint64_t rem = targetBytePos - curSize;
     size_t toWrite = (size_t)min(rem, (uint64_t)sizeof(chunk));
     memset(chunk, 0, toWrite);
@@ -2144,14 +2162,15 @@ FLASHMEM static void ensureTrackWavOpen(int recTrk) {
 FLASHMEM static void armRecordingStateForTrack(int recTrk, uint32_t tf) {
   noInterrupts();
   if (recTrk >= 0) {
-    bool isRes = (tracks[recTrk].trigMode == TrigMode::Resample);
+    AudioRecSrc src = tracks[recTrk].recSrc;
+    bool autoMute = isAutoMuteRecSrc(src);
     recording.track = recTrk;
     recording.overdub = (tracks[recTrk].armMode == ArmMode::Overdub);
-    recording.resample = isRes;
-    recording.resamplePostFx = isResamplePostFx();
+    recording.src = src;
+    recording.autoMute = autoMute;
     recording.monoInput = tracks[recTrk].monoInput;
     recording.reverse = (transport.speedQuarter < 0);
-    if (isRes) {
+    if (autoMute) {
       tracks[recTrk].state = TrackState::Muted;
     }
     recording.activeInWindow = false;
@@ -2165,7 +2184,8 @@ FLASHMEM static void armRecordingStateForTrack(int recTrk, uint32_t tf) {
     recording.mode = Recording::Armed;
   } else {
     recording.track = -1;
-    recording.resample = false;
+    recording.src = AudioRecSrc::Off;
+    recording.autoMute = false;
     recording.reverse = false;
     recording.mode = Recording::Idle;
     recording.activeInWindow = false;
@@ -2178,7 +2198,7 @@ FLASHMEM void storageSyncArmedAudioTrack() {
 
   int newRecTrk = -1;
   for (int t = 0; t < NUM_AUDIO_TRACKS; t++) {
-    if (tracks[t].armMode != ArmMode::Off) {
+    if (tracks[t].armMode != ArmMode::Off && tracks[t].recSrc != AudioRecSrc::Off) {
       newRecTrk = t;
       break;
     }
@@ -2186,16 +2206,17 @@ FLASHMEM void storageSyncArmedAudioTrack() {
 
   int oldRecTrk = recording.track;
   if (newRecTrk == oldRecTrk && newRecTrk >= 0) {
-    bool isRes = (tracks[newRecTrk].trigMode == TrigMode::Resample);
+    AudioRecSrc newSrc = tracks[newRecTrk].recSrc;
+    bool newAutoMute = isAutoMuteRecSrc(newSrc);
     noInterrupts();
-    if (recording.resample && !isRes) {
+    if (recording.autoMute && !newAutoMute) {
       tracks[newRecTrk].state = (tracks[newRecTrk].recordedFrames > 0) ? TrackState::Playing : TrackState::Empty;
-    } else if (isRes) {
+    } else if (newAutoMute) {
       tracks[newRecTrk].state = TrackState::Muted;
     }
     recording.overdub = (tracks[newRecTrk].armMode == ArmMode::Overdub);
-    recording.resample = isRes;
-    recording.resamplePostFx = isResamplePostFx();
+    recording.src = newSrc;
+    recording.autoMute = newAutoMute;
     recording.monoInput = tracks[newRecTrk].monoInput;
     recording.reverse = (transport.speedQuarter < 0);
     if (recording.mode == Recording::Idle) {
@@ -2226,9 +2247,9 @@ FLASHMEM void storageSyncArmedAudioTrack() {
     }
     recording.windowExited = false;
   }
-  if (oldRecTrk >= 0 && oldRecTrk < NUM_AUDIO_TRACKS && recording.resample) {
+  if (oldRecTrk >= 0 && oldRecTrk < NUM_AUDIO_TRACKS && recording.autoMute) {
     tracks[oldRecTrk].state = (tracks[oldRecTrk].recordedFrames > 0) ? TrackState::Playing : TrackState::Empty;
-    recording.resample = false;
+    recording.autoMute = false;
   }
 
   if (newRecTrk >= 0) {
@@ -2245,6 +2266,20 @@ FLASHMEM void storageSyncArmedAudioTrack() {
     armRecordingStateForTrack(newRecTrk, transport.tapeFrame);
   } else {
     armRecordingStateForTrack(-1, 0);
+  }
+
+  if (transport.mode == TransportMode::WaitThreshold && transport.waitAudioThresh) {
+    if (newRecTrk < 0 || tracks[newRecTrk].trigMode != TrigMode::Threshold) {
+      noInterrupts();
+      transport.waitAudioThresh = false;
+      if (!transport.waitMidiThresh && transport.mode == TransportMode::WaitThreshold) {
+        transport.mode = TransportMode::Running;
+        transport.running = true;
+        transport.sampleInBeat = 0;
+        midiSendNow(0xFA);
+      }
+      interrupts();
+    }
   }
 }
 
@@ -2273,7 +2308,7 @@ FLASHMEM void storageSyncLoopState() {
 FLASHMEM void storageStartTransport(bool countIn, bool waitAudio, bool waitMidi) {
   int recTrk = -1;
   for (int t = 0; t < NUM_AUDIO_TRACKS; t++) {
-    if (tracks[t].armMode != ArmMode::Off) {
+    if (tracks[t].armMode != ArmMode::Off && tracks[t].recSrc != AudioRecSrc::Off) {
       recTrk = t;
       break;
     }
@@ -2456,7 +2491,7 @@ FLASHMEM static void drainRecordingBuffer(bool flushAll) {
     }
 
     bool wroteOk = false;
-    if (tr.file.seekSet(bytePos)) {
+    if (tr.file.curPosition() == bytePos || tr.file.seekSet(bytePos)) {
       wroteOk = (tr.file.write(chunk, n * bpf) == (size_t)(n * bpf));
     }
 
@@ -2535,13 +2570,14 @@ FLASHMEM void storageStopTransport() {
         tr.file.sync();
       }
     }
-    if (recording.resample) {
+    if (recording.autoMute) {
       tr.state = (tr.recordedFrames > 0) ? TrackState::Playing : TrackState::Empty;
-      recording.resample = false;
+      recording.autoMute = false;
     }
   }
 
-  recording.resample = false;
+  recording.src = AudioRecSrc::Off;
+  recording.autoMute = false;
   recording.reverse = false;
   recording.mode = Recording::Idle;
   recording.track = -1;
@@ -2909,9 +2945,9 @@ FLASHMEM void serviceStorage() {
       }
       if (recTrk >= 0 && recTrk < NUM_AUDIO_TRACKS) {
         tracks[recTrk].armMode = ArmMode::Off;
-        if (recording.resample) {
+        if (recording.autoMute) {
           tracks[recTrk].state = (tracks[recTrk].recordedFrames > 0) ? TrackState::Playing : TrackState::Empty;
-          recording.resample = false;
+          recording.autoMute = false;
         }
         if (transport.mode == TransportMode::Running && transport.loopEnabled &&
             (transport.punchOutFrame - transport.punchInFrame) <= (RING_FRAMES + CHUNK_FRAMES)) {
@@ -2929,7 +2965,8 @@ FLASHMEM void serviceStorage() {
           interrupts();
         }
       }
-      recording.resample = false;
+      recording.src = AudioRecSrc::Off;
+      recording.autoMute = false;
       recording.mode = Recording::Idle;
       recording.track = -1;
       songDirty = true;

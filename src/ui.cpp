@@ -51,20 +51,18 @@ static uint64_t prevBtnKey[TR_CELL_COUNT] = {};
 static uint64_t prevKbBannerKey = 0;
 static uint64_t prevKbKey[KB_GRID_ROWS][KB_GRID_COLS] = {};
 static uint64_t prevKbBtnKey[2] = {};
-static uint64_t prevResBannerKey = 0;
-static uint64_t prevResRowKey[2] = {};
 static uint64_t prevClearTrackRowKey[3] = {};
 
-bool uiIsImmediateFrame() {
+FLASHMEM bool uiIsImmediateFrame() {
   return uiCurFrameImmediate;
 }
 
-bool uiTierDue(uint8_t periodTicks) {
+FLASHMEM bool uiTierDue(uint8_t periodTicks) {
   if (uiCurFrameImmediate || periodTicks <= 1) return true;
   return (uiFramePhase % periodTicks) == 0;
 }
 
-uint8_t uiTimelineRrSlot() {
+FLASHMEM uint8_t uiTimelineRrSlot() {
   return (uint8_t)(uiFramePhase & 1u);
 }
 
@@ -124,8 +122,6 @@ FLASHMEM static void invalidateUiCache() {
   prevKbBannerKey = 0;
   memset(prevKbKey, 0, sizeof(prevKbKey));
   memset(prevKbBtnKey, 0, sizeof(prevKbBtnKey));
-  prevResBannerKey = 0;
-  memset(prevResRowKey, 0, sizeof(prevResRowKey));
   memset(prevClearTrackRowKey, 0, sizeof(prevClearTrackRowKey));
   invalidateTrackEditOverlayCache();
   invalidateAllPagesCache();
@@ -457,13 +453,40 @@ FLASHMEM void drawTrackArmBadgeCell(int x, int y, int w, int h, int trackIdx,
   s.blit(x, y);
 }
 
-// Shared Track Trigger Badge Cell (Cell 1 on Audio & MIDI Pages)
+// Audio Track Recording Source Badge Cell (top half of Cell 1 column on Audio Page)
+FLASHMEM void drawTrackSrcBadgeCell(int x, int y, int w, int h,
+                            AudioRecSrc recSrc, bool sel,
+                            uint16_t pageAccent, uint64_t &cacheKey, bool full) {
+  const bool srcOn = (recSrc != AudioRecSrc::Off);
+  const char *lbl = audioRecSrcLabel(recSrc);
+  uint16_t bg = srcOn ? pageAccent : (sel ? DARK : PANEL);
+  uint16_t border = srcOn ? (sel ? INK : pageAccent) : (sel ? pageAccent : MID);
+  uint16_t fg = srcOn ? BG : (sel ? LIGHT : DIM);
+
+  uint64_t k = hashMix(hashInit(), (uint64_t)bg | ((uint64_t)border << 16) |
+                                       ((uint64_t)fg << 32) | ((uint64_t)recSrc << 48) |
+                                       ((uint64_t)sel << 56));
+  if (!full && k == cacheKey) return;
+  cacheKey = k;
+
+  Surface s(w, h);
+  if (srcOn && sel) {
+    s.drawBox(BG, border);
+    s.fillRect(2 * PX, 2 * PX, w - 4 * PX, h - 4 * PX, bg);
+  } else {
+    s.drawBox(bg, border);
+  }
+  int tw = textWidth(lbl);
+  s.drawText((w - tw) / 2, TY(h), lbl, fg);
+  s.blit(x, y);
+}
+
+// Shared Track Trigger Badge Cell (bottom half on Audio Page, full Cell 1 on MIDI Page)
 FLASHMEM void drawTrackTrigBadgeCell(int x, int y, int w, int h,
                             TrigMode trigMode, bool sel,
                             uint16_t pageAccent, uint64_t &cacheKey, bool full) {
-  const bool isRes = (trigMode == TrigMode::Resample);
-  const bool trigOn = (trigMode == TrigMode::Threshold) || isRes;
-  const char *lbl = isRes ? "RES" : "TRG";
+  const bool trigOn = (trigMode == TrigMode::Threshold);
+  const char *lbl = "TRG";
   uint16_t bg = trigOn ? pageAccent : (sel ? DARK : PANEL);
   uint16_t border = trigOn ? (sel ? INK : pageAccent) : (sel ? pageAccent : MID);
   uint16_t fg = trigOn ? BG : (sel ? LIGHT : DIM);
@@ -1074,75 +1097,6 @@ FLASHMEM void drawSaveKeyboardModal(bool full) {
   }
 }
 
-// Resample Pre/Post Master FX Selection Overlay
-FLASHMEM static void drawResampleModal(bool full) {
-  if (!isResampleModalOpen()) return;
-
-  const int ovX = SX(40);
-  const int ovW = SX(240);
-  const int hdrY = SY(68);
-  const int hdrH = SY(22);
-  const int rowH = SY(24);
-  const int cur = constrain(resampleModalCursor(), 0, 1);
-  const int trk = constrain(resampleModalTrack() + 1, 1, 8);
-
-  // 1. Header Banner Strip
-  {
-    char hdrTitle[28];
-    snprintf(hdrTitle, sizeof(hdrTitle), "AUDIO A%d RESAMPLE", trk);
-    uint64_t bk = hashStr(hashInit(), hdrTitle);
-    bk = hashMix(bk, (uint64_t)ACCENT);
-    if (full || bk != prevResBannerKey) {
-      prevResBannerKey = bk;
-      Surface s(ovW, hdrH);
-      s.fillRect(0, 0, ovW, hdrH, DARK);
-      s.fillRect(0, 0, ovW, PX, ACCENT);
-      s.fillRect(0, 0, PX, hdrH, ACCENT);
-      s.fillRect(ovW - PX, 0, PX, hdrH, ACCENT);
-      s.fillRect(PX, hdrH - 1, ovW - 2 * PX, 1, MID);
-      int tw = textWidth(hdrTitle);
-      s.drawText(max(SX(6), (ovW - tw) / 2), TY(hdrH), hdrTitle, ACCENT);
-      s.blit(ovX, hdrY);
-    }
-  }
-
-  // 2. Option Pill Rows: [ PRE-MASTER FX ] and [ POST-MASTER FX ]
-  static const char *const RES_LABELS[2] = {
-    "PRE-MASTER FX",
-    "POST-MASTER FX"
-  };
-  for (int i = 0; i < 2; i++) {
-    const bool sel = (cur == i);
-    const bool isLast = (i == 1);
-    const int ry = hdrY + hdrH + i * rowH;
-
-    uint16_t pillBg = sel ? ACCENT : PANEL;
-    uint16_t pillFg = sel ? BG : INK;
-    uint16_t pillBd = sel ? INK : MID;
-
-    uint64_t rk = hashStr(hashInit(), RES_LABELS[i]);
-    rk = hashMix(rk, (uint64_t)pillBg | ((uint64_t)pillFg << 16) |
-                     ((uint64_t)pillBd << 32) | ((uint64_t)sel << 48));
-    if (full || rk != prevResRowKey[i]) {
-      prevResRowKey[i] = rk;
-      Surface s(ovW, rowH);
-      s.fillRect(0, 0, ovW, rowH, PANEL);
-      s.fillRect(0, 0, PX, rowH, ACCENT);
-      s.fillRect(ovW - PX, 0, PX, rowH, ACCENT);
-      if (isLast) {
-        s.fillRect(0, rowH - PX, ovW, PX, ACCENT);
-      }
-
-      const int pw = ovW - SX(20);
-      const int ph = rowH - SY(4);
-      const int px = SX(10);
-      const int py = (rowH - ph) / 2 - (isLast ? (PX / 2) : 0);
-      s.drawPill(px, max(1, py), pw, ph, RES_LABELS[i], pillFg, pillBg, pillBd);
-      s.blit(ovX, ry);
-    }
-  }
-}
-
 // Clear Track Recording & Quick Transport/Punch/Loop Overlay
 // Row 0 (Audio): "Clear track recording?  [YES]  [NO]"
 // Row 0 (MIDI):  "CLEAR:    [ALL]   [NOTES]   [CC/PB]"
@@ -1290,7 +1244,6 @@ FLASHMEM void uiRefresh() {
   Page pg = currentPage();
   static bool lastKeyboardOpen = false;
   static bool lastTeModalOpen = false;
-  static bool lastResModalOpen = false;
   static bool lastClearModalOpen = false;
   static bool lastNoteEdOpen = false;
   static bool lastSmpBrowserOpen = false;
@@ -1307,7 +1260,6 @@ FLASHMEM void uiRefresh() {
                 (pg == Page::Main || pg == Page::Instruments || pg == Page::InstrumentEdit ||
                  pg == Page::SystemSettings);
   bool teModalOpen = trackEditIsModalOpen() && (pg == Page::Audio || pg == Page::Midi);
-  bool resModalOpen = isResampleModalOpen();
   bool clearModalOpen = isClearTrackModalOpen() && (pg == Page::Audio || pg == Page::Midi);
   bool noteEdOpen = isMidiNoteEditorOpen() && (pg == Page::Midi);
   bool smpBrowserOpen = isSamplerBrowserOpen() && (pg == Page::InstrumentEdit);
@@ -1327,7 +1279,7 @@ FLASHMEM void uiRefresh() {
   bool pageOrScreenChanged = (lastDrawnGen != uiGeneration) || (lastDrawnPage != pg);
   bool modalChanged = (!pageOrScreenChanged) &&
                       ((kbOpen != lastKeyboardOpen) || (teModalOpen != lastTeModalOpen) ||
-                       (resModalOpen != lastResModalOpen) || (clearModalOpen != lastClearModalOpen) ||
+                       (clearModalOpen != lastClearModalOpen) ||
                        (noteEdOpen != lastNoteEdOpen) || (smpBrowserOpen != lastSmpBrowserOpen) ||
                        (smpKeyModalSt != lastSmpKeyModalState) ||
                        (instBrowserOpen != lastInstBrowserOpen) || (instSaveToOpen != lastInstSaveToOpen) ||
@@ -1349,7 +1301,6 @@ FLASHMEM void uiRefresh() {
     lastDrawnPage = pg;
     lastKeyboardOpen = kbOpen;
     lastTeModalOpen = teModalOpen;
-    lastResModalOpen = resModalOpen;
     lastClearModalOpen = clearModalOpen;
     lastNoteEdOpen = noteEdOpen;
     lastSmpBrowserOpen = smpBrowserOpen;
@@ -1367,7 +1318,6 @@ FLASHMEM void uiRefresh() {
   } else if (modalChanged) {
     lastKeyboardOpen = kbOpen;
     lastTeModalOpen = teModalOpen;
-    lastResModalOpen = resModalOpen;
     lastClearModalOpen = clearModalOpen;
     lastNoteEdOpen = noteEdOpen;
     lastSmpBrowserOpen = smpBrowserOpen;
@@ -1394,12 +1344,7 @@ FLASHMEM void uiRefresh() {
   keepStreaming();
 
   const PageOps &ops = pageOpsFor(pg);
-  if (resModalOpen) {
-    if ((pageOrScreenChanged || modalChanged) && ops.drawPage) {
-      ops.drawPage(true);
-    }
-    drawResampleModal(pageOrScreenChanged || modalChanged);
-  } else if (smpKeyModalSt != 0) {
+  if (smpKeyModalSt != 0) {
     if ((pageOrScreenChanged || modalChanged) && ops.drawPage) {
       ops.drawPage(true);
     }

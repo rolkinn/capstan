@@ -27,20 +27,22 @@ class M8Display : public ILI9341_t3n {
 public:
   using ILI9341_t3n::ILI9341_t3n;
   size_t write(uint8_t) override { return 1; }
-  void sendCmd(uint8_t cmd, const uint8_t *data, uint8_t n) {
-    beginSPITransaction(_SPI_CLOCK);
-    if (n == 0) {
-      writecommand_last(cmd);
-    } else {
-      writecommand_cont(cmd);
-      for (uint8_t i = 0; i < n; i++) {
-        if (i == n - 1) writedata8_last(data[i]);
-        else            writedata8_cont(data[i]);
-      }
-    }
-    endSPITransaction();
-  }
+  void sendCmd(uint8_t cmd, const uint8_t *data, uint8_t n);
 };
+
+FLASHMEM void M8Display::sendCmd(uint8_t cmd, const uint8_t *data, uint8_t n) {
+  beginSPITransaction(_SPI_CLOCK);
+  if (n == 0) {
+    writecommand_last(cmd);
+  } else {
+    writecommand_cont(cmd);
+    for (uint8_t i = 0; i < n; i++) {
+      if (i == n - 1) writedata8_last(data[i]);
+      else            writedata8_cont(data[i]);
+    }
+  }
+  endSPITransaction();
+}
 #endif
 
 FLASHMEM bool Board::begin(uint32_t spiHz) {

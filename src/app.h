@@ -63,11 +63,12 @@ constexpr int PUNCH_INFO_BAR_CELL_COUNT = 10;
 
 enum AudioCell : int {
   AUD_CELL_ARM  = 0,
-  AUD_CELL_TRIG = 1,
-  AUD_CELL_WAVE = 2,
-  AUD_CELL_VOL  = 3,
-  AUD_CELL_PAN  = 4,
-  AUD_CELL_COUNT = 5
+  AUD_CELL_SRC  = 1,
+  AUD_CELL_TRIG = 2,
+  AUD_CELL_WAVE = 3,
+  AUD_CELL_VOL  = 4,
+  AUD_CELL_PAN  = 5,
+  AUD_CELL_COUNT = 6
 };
 
 enum MidiCell : int {
@@ -277,16 +278,6 @@ void openInstrumentKeyboard(int instIdx, bool startInGrid = false);
 void openProjectKeyboard(bool isRename, const char *initialText, bool startInGrid = true);
 void closeSaveKeyboard();
 
-// Resample Pre/Post Master FX selection modal state
-bool isResampleModalOpen();
-int resampleModalCursor();
-int resampleModalTrack();
-bool isResamplePostFx();
-void openResampleModal(int track, bool startTransportOnConfirm, bool useCountInAndThresh = true);
-void closeResampleModal(bool cancelled = false);
-void resampleModalMove(int delta);
-void resampleModalConfirm();
-
 // Clear Track Recording confirmation & quick transport/punch/loop modal state
 bool isClearTrackModalOpen();
 bool isClearTrackModalRevealing();
@@ -337,6 +328,8 @@ bool anyTrackArmed();
 void armAudioTrack(int t, ArmMode mode);   // ensures at most 1 audio track is armed at a time
 const char *audioTrackArmTag(int t);       // returns "L", "R", or "LR" for armed mono tracks (t >= 4), else nullptr
 void stepAudioTrackArm(int t, int delta);  // cycles stereo (Off/Rec/Dub) or mono (Off/Rec L/R/LR/Dub L/R/LR)
+const char *audioRecSrcLabel(looper::AudioRecSrc s);
+looper::AudioRecSrc stepAudioRecSrc(int trackIdx, looper::AudioRecSrc cur, int dy, int delta, bool wrap = false);
 void armMidiTrack(int t, ArmMode mode);
 void toggleLastArmedTrack();
 void toggleCursorOrLastArmedTrack();

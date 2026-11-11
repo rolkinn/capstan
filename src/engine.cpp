@@ -43,7 +43,7 @@ static struct RingInit {
   }
 } ringInit;
 
-FLASHMEM uint32_t spbForBpm(float bpm) {
+uint32_t spbForBpm(float bpm) {
   float b = constrain(bpm, MIN_BPM, MAX_BPM);
   return (uint32_t)(AUDIO_SAMPLE_RATE_EXACT * 60.0f / b + 0.5f);
 }
@@ -60,14 +60,14 @@ FLASHMEM uint32_t beatsToFrames(double beats, float bpm) {
   return (uint32_t)min(f, (uint64_t)MAX_REC_FRAMES);
 }
 
-FLASHMEM uint32_t framesToMidiTicks(uint32_t frames, float bpm) {
+uint32_t framesToMidiTicks(uint32_t frames, float bpm) {
   uint32_t bpmTenths = (uint32_t)constrain((int)(bpm * 10.0f + 0.5f), (int)(MIN_BPM * 10.0f), (int)(MAX_BPM * 10.0f));
   // ticks = round(frames * (bpmTenths / 10) * 480 / (44100 * 60)) = round(frames * bpmTenths * 4 / 220500)
   uint64_t num = (uint64_t)frames * (uint64_t)bpmTenths * 4ULL + 110250ULL;
   return (uint32_t)(num / 220500ULL);
 }
 
-FLASHMEM uint32_t midiTicksToFrames(uint32_t ticks, float bpm) {
+uint32_t midiTicksToFrames(uint32_t ticks, float bpm) {
   uint32_t bpmTenths = (uint32_t)constrain((int)(bpm * 10.0f + 0.5f), (int)(MIN_BPM * 10.0f), (int)(MAX_BPM * 10.0f));
   uint64_t den = (uint64_t)bpmTenths * 4ULL;
   uint64_t f = ((uint64_t)ticks * 220500ULL + (den >> 1)) / den;
@@ -449,9 +449,33 @@ void LooperEngine::update() {
   const bool usbIn = usbAudioRead && usbAudioRead(usbFrames);
   int16_t *usbOutBuf = usbAudioWrite ? usbAudioWrite() : nullptr;
 
+  int targetTrk = recording.track;
+  AudioRecSrc targetSrc = (targetTrk >= 0 && targetTrk < NUM_AUDIO_TRACKS)
+                              ? recording.src
+                              : AudioRecSrc::Off;
+  MonoInput targetMonoIn = recording.monoInput;
+  if (targetTrk < 0 || targetTrk >= NUM_AUDIO_TRACKS) {
+    targetTrk = -1;
+    for (int t = 0; t < NUM_AUDIO_TRACKS; t++) {
+      if (tracks[t].armMode != ArmMode::Off && tracks[t].recSrc != AudioRecSrc::Off) {
+        targetTrk = t;
+        targetSrc = tracks[t].recSrc;
+        targetMonoIn = tracks[t].monoInput;
+        break;
+      }
+    }
+  }
+  const int capMidiTrk = (targetSrc >= AudioRecSrc::Midi1 && targetSrc <= AudioRecSrc::Midi8)
+                             ? ((int)targetSrc - (int)AudioRecSrc::Midi1)
+                             : -1;
   int32_t fmL[AUDIO_BLOCK_SAMPLES];
   int32_t fmR[AUDIO_BLOCK_SAMPLES];
-  const bool hasFm = fmSynthRenderBlock(fmL, fmR, AUDIO_BLOCK_SAMPLES);
+  int32_t midiCapL[AUDIO_BLOCK_SAMPLES];
+  int32_t midiCapR[AUDIO_BLOCK_SAMPLES];
+  const bool hasFm = fmSynthRenderBlock(fmL, fmR, AUDIO_BLOCK_SAMPLES,
+                                        capMidiTrk,
+                                        (capMidiTrk >= 0) ? midiCapL : nullptr,
+                                        (capMidiTrk >= 0) ? midiCapR : nullptr);
 
   const AudioInputSource src = audioInputSource;
   const bool smpRec   = samplerRecActive;
@@ -498,14 +522,6 @@ void LooperEngine::update() {
     if (b > inPeakR) inPeakR = b;
     if (sAbs > inPeakSum) inPeakSum = sAbs;
   }
-  float trigPeak = max(inPeakL, inPeakR) / 32768.0f;
-  if (recording.track >= 0 && recording.track < NUM_AUDIO_TRACKS && isAudioTrackMono(recording.track)) {
-    MonoInput mi = recording.monoInput;
-    int16_t mPk = (mi == MonoInput::Left)  ? inPeakL
-                : (mi == MonoInput::Right) ? inPeakR
-                                           : inPeakSum;
-    trigPeak = mPk / 32768.0f;
-  }
   if (inPeakL / 32768.0f > inputMeterL) inputMeterL = inPeakL / 32768.0f;
   if (inPeakR / 32768.0f > inputMeterR) inputMeterR = inPeakR / 32768.0f;
 
@@ -524,8 +540,41 @@ void LooperEngine::update() {
   uint32_t spb = transport.spb;
   TransportMode tMode = transport.mode;
 
-  // Check audio input threshold trigger when waiting
-  if (tMode == TransportMode::WaitThreshold && transport.waitAudioThresh) {
+  // Check per-track recording source threshold trigger when waiting
+  if (tMode == TransportMode::WaitThreshold && transport.waitAudioThresh && targetTrk >= 0) {
+    float trigPeak = 0.0f;
+    const bool tgtMono = isAudioTrackMono(targetTrk);
+    int16_t pkL = 0, pkR = 0, pkSum = 0;
+    if (targetSrc == AudioRecSrc::Line || targetSrc == AudioRecSrc::Usb || capMidiTrk >= 0) {
+      for (int i = 0; i < AUDIO_BLOCK_SAMPLES; i++) {
+        int32_t sL = 0, sR = 0;
+        if (targetSrc == AudioRecSrc::Line) {
+          sL = inL ? inL->data[i] : 0;
+          sR = inR ? inR->data[i] : 0;
+        } else if (targetSrc == AudioRecSrc::Usb) {
+          sL = usbIn ? (int16_t)(usbFrames[i] & 0xFFFF) : 0;
+          sR = usbIn ? (int16_t)(usbFrames[i] >> 16) : 0;
+        } else {
+          sL = constrain(midiCapL[i], -32768, 32767);
+          sR = constrain(midiCapR[i], -32768, 32767);
+        }
+        int16_t a = (int16_t)min((int32_t)32767, abs(sL));
+        int16_t b = (int16_t)min((int32_t)32767, abs(sR));
+        int16_t cSum = (int16_t)((sL + sR) >> 1);
+        int16_t sAbs = (int16_t)min((int32_t)32767, abs((int32_t)cSum));
+        if (a > pkL) pkL = a;
+        if (b > pkR) pkR = b;
+        if (sAbs > pkSum) pkSum = sAbs;
+      }
+      if (tgtMono) {
+        int16_t mPk = (targetMonoIn == MonoInput::Left)  ? pkL
+                    : (targetMonoIn == MonoInput::Right) ? pkR
+                                                         : pkSum;
+        trigPeak = mPk / 32768.0f;
+      } else {
+        trigPeak = max(pkL, pkR) / 32768.0f;
+      }
+    }
     if (trigPeak >= transport.audioThreshLinear) {
       tMode = TransportMode::Running;
       transport.mode = TransportMode::Running;
@@ -542,6 +591,9 @@ void LooperEngine::update() {
   uint8_t activeTracks[NUM_AUDIO_TRACKS];
   int numActiveTracks = 0;
   const int recTrkBlock = recording.track;
+  const int srcAudioTrkBlock = (targetSrc >= AudioRecSrc::Audio1 && targetSrc <= AudioRecSrc::Audio8)
+                                   ? ((int)targetSrc - (int)AudioRecSrc::Audio1)
+                                   : -1;
   for (int t = 0; t < NUM_AUDIO_TRACKS; t++) {
     const Track &tr = tracks[t];
     bool audible = (tr.state == TrackState::Playing) && (!anyAudioSolo || tr.solo);
@@ -550,7 +602,7 @@ void LooperEngine::update() {
     mix[t][1] = g * tr.mixLR;
     mix[t][2] = g * tr.mixRL;
     mix[t][3] = g * tr.mixRR;
-    if (tr.live || t == recTrkBlock ||
+    if (tr.live || t == recTrkBlock || t == srcAudioTrkBlock ||
         (mix[t][0] + mix[t][1] + mix[t][2] + mix[t][3] +
          tr.curMix[0] + tr.curMix[1] + tr.curMix[2] + tr.curMix[3]) > 1e-6f) {
       activeTracks[numActiveTracks++] = (uint8_t)t;
@@ -560,8 +612,8 @@ void LooperEngine::update() {
   const float outGain = outputGain;
   const float clickGain = outGain * metroGain;
   const float limitCeiling = masterExportActive ? LIMIT_CEILING : (LIMIT_CEILING / max(1.0f, outGain));
-  const bool recTrackIsMono = (recTrkBlock >= 0 && isAudioTrackMono(recTrkBlock));
-  const MonoInput recMonoIn = recording.monoInput;
+  const bool recTrackIsMono = (targetTrk >= 0 && isAudioTrackMono(targetTrk));
+  const MonoInput recMonoIn = targetMonoIn;
   if (usbOutBuf) {
     memset(usbOutBuf, 0, AUDIO_BLOCK_SAMPLES * USB_OUT_CHANNELS * sizeof(*usbOutBuf));
   }
@@ -577,22 +629,12 @@ void LooperEngine::update() {
     int32_t synL = hasFm ? fmL[i] : 0;
     int32_t synR = hasFm ? fmR[i] : 0;
 
-    int16_t l = recSampleL[i];
-    int16_t r = recSampleR[i];
-    int16_t recInL = l;
-    int16_t recInR = r;
-    if (recTrackIsMono) {
-      int16_t mIn = (recMonoIn == MonoInput::Left)  ? l
-                  : (recMonoIn == MonoInput::Right) ? r
-                                                    : (int16_t)(((int32_t)l + (int32_t)r) >> 1);
-      recInL = mIn;
-      recInR = mIn;
-    }
     const uint32_t at = transport.now;
-    const bool isResample = recording.resample;
+    const bool autoMuteRec = recording.autoMute;
     const bool expOut = masterExportActive;
     bool recActiveHere = false;
     float recTrackSl = 0.0f, recTrackSr = 0.0f;
+    float srcAudioL = 0.0f, srcAudioR = 0.0f;
 
     // Monitor bus for Master Out (excludes USB Audio In from USB Master Out to prevent DAW feedback loops)
     const float monL = (float)constrain(((monLine && !expOut) ? lineL : 0) + synL, -32768, 32767);
@@ -763,13 +805,13 @@ void LooperEngine::update() {
           if (isRecTrackHere) {
             recTrackSl = sl;
             recTrackSr = sr;
-            if (!recording.overdub || isResample) {
-              // Replace mode or Resample mode: silence recording track audio from master mix
+            if (!recording.overdub || autoMuteRec) {
+              // Replace mode or auto-muted source (M01..PST): silence recording track audio from master mix
               sl = 0.0f;
               sr = 0.0f;
             }
-          } else if (t == recTrk && isResample) {
-            // Keep RES track strictly muted while armed/recording
+          } else if (t == recTrk && autoMuteRec) {
+            // Keep auto-muted track silent while armed/recording
             sl = 0.0f;
             sr = 0.0f;
           }
@@ -781,6 +823,10 @@ void LooperEngine::update() {
           float orr = c[2] * sl + c[3] * sr;
           peakL[t] = max(peakL[t], fabsf(ol));
           peakR[t] = max(peakR[t], fabsf(orr));
+          if (t == srcAudioTrkBlock) {
+            srcAudioL = ol;
+            srcAudioR = orr;
+          }
           ol *= masterGain;
           orr *= masterGain;
           mixL += ol;
@@ -809,23 +855,87 @@ void LooperEngine::update() {
     const float postFxL = mixL;
     const float postFxR = mixR;
 
-    // Capture selected recordable input source or resampled Master Out into inputRing
-    int16_t capL = recInL;
-    int16_t capR = recInR;
-    if (isResample) {
-      float srcL = recording.resamplePostFx ? postFxL : preFxL;
-      float srcR = recording.resamplePostFx ? postFxR : preFxR;
-      int16_t resL = (int16_t)constrain((int32_t)lrintf(srcL), -32768, 32767);
-      int16_t resR = (int16_t)constrain((int32_t)lrintf(srcR), -32768, 32767);
+    if (tMode == TransportMode::WaitThreshold && transport.waitAudioThresh &&
+        (targetSrc == AudioRecSrc::ResamplePre || targetSrc == AudioRecSrc::ResamplePost)) {
+      float rL = (targetSrc == AudioRecSrc::ResamplePost) ? postFxL : preFxL;
+      float rR = (targetSrc == AudioRecSrc::ResamplePost) ? postFxR : preFxR;
+      float rPk = recTrackIsMono
+                      ? ((recMonoIn == MonoInput::Left)  ? fabsf(rL)
+                       : (recMonoIn == MonoInput::Right) ? fabsf(rR)
+                                                         : fabsf(0.5f * (rL + rR)))
+                      : max(fabsf(rL), fabsf(rR));
+      if (rPk >= transport.audioThreshLinear * 32768.0f) {
+        tMode = TransportMode::Running;
+        transport.mode = TransportMode::Running;
+        transport.running = true;
+        transport.sampleInBeat = 0;
+        midiSendNow(0xFA);
+      }
+    }
+
+    // Capture per-track selected audio recording source (or Sampler audio-in) into inputRing
+    int16_t capL = 0;
+    int16_t capR = 0;
+    if (smpRec) {
+      capL = recSampleL[i];
+      capR = recSampleR[i];
+    } else {
+      int32_t rawSrcL = 0;
+      int32_t rawSrcR = 0;
+      switch (targetSrc) {
+        case AudioRecSrc::Off:
+        default:
+          break;
+        case AudioRecSrc::Line:
+          rawSrcL = lineL;
+          rawSrcR = lineR;
+          break;
+        case AudioRecSrc::Usb:
+          rawSrcL = uL;
+          rawSrcR = uR;
+          break;
+        case AudioRecSrc::Midi1:
+        case AudioRecSrc::Midi2:
+        case AudioRecSrc::Midi3:
+        case AudioRecSrc::Midi4:
+        case AudioRecSrc::Midi5:
+        case AudioRecSrc::Midi6:
+        case AudioRecSrc::Midi7:
+        case AudioRecSrc::Midi8:
+          rawSrcL = midiCapL[i];
+          rawSrcR = midiCapR[i];
+          break;
+        case AudioRecSrc::Audio1:
+        case AudioRecSrc::Audio2:
+        case AudioRecSrc::Audio3:
+        case AudioRecSrc::Audio4:
+        case AudioRecSrc::Audio5:
+        case AudioRecSrc::Audio6:
+        case AudioRecSrc::Audio7:
+        case AudioRecSrc::Audio8:
+          rawSrcL = (int32_t)lrintf(srcAudioL);
+          rawSrcR = (int32_t)lrintf(srcAudioR);
+          break;
+        case AudioRecSrc::ResamplePre:
+          rawSrcL = (int32_t)lrintf(preFxL);
+          rawSrcR = (int32_t)lrintf(preFxR);
+          break;
+        case AudioRecSrc::ResamplePost:
+          rawSrcL = (int32_t)lrintf(postFxL);
+          rawSrcR = (int32_t)lrintf(postFxR);
+          break;
+      }
+      int16_t sL = (int16_t)constrain(rawSrcL, -32768, 32767);
+      int16_t sR = (int16_t)constrain(rawSrcR, -32768, 32767);
       if (recTrackIsMono) {
-        int16_t mIn = (recMonoIn == MonoInput::Left)  ? resL
-                    : (recMonoIn == MonoInput::Right) ? resR
-                                                      : (int16_t)(((int32_t)resL + (int32_t)resR) >> 1);
+        int16_t mIn = (recMonoIn == MonoInput::Left)  ? sL
+                    : (recMonoIn == MonoInput::Right) ? sR
+                                                      : (int16_t)(((int32_t)sL + (int32_t)sR) >> 1);
         capL = mIn;
         capR = mIn;
       } else {
-        capL = resL;
-        capR = resR;
+        capL = sL;
+        capR = sR;
       }
     }
     if (recActiveHere && recording.overdub) {

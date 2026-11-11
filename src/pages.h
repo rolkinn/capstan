@@ -138,6 +138,9 @@ void drawTrackArmBadgeCell(int x, int y, int w, int h, int trackIdx,
                            ArmMode armMode, bool muted, bool sel,
                            uint16_t pageAccent, uint64_t &cacheKey, bool full,
                            const char *armTag = nullptr);
+void drawTrackSrcBadgeCell(int x, int y, int w, int h,
+                           looper::AudioRecSrc recSrc, bool sel,
+                           uint16_t pageAccent, uint64_t &cacheKey, bool full);
 void drawTrackTrigBadgeCell(int x, int y, int w, int h,
                             TrigMode trigMode, bool sel,
                             uint16_t pageAccent, uint64_t &cacheKey, bool full);

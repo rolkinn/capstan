@@ -123,10 +123,30 @@ int midiSeqFocusedTrack() {
   return -1;
 }
 
+int midiSeqAudioRecTargetTrack() {
+  int recTrk = recording.track;
+  if (recTrk >= 0 && recTrk < NUM_AUDIO_TRACKS) {
+    AudioRecSrc rs = recording.src;
+    if (rs >= AudioRecSrc::Midi1 && rs <= AudioRecSrc::Midi8) {
+      return (int)rs - (int)AudioRecSrc::Midi1;
+    }
+  }
+  for (int t = 0; t < NUM_AUDIO_TRACKS; t++) {
+    if (tracks[t].armMode != ArmMode::Off) {
+      AudioRecSrc rs = tracks[t].recSrc;
+      if (rs >= AudioRecSrc::Midi1 && rs <= AudioRecSrc::Midi8) {
+        return (int)rs - (int)AudioRecSrc::Midi1;
+      }
+    }
+  }
+  return -1;
+}
+
 // Send a channel voice message to either External MIDI (1..16) or Internal Synth (17..24 = I01..I08)
 // Returns false only when allowSdIo == false (ISR context) and an uncached Sampler key requires SD I/O.
 static bool sendMidiOut(uint8_t typeHi, uint8_t outDest, uint8_t d1, uint8_t d2,
-                        uint8_t portMask = MIDI_PORT_BOTH, uint8_t sampleOffset = 0, bool allowSdIo = true) {
+                        uint8_t portMask = MIDI_PORT_BOTH, uint8_t sampleOffset = 0,
+                        bool allowSdIo = true, uint8_t midiTrack = 0xFF) {
   if (outDest == 0) return true;
   uint8_t hi = typeHi & 0xF0;
   d1 &= 0x7F;
@@ -135,14 +155,14 @@ static bool sendMidiOut(uint8_t typeHi, uint8_t outDest, uint8_t d1, uint8_t d2,
   if (outDest >= 17 && outDest <= MAX_MIDI_OUT_CHAN) {
     int instIdx = (int)outDest - 17;
     if (hi == 0x90) {
-      if (d2 > 0) return fmSynthNoteOn(instIdx, d1, d2, sampleOffset, allowSdIo);
-      fmSynthNoteOff(instIdx, d1, sampleOffset);
+      if (d2 > 0) return fmSynthNoteOn(instIdx, d1, d2, sampleOffset, allowSdIo, midiTrack);
+      fmSynthNoteOff(instIdx, d1, sampleOffset, midiTrack);
     } else if (hi == 0x80) {
-      fmSynthNoteOff(instIdx, d1, sampleOffset);
+      fmSynthNoteOff(instIdx, d1, sampleOffset, midiTrack);
     } else if (hi == 0xB0) {
-      fmSynthCC(instIdx, d1, d2);
+      fmSynthCC(instIdx, d1, d2, midiTrack);
     } else if (hi == 0xE0) {
-      fmSynthPitchBend(instIdx, d1, d2);
+      fmSynthPitchBend(instIdx, d1, d2, midiTrack);
     }
     return true;
   }
@@ -220,6 +240,7 @@ FLASHMEM void midiSeqSilenceMutedTracks() {
     bool audible = !midiTracks[t].muted && (!anySolo || midiTracks[t].solo);
     if (!audible) {
       clearTrackActiveNotes(t);
+      fmSynthSilenceMidiTrack(t);
       midiSeqSilenceDestIfUnused(midiTracks[t].outChannel);
     }
   }
@@ -425,6 +446,8 @@ void midiSeqInputEvent(uint8_t status, uint8_t d1, uint8_t d2, uint8_t fromSourc
   if (!ccIntercepted) {
     const bool running = (tm == TransportMode::Running);
     const int selectedMidiTrack = midiSeqFocusedTrack();
+    const int audioRecMidiTrack = midiSeqAudioRecTargetTrack();
+    const bool anySoloNow = anyTrackSolo();
     const Page pg = currentPage();
     const bool onInstPage = (pg == Page::Instruments || pg == Page::InstrumentEdit || pg == Page::InstrumentType);
     const uint8_t thruPortMask = (fromSource == 1) ? MIDI_PORT_TRS : MIDI_PORT_BOTH;
@@ -436,17 +459,28 @@ void midiSeqInputEvent(uint8_t status, uint8_t d1, uint8_t d2, uint8_t fromSourc
 
       bool isArmed = (mt.armMode != ArmMode::Off);
       bool isSelected = (t == selectedMidiTrack);
+      bool isAudioRecTarget = (t == audioRecMidiTrack) && !mt.muted && (!anySoloNow || mt.solo);
       if (onInstPage && !running) {
         isArmed = false;
         isSelected = false;
+        isAudioRecTarget = false;
       }
 
-      if ((isArmed || isSelected) && mt.outChannel > 0) {
+      if ((isArmed || isSelected || isAudioRecTarget) && mt.outChannel > 0) {
         uint8_t outCh = min(mt.outChannel, (uint8_t)MAX_MIDI_OUT_CHAN);
         uint32_t bit = 1u << (outCh - 1);
         bool allowLiveOut = (outCh >= 17) || songSettings().midiThru;
         if (allowLiveOut && !(thruSentMask & bit)) {
-          if (sendMidiOut(type, outCh, d1, d2, thruPortMask, sampleOffset, false)) {
+          uint8_t tagTrk = (uint8_t)t;
+          if (audioRecMidiTrack >= 0 && audioRecMidiTrack < NUM_MIDI_TRACKS && audioRecMidiTrack != t) {
+            const MidiTrack &rmt = midiTracks[audioRecMidiTrack];
+            bool rChMatch = (rmt.inChannel != MIDI_IN_OFF) && (rmt.inChannel == 0 || rmt.inChannel == inCh1To16);
+            if (rChMatch && !rmt.muted && (!anySoloNow || rmt.solo) &&
+                min(rmt.outChannel, (uint8_t)MAX_MIDI_OUT_CHAN) == outCh) {
+              tagTrk = (uint8_t)audioRecMidiTrack;
+            }
+          }
+          if (sendMidiOut(type, outCh, d1, d2, thruPortMask, sampleOffset, false, tagTrk)) {
             thruSentMask |= bit;
           }
         }
@@ -498,7 +532,7 @@ FLASHMEM static void eraseEventsInRange(int t, uint32_t fromTick, uint32_t toTic
     } else if ((ev[i].status & 0xF0) == 0x80) {
       uint8_t note = ev[i].data1 & 0x7F;
       if (!isRecNoteOpen(t, note) && (mt.activeNoteMask[note >> 5] & (1u << (note & 31)))) {
-        sendMidiOut(0x80, mt.outChannel, note, 0);
+        sendMidiOut(0x80, mt.outChannel, note, 0, MIDI_PORT_BOTH, 0, true, (uint8_t)t);
         setTrackNoteActive(t, note, false);
       }
     }
@@ -733,14 +767,23 @@ static void midiSeqDispatchPlayback(float curBpm, bool fromIsr) {
   if (fromIsr && seqEditDepth != 0) return;
 
   uint32_t irq = saveIrq();
+  if (!fromIsr) {
+    seqEditDepth++;
+  }
   uint32_t tf = transport.tapeFrame;
   TransportMode tm = transport.mode;
   int8_t speedQ = transport.speedQuarter;
   uint32_t wrapNow = transport.loopWrapCount;
   restoreIrq(irq);
 
-  if (tm != TransportMode::Running || speedQ == 0) return;
-  if (fromIsr && wrapNow != lastSeenLoopWrapCount) return;
+  if (tm != TransportMode::Running || speedQ == 0 || (fromIsr && wrapNow != lastSeenLoopWrapCount)) {
+    if (!fromIsr) {
+      uint32_t irqOut = saveIrq();
+      seqEditDepth--;
+      restoreIrq(irqOut);
+    }
+    return;
+  }
 
   const bool rev = (speedQ < 0);
   const uint32_t curTick = framesToMidiTicks(tf, curBpm);
@@ -787,7 +830,7 @@ static void midiSeqDispatchPlayback(float curBpm, bool fromIsr) {
             outStatus = 0x80;
             outD2 = 0;
           }
-          if (!sendMidiOut(outStatus, mt.outChannel, e.data1, outD2, MIDI_PORT_BOTH, 0, allowSdIo)) {
+          if (!sendMidiOut(outStatus, mt.outChannel, e.data1, outD2, MIDI_PORT_BOTH, 0, allowSdIo, (uint8_t)t)) {
             // Uncached Sampler note in ISR: leave playIndex intact for keepStreaming() / loop()
             break;
           }
@@ -816,7 +859,7 @@ static void midiSeqDispatchPlayback(float curBpm, bool fromIsr) {
             continue;
           }
           uint8_t sampleOff = computePlaybackSampleOffset(e.tick, blockStartFrame, curBpm, false);
-          if (!sendMidiOut(e.status, mt.outChannel, e.data1, e.data2, MIDI_PORT_BOTH, sampleOff, allowSdIo)) {
+          if (!sendMidiOut(e.status, mt.outChannel, e.data1, e.data2, MIDI_PORT_BOTH, sampleOff, allowSdIo, (uint8_t)t)) {
             // Uncached Sampler note in ISR: leave playIndex intact for keepStreaming() / loop()
             break;
           }
@@ -835,6 +878,11 @@ static void midiSeqDispatchPlayback(float curBpm, bool fromIsr) {
         }
       }
     }
+  }
+  if (!fromIsr) {
+    uint32_t irqOut = saveIrq();
+    seqEditDepth--;
+    restoreIrq(irqOut);
   }
 }
 
@@ -884,6 +932,8 @@ FLASHMEM static void drainMidiInputRing(float curBpm, int selectedMidiTrack, boo
     const Page pg = currentPage();
     const bool onInstPage = (pg == Page::Instruments || pg == Page::InstrumentEdit || pg == Page::InstrumentType);
     const bool msgRunning = running || (m.tMode == TransportMode::Running);
+    const int audioRecMidiTrack = midiSeqAudioRecTargetTrack();
+    const bool anySoloNow = anyTrackSolo();
     uint32_t thruSentMask = m.thruSentMask; // destinations already dispatched in 250 us ISR
 
     for (int t = 0; t < NUM_MIDI_TRACKS; t++) {
@@ -893,12 +943,14 @@ FLASHMEM static void drainMidiInputRing(float curBpm, int selectedMidiTrack, boo
 
       bool isArmed = (mt.armMode != ArmMode::Off);
       bool isSelected = (t == selectedMidiTrack);
+      bool isAudioRecTarget = (t == audioRecMidiTrack) && !mt.muted && (!anySoloNow || mt.solo);
       if (onInstPage && !msgRunning) {
         isArmed = false;
         isSelected = false;
+        isAudioRecTarget = false;
       }
 
-      if (isArmed || isSelected) {
+      if (isArmed || isSelected || isAudioRecTarget) {
         mt.lastStatus = typeHi;
         mt.lastData1 = m.d1;
         mt.lastData2 = m.d2;
@@ -915,7 +967,16 @@ FLASHMEM static void drainMidiInputRing(float curBpm, int selectedMidiTrack, boo
           uint32_t bit = 1u << (outCh - 1);
           bool allowLiveOut = (outCh >= 17) || midiThruEnabled;
           if (allowLiveOut && !(thruSentMask & bit)) {
-            sendMidiOut(typeHi, outCh, m.d1, m.d2, thruPortMask, m.sampleOffset, true);
+            uint8_t tagTrk = (uint8_t)t;
+            if (audioRecMidiTrack >= 0 && audioRecMidiTrack < NUM_MIDI_TRACKS && audioRecMidiTrack != t) {
+              const MidiTrack &rmt = midiTracks[audioRecMidiTrack];
+              bool rChMatch = (rmt.inChannel != MIDI_IN_OFF) && (rmt.inChannel == 0 || rmt.inChannel == inCh1To16);
+              if (rChMatch && !rmt.muted && (!anySoloNow || rmt.solo) &&
+                  min(rmt.outChannel, (uint8_t)MAX_MIDI_OUT_CHAN) == outCh) {
+                tagTrk = (uint8_t)audioRecMidiTrack;
+              }
+            }
+            sendMidiOut(typeHi, outCh, m.d1, m.d2, thruPortMask, m.sampleOffset, true, tagTrk);
             thruSentMask |= bit;
           }
         }
@@ -1080,7 +1141,6 @@ FLASHMEM static void drainMidiInputRing(float curBpm, int selectedMidiTrack, boo
 
 FLASHMEM void midiSeqFastService() {
   if (seqEditDepth != 0) return;
-  fmSynthService();
   if (transport.loopWrapCount == lastSeenLoopWrapCount) {
     midiSeqDispatchPlayback(bpm, false);
   }
@@ -1108,9 +1168,6 @@ FLASHMEM void midiSeqService(float curBpm, int selectedMidiTrack, bool midiThruE
   const bool loopOn = transport.loopEnabled && (punchOutTick > punchInTick);
   uint32_t wrapNow = transport.loopWrapCount;
   const bool loopWrapped = running && (wrapNow != lastSeenLoopWrapCount);
-  if (loopWrapped) {
-    lastSeenLoopWrapCount = wrapNow;
-  }
 
   bool wantRecTrack[NUM_MIDI_TRACKS] = {};
 
@@ -1185,6 +1242,7 @@ FLASHMEM void midiSeqService(float curBpm, int selectedMidiTrack, bool midiThruE
       syncPlayIndexToTick(t, wrapTick);
       midiTracks[t].recEraseCursorTick = wrapTick;
     }
+    lastSeenLoopWrapCount = wrapNow;
   } else {
     for (int t = 0; t < NUM_MIDI_TRACKS; t++) {
       MidiTrack &mt = midiTracks[t];

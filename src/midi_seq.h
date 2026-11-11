@@ -69,6 +69,7 @@ void midiSeqInputEvent(uint8_t status, uint8_t d1, uint8_t d2, uint8_t fromSourc
 // Called from loop() every pass to advance MIDI playback, handle punch-in/out & replace,
 // and flush newly arrived MIDI input events into the armed MIDI tracks.
 int midiSeqFocusedTrack();
+int midiSeqAudioRecTargetTrack();
 void midiSeqService(float bpm, int selectedMidiTrack, bool midiThruEnabled);
 void midiSeqFastService();
 void midiSeqIsrTick();

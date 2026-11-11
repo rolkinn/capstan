@@ -14,6 +14,7 @@ static uint64_t prevAudioMeterKey[VISIBLE_TRACK_ROWS] = {};
 static float trSmooth[NUM_AUDIO_TRACKS] = {};
 static int lastAudioTrackRow = 0;
 static int lastAudioTrackCell = AUD_CELL_WAVE;
+static int lastAudioSrcTrigCell = AUD_CELL_SRC;
 
 FLASHMEM static const char *audioHeaderTitle() {
   const char *teTitle = trackEditHeaderTitle(Page::Audio);
@@ -41,10 +42,18 @@ FLASHMEM static void drawAudioTrackRow(int visSlot, int t, const TimelineFrameCt
                           audioTrackArmTag(t));
   }
 
-  // Cell 1: Trigger Mode ("TRG", highlighted only when ON)
-  if (staticDue || prevAudioTrackKey[visSlot][AUD_CELL_TRIG] == 0) {
-    drawTrackTrigBadgeCell(SX(32), y, SX(32), h, tr.trigMode, selC == AUD_CELL_TRIG,
-                           ACCENT, prevAudioTrackKey[visSlot][AUD_CELL_TRIG], full);
+  // Cell 1 (top half): Recording Source ("SRC", "LIN", "USB", "M01".."M08", "A01".."A08", "PRE", "PST")
+  // Cell 2 (bottom half): Trigger Mode ("TRG", highlighted only when ON)
+  {
+    const int halfH = SY(19);
+    if (staticDue || prevAudioTrackKey[visSlot][AUD_CELL_SRC] == 0) {
+      drawTrackSrcBadgeCell(SX(32), y, SX(32), halfH, tr.recSrc, selC == AUD_CELL_SRC,
+                            ACCENT, prevAudioTrackKey[visSlot][AUD_CELL_SRC], full);
+    }
+    if (staticDue || prevAudioTrackKey[visSlot][AUD_CELL_TRIG] == 0) {
+      drawTrackTrigBadgeCell(SX(32), y + h - halfH, SX(32), halfH, tr.trigMode, selC == AUD_CELL_TRIG,
+                             ACCENT, prevAudioTrackKey[visSlot][AUD_CELL_TRIG], full);
+    }
   }
 
   // Cell 2: Scrolling Waveform Timeline (15 Hz 2-row round-robin while running) + 30 Hz Level Meter
@@ -265,6 +274,9 @@ FLASHMEM void audioRememberTrackCursor() {
   if (audioRow >= 0 && audioRow < TRACK_ROWS) {
     lastAudioTrackRow = audioRow;
     lastAudioTrackCell = (audioCell >= 0 && audioCell < AUD_CELL_COUNT) ? audioCell : -1;
+    if (audioCell == AUD_CELL_SRC || audioCell == AUD_CELL_TRIG) {
+      lastAudioSrcTrigCell = audioCell;
+    }
   }
 }
 
@@ -278,6 +290,9 @@ FLASHMEM void audioRestoreLastTrackCursor() {
   audioCell = cell;
   lastAudioTrackRow = row;
   lastAudioTrackCell = cell;
+  if (cell == AUD_CELL_SRC || cell == AUD_CELL_TRIG) {
+    lastAudioSrcTrigCell = cell;
+  }
   syncAudioScroll();
 }
 
@@ -353,6 +368,22 @@ FLASHMEM static void audioOnCursorMove(int dx, int dy, uint8_t dir) {
       // Top Bar has 1 row; require SHIFT+DOWN to enter Timeline
     } else if (audioRow >= INFO_ROW) {
       audioRow = constrain(audioRow + dy, INFO_ROW, TRANSPORT_ROW);
+    } else if (audioCell == AUD_CELL_SRC) {
+      if (dy > 0) {
+        audioCell = AUD_CELL_TRIG;
+      } else if (audioRow > 0) {
+        audioRow--;
+        audioCell = AUD_CELL_TRIG;
+        syncAudioScroll();
+      }
+    } else if (audioCell == AUD_CELL_TRIG) {
+      if (dy < 0) {
+        audioCell = AUD_CELL_SRC;
+      } else if (audioRow < TRACK_ROWS - 1) {
+        audioRow++;
+        audioCell = AUD_CELL_SRC;
+        syncAudioScroll();
+      }
     } else {
       audioRow = constrain(audioRow + dy, 0, TRACK_ROWS - 1);
       syncAudioScroll();
@@ -370,18 +401,43 @@ FLASHMEM static void audioOnCursorMove(int dx, int dy, uint8_t dir) {
   if (dx != 0) {
     if (audioRow == HEADER_ROW) {
       headerCell = constrain(headerCell + dx, 0, HEADER_CELL_COUNT - 1);
+    } else if (audioRow == TRANSPORT_ROW) {
+      audioCell = constrain(audioCell + dx, 0, TR_CELL_COUNT - 1);
+    } else if (audioRow == INFO_ROW) {
+      audioCell = constrain(audioCell + dx, 0, activeInfoCellCount() - 1);
     } else {
-      int maxCell = (audioRow == TRANSPORT_ROW) ? (TR_CELL_COUNT - 1)
-                  : (audioRow == INFO_ROW)      ? (activeInfoCellCount() - 1)
-                                                : (AUD_CELL_COUNT - 1);
-      audioCell = constrain(audioCell + dx, 0, maxCell);
+      int stCell = (lastAudioSrcTrigCell == AUD_CELL_TRIG) ? AUD_CELL_TRIG : AUD_CELL_SRC;
+      if (dx > 0) {
+        if (audioCell == AUD_CELL_ARM) audioCell = stCell;
+        else if (audioCell == AUD_CELL_SRC || audioCell == AUD_CELL_TRIG) audioCell = AUD_CELL_WAVE;
+        else audioCell = constrain(audioCell + 1, AUD_CELL_WAVE, AUD_CELL_COUNT - 1);
+      } else {
+        if (audioCell == AUD_CELL_WAVE) audioCell = stCell;
+        else if (audioCell == AUD_CELL_SRC || audioCell == AUD_CELL_TRIG) audioCell = AUD_CELL_ARM;
+        else if (audioCell > AUD_CELL_WAVE) audioCell = audioCell - 1;
+      }
     }
   }
   if (audioRow >= 0 && audioRow < TRACK_ROWS) {
+    if (audioCell == AUD_CELL_SRC || audioCell == AUD_CELL_TRIG) {
+      lastAudioSrcTrigCell = audioCell;
+    }
     lastAudioTrackRow = audioRow;
     lastAudioTrackCell = audioCell;
   }
   uiForceRedraw();
+}
+
+FLASHMEM static void syncAudioTrackRecConfig(int t) {
+  Track &tr = tracks[t];
+  if (tr.armMode != ArmMode::Off && tr.recSrc != AudioRecSrc::Off) {
+    appEnsureValidRecordingSpeed();
+  }
+  if (transport.mode != TransportMode::Stopped) {
+    storageSyncArmedAudioTrack();
+  }
+  updateMetronomeState();
+  saveSessionWhenIdle();
 }
 
 FLASHMEM static void audioOnOptAdjust(int dx, int dy, int delta) {
@@ -394,16 +450,15 @@ FLASHMEM static void audioOnOptAdjust(int dx, int dy, int delta) {
     Track &tr = tracks[t];
     if (audioCell == AUD_CELL_ARM) {
       stepAudioTrackArm(t, delta);
+    } else if (audioCell == AUD_CELL_SRC) {
+      tr.recSrc = stepAudioRecSrc(t, tr.recSrc, dy, delta, false);
+      syncAudioTrackRecConfig(t);
     } else if (audioCell == AUD_CELL_TRIG) {
-      TrigMode prevTrig = tr.trigMode;
-      int m = ((int)tr.trigMode + delta + 3) % 3;
+      int m = ((int)tr.trigMode + delta) % 2;
+      if (m < 0) m += 2;
       tr.trigMode = (TrigMode)m;
       if (transport.mode != TransportMode::Stopped && tr.armMode != ArmMode::Off) {
-        if (tr.trigMode == TrigMode::Resample && prevTrig != TrigMode::Resample) {
-          openResampleModal(t, false, false);
-        } else {
-          storageSyncArmedAudioTrack();
-        }
+        storageSyncArmedAudioTrack();
       }
       saveSessionWhenIdle();
     } else if (audioCell == AUD_CELL_VOL) {
@@ -452,7 +507,7 @@ FLASHMEM static void audioOnEditPress(bool shiftHeld) {
       uiForceRedraw();
     } else {
       if (tr.recordedFrames > 0) {
-        if (recording.mode != Recording::Idle && recording.track == t && recording.resample) {
+        if (recording.mode != Recording::Idle && recording.track == t && recording.autoMute) {
           tr.state = TrackState::Muted;
         } else {
           tr.state = (tr.state == TrackState::Muted) ? TrackState::Playing : TrackState::Muted;
@@ -467,23 +522,20 @@ FLASHMEM static void audioOnEditPress(bool shiftHeld) {
   } else if (audioCell == AUD_CELL_ARM) {
     stepAudioTrackArm(t, 1);
     uiForceRedraw();
+  } else if (audioCell == AUD_CELL_SRC) {
+    tr.recSrc = stepAudioRecSrc(t, tr.recSrc, 0, 1, true);
+    syncAudioTrackRecConfig(t);
+    uiForceRedraw();
   } else if (audioCell == AUD_CELL_TRIG) {
-    TrigMode prevTrig = tr.trigMode;
-    tr.trigMode = (tr.trigMode == TrigMode::Manual)    ? TrigMode::Threshold
-                : (tr.trigMode == TrigMode::Threshold) ? TrigMode::Resample
-                                                       : TrigMode::Manual;
+    tr.trigMode = (tr.trigMode == TrigMode::Manual) ? TrigMode::Threshold : TrigMode::Manual;
     if (transport.mode != TransportMode::Stopped && tr.armMode != ArmMode::Off) {
-      if (tr.trigMode == TrigMode::Resample && prevTrig != TrigMode::Resample) {
-        openResampleModal(t, false, false);
-      } else {
-        storageSyncArmedAudioTrack();
-      }
+      storageSyncArmedAudioTrack();
     }
     saveSessionWhenIdle();
     uiForceRedraw();
   } else if (audioCell == AUD_CELL_VOL) {
     if (tr.recordedFrames > 0 || tr.state == TrackState::Muted) {
-      if (recording.mode != Recording::Idle && recording.track == t && recording.resample) {
+      if (recording.mode != Recording::Idle && recording.track == t && recording.autoMute) {
         tr.state = TrackState::Muted;
       } else {
         tr.state = (tr.state == TrackState::Muted)
@@ -511,6 +563,9 @@ FLASHMEM static void audioOnResetParam() {
       openClearTrackModal(Page::Audio, t);
     } else if (audioCell == AUD_CELL_ARM) {
       armAudioTrack(t, ArmMode::Off);
+    } else if (audioCell == AUD_CELL_SRC) {
+      tracks[t].recSrc = AudioRecSrc::Off;
+      syncAudioTrackRecConfig(t);
     } else if (audioCell == AUD_CELL_TRIG) {
       tracks[t].trigMode = TrigMode::Manual;
       tracks[t].threshDb = songSettings().defaultThreshDb;

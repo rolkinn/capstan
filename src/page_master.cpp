@@ -463,7 +463,7 @@ FLASHMEM static void masterOnCursorMove(int dx, int dy, uint8_t dir) {
 
 FLASHMEM static void setAudioTrackMuted(int t, bool mute) {
   Track &tr = tracks[t];
-  if (recording.mode != Recording::Idle && recording.track == t && recording.resample) {
+  if (recording.mode != Recording::Idle && recording.track == t && recording.autoMute) {
     tr.state = TrackState::Muted;
     return;
   }
@@ -837,7 +837,7 @@ FLASHMEM static void masterOnResetParam() {
     if (!isSoloBtn) {
       if (!midiMode) {
         if (tracks[t].state == TrackState::Muted &&
-            !(recording.mode != Recording::Idle && recording.track == t && recording.resample)) {
+            !(recording.mode != Recording::Idle && recording.track == t && recording.autoMute)) {
           tracks[t].state = (tracks[t].recordedFrames > 0) ? TrackState::Playing : TrackState::Empty;
           saveSessionWhenIdle();
         }

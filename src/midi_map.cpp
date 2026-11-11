@@ -502,7 +502,7 @@ FLASHMEM static void executeTargetAction(int targetId, uint8_t val) {
         stepAudioTrackArm(t, 1);
         break;
       case MIDI_AUD_OFF_MUTE:
-        if (!(recording.mode != Recording::Idle && recording.track == t && recording.resample)) {
+        if (!(recording.mode != Recording::Idle && recording.track == t && recording.autoMute)) {
           if (tr.state == TrackState::Muted) {
             tr.state = (tr.recordedFrames > 0) ? TrackState::Playing : TrackState::Empty;
           } else {

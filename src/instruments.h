@@ -94,6 +94,7 @@ struct FmInstRuntime {
 struct FmVoice {
   bool active = false;
   uint8_t instIdx = 0;
+  uint8_t midiTrack = 0xFF;
   uint8_t note = 60;
   uint8_t velocity = 100;
   bool gate = false;
@@ -183,11 +184,13 @@ FmPatch &fmSynthPatch(int instIdx);
 const FmPatch &fmSynthDefaultPatch(InstType type);
 
 // Real-time MIDI / Note control (ISR-safe & loop-safe via lock-free SynthEvent queue)
-bool fmSynthNoteOn(int instIdx, uint8_t note, uint8_t velocity, uint8_t sampleOffset = 0, bool allowSdIo = true);
-void fmSynthNoteOff(int instIdx, uint8_t note, uint8_t sampleOffset = 0);
-void fmSynthPitchBend(int instIdx, uint8_t lsb, uint8_t msb);
-void fmSynthCC(int instIdx, uint8_t cc, uint8_t val);
+bool fmSynthNoteOn(int instIdx, uint8_t note, uint8_t velocity, uint8_t sampleOffset = 0,
+                   bool allowSdIo = true, uint8_t midiTrack = 0xFF);
+void fmSynthNoteOff(int instIdx, uint8_t note, uint8_t sampleOffset = 0, uint8_t midiTrack = 0xFF);
+void fmSynthPitchBend(int instIdx, uint8_t lsb, uint8_t msb, uint8_t midiTrack = 0xFF);
+void fmSynthCC(int instIdx, uint8_t cc, uint8_t val, uint8_t midiTrack = 0xFF);
 void fmSynthSilenceInst(int instIdx);
+void fmSynthSilenceMidiTrack(int midiTrack);
 void fmSynthAllNotesOff();
 
 // Audition helper (triggers a preview note and schedules automatic release)
@@ -197,7 +200,8 @@ void fmSynthSetExportTailPhase(bool inTail);
 bool fmSynthHasActiveOutput();
 
 // Audio ISR block renderer (called from LooperEngine::update() at 44.1 kHz, 128 samples)
-bool fmSynthRenderBlock(int32_t *outL, int32_t *outR, int numFrames);
+bool fmSynthRenderBlock(int32_t *outL, int32_t *outR, int numFrames,
+                        int captureMidiTrack = -1, int32_t *capOutL = nullptr, int32_t *capOutR = nullptr);
 
 // SD Card Persistence: Song instruments (`INST.DAT`) and individual `.FMI` files
 bool fmSynthSaveSong(FsFile &f);
