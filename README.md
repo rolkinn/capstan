@@ -1,5 +1,4 @@
-# Capstan
-## Audio + MIDI Tape Recorder Firmware for M8
+# Capstan: Audio + MIDI Tape Recorder Firmware for M8
 
 **Capstan** is a linear tape-style **4-stereo, 4-mono track audio recorder**, **8-track MIDI sequencer**, and **multi-engine synthesizer & sampler** firmware for the **M8 Model:01** and **M8 Model:02**.
 
@@ -22,14 +21,14 @@ To flash onto your hardware:
 
 ## 2. Key Features
 
-### 8-Track Linear Audio Tape Recorder (`44.1 kHz / 16-Bit`)
+### 8-Track Linear Audio Tape Recorder
 - **4 Stereo (`A1`–`A4`) + 4 Mono (`A5`–`A8`) Audio Tracks**: Up to **666 seconds** (11 minutes, 6 seconds) per track of uncompressed 44.1 kHz 16-bit audio streamed directly to and from the SD card.
 - **Record, Overdub, & Master Resampling**:
   - Per-track `RECORD` and `OVERDUB`
   - **Master Resampling (`RES`)**: Bounce the **Pre-Master FX** or **Post-Master FX** onto any audio track.
 - **Track Region Editing**: `COPY`, `CUT`, `PASTE`, `DUPL`, `CLR`, and `.wav` audio clip import.
 - **Variable Tape Speed & Reverse Playback**: Tape speed control from **`-5.00x - +5.00x`**, including **`-1.00x` reverse recording and overdubbing**.
-- **Punch-In/Out & Looping**: independent **Punch In/Out** (`|o|`) and **Loop** modes.
+- **Punch-In/Out & Looping**: independent **Punch In/Out** and **Loop** modes.
 - **Audio & MIDI Threshold Triggered Recording**: Auto-start recording based on input threshold.
 - **Configurable metronome with 0–4 bar count-in**.
 
@@ -37,11 +36,11 @@ To flash onto your hardware:
 - **8 MIDI Tracks (`M1`–`M8`)**: `Note On/Off`, `Velocity`, `Control Change (CC)`, and `Pitch Bend`.
 - **MIDI Routing**: Per-track Input channel (`OFF`, `ALL`, `C01`–`C16`) and Output destination (`OFF`, MIDI channels `C01`–`C16`, or internal instruments `I01`–`I08`).
 - **Interactive Piano Roll Editor**: Double-tap `EDIT` on any MIDI track waveform to open the 1/32nd-note grid Piano Roll editor.
-- **Track Region Editing & Standard MIDI File support (`.mid`)**: `QUANTIZE` (`1/4`, `1/8`, `1/16`, `1/32`), `COPY`, `CUT`, `PASTE`, `DUPL`, `CLR`, and MIDI `.mid` clip import/export.
+- **Track Region Editing & Standard `.mid` MIDI File support**: `QUANTIZE` (`1/4`, `1/8`, `1/16`, `1/32`), `COPY`, `CUT`, `PASTE`, `DUPL`, `CLR`, and MIDI `.mid` clip import/export.
 
 ### 8-Slot Multi-Engine Synthesizer & Sampler (`I01`–`I08`)
 - **32-voice** shared global polyphony (up to 8 voices per instrument) with per-instrument **Amp** & **Filter ADSR**, **Drive**, **Chorus**, **Delay**, and **Reverb** sends.
-- Current instruments included:
+- Current instruments include:
   1. **2-op FM synth**
   2. **Phase Distortion synth**
   3. **Noise Texture Drone synth**
@@ -63,23 +62,22 @@ To flash onto your hardware:
 | Keys | Action |
 |---|---|
 | `SHIFT + UP / DOWN / LEFT / RIGHT` | Navigate between pages in the spatial map.<br>**NOTE:** When on `Audio` & `MIDI` pages, cursor first navigates to top timeline or bottom transport bars before moving to other pages above/below |
-| when in overlay/confirmation<br>`OPT` | Cancel/exit |
-| in `File browser`<br>`OPT` | Exit |
+| in File browser, overlays, confirmations<br>- `OPT` | Cancel/exit |
 | `PLAY` | Start / Stop transport at current playhead position |
 | `SHIFT + PLAY` | Start transport from beginning |
 | `EDIT + UP / DOWN / LEFT / RIGHT` | Coarse/fine adjust selected parameter |
 | `EDIT` | Toggle button, cycle option, or open modal/editor |
 | `OPT + EDIT` | Reset parameter to default |
-| on top timeline bar<br>`EDIT+UP/DOWN/LEFT/RIGHT`<br>`SHIFT+EDIT` | Coarse/fine adjust selected time or beat.bar.8th.16th.32nd granularity<br>Toggles seek to punch/loop start and end times |
-| on `Transport bar` `Play`/`Stop` button<br>`EDIT`<br>`EDIT+LEFT/RIGHT`<br>`EDIT+UP/DOWN`<br>`OPT+EDIT` while playing<br>`OPT+EDIT` when note playing | Plays/stops<br>Decrease/increase playback speed (will go negative for reverse playback)<br>Immediately change to `-1x` or `1x` playback<br>Sets playback to `1x`<br>Return to zero |
-| on `Transport bar` record button<br>`SHIFT+EDIT` | Toggle `Punch In` |
-| on `Transport bar` `<<` and `>>`<br>`EDIT`<br>`OPT`<br>`SHIFT+EDIT` | Move 1ms (hold to scrub faster)<br>Move `1/32nd` grid<br>Seeks to punch/loop start/end times |
-| on `Audio` & `MIDI` pages track waveform<br>(1) `SHIFT + OPT`<br>then (2) `OPT`<br>then (3) `SHIT + OPT` | (1) Enters highlight region start adjust (`EDIT+direction` to adjust time)<br>(2) toggles between being able to set start and end highlight region window<br>(3) present track edit options  |
-| on `MIDI` track waveform<br>`Double-Tap EDIT` | Opens **Piano Roll Note Editor**. from here,<br>`UP/DOWN/LEFT/RIGHT to navigate grid (hold `SHIFT` to move in larger increments)<br>`EDIT` to begin note placement, then `LEFT/RIGHT` to adjust note length, `UP/DOWN` to change note, `SHIFT+UP/DOWN` adjusts note velocity (`EDIT` again confirms placement, `OPT` cancels note edit)<br>place cursor on an existing note, then `EDIT` to begin editing that note, `OPT+EDIT` to clear that note<br>`SHIFT + OPT` to exit piano roll  |
-| on `Audio` & `MIDI` pages track waveform<br>`Double-Tap OPT` | Toggle zoom levels of timeline |
-| on 'Sampler' instrument<br>`SHIFT+EDIT` | Load/record sample to highlighted key
-| on `Master` page `Double-Tap OPT` | Toggle track strips between **Audio (`A1`–`A8`) & MIDI Tracks (`M1`–`M8`)** |
-| on `Master` page `EDIT+LEFT/RIGHT` when on `(M)ute` or `(S)olo` | Toggle `M`/`S` of all track left/right |
+| on top timeline bar<br>- `EDIT+UP/DOWN/LEFT/RIGHT`<br>- `SHIFT+EDIT` | - Coarse/fine adjust selected time or beat.bar.8th.16th.32nd granularity<br>- Toggles seek to punch/loop start and end times |
+| on `Transport bar` `Play`/`Stop` button<br>- `EDIT`<br>- `EDIT+LEFT/RIGHT`<br>- `EDIT+UP/DOWN`<br>- `OPT+EDIT` while playing<br>- `OPT+EDIT` when note playing | - Plays/stops<br>- Decrease/increase playback speed (will go negative for reverse playback)<br>- Immediately change to `-1x` or `1x` playback<br>- Sets playback to `1x`<br>- Return to zero |
+| on `Transport bar` record button<br>- `SHIFT+EDIT` | Toggle `Punch In` |
+| on `Transport bar` `<<` and `>>`<br>- `EDIT`<br>- `OPT`<br>- `SHIFT+EDIT` | - Move 1ms (hold to scrub faster)<br>Move `1/32nd` grid<br>- Seeks to punch/loop start/end times |
+| on `Audio` & `MIDI` pages track waveform<br>- (1) `SHIFT + OPT`<br>- then (2) `OPT`<br>- then (3) `SHIT + OPT` | - (1) Enters highlight region start adjust (`EDIT+direction` to adjust time)<br>- (2) toggles between being able to set start and end highlight region window<br>- (3) present track edit options  |
+| on `MIDI` track waveform<br>- `Double-Tap EDIT` | Opens **Piano Roll Note Editor**. from here,<br>- `UP/DOWN/LEFT/RIGHT` to navigate grid (hold `SHIFT` to move in larger increments)<br>- `EDIT` to begin note placement, then `LEFT/RIGHT` to adjust note length, `UP/DOWN` to change note, `SHIFT+UP/DOWN` adjusts note velocity (`EDIT` again confirms placement, `OPT` cancels note edit)<br>- place cursor on an existing note, then `EDIT` to begin editing that note, `OPT+EDIT` to clear that note<br>- `SHIFT + OPT` to exit piano roll  |
+| on `Audio` & `MIDI` pages track waveform<br>- `Double-Tap OPT` | Toggle zoom levels of timeline |
+| on 'Sampler' instrument<br>- `SHIFT+EDIT` | Load/record sample to highlighted key
+| on `Master` page<br>- `Double-Tap OPT` | Toggle track strips between **Audio (`A1`–`A8`) & MIDI Tracks (`M1`–`M8`)** |
+| on `Master` page<br>- `EDIT+LEFT/RIGHT` when on `(M)ute` or `(S)olo` | Toggle `M`/`S` of all track left/right |
 
 ---
 
