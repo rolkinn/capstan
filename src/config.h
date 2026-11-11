@@ -8,7 +8,7 @@
 
 // Firmware version formatted as "x.y" (updated only when explicitly requested)
 #ifndef CAPSTAN_VERSION
-#define CAPSTAN_VERSION "1.0"
+#define CAPSTAN_VERSION "1.1"
 #endif
 
 // Compile-time debug flag (0 in normal/release builds, 1 via `python build_all.py --debug`)
