@@ -1,6 +1,7 @@
-# Capstan — Audio + MIDI Tape Recorder Firmware for M8
+# Capstan
+## Audio + MIDI Tape Recorder Firmware for M8
 
-**Capstan** is a linear tape-style **4-stereo, 4-mono track audio recorder**, **8-track MIDI sequencer**, and **multi-engine synthesizer/sampler** firmware for the **M8 Model:01** and **M8 Model:02**.
+**Capstan** is a linear tape-style **4-stereo, 4-mono track audio recorder**, **8-track MIDI sequencer**, and **multi-engine synthesizer & sampler** firmware for the **M8 Model:01** and **M8 Model:02**.
 
 ---
 
@@ -26,47 +27,59 @@ To flash onto your hardware:
 - **Record, Overdub, & Master Resampling**:
   - Per-track `RECORD` and `OVERDUB`
   - **Master Resampling (`RES`)**: Bounce the **Pre-Master FX** or **Post-Master FX** onto any audio track.
-- **Track Region Editing & Standard MIDI File support (`.mid`)**: `COPY`, `CUT`, `PASTE`, `DUPL`, `CLR`, and `.wav` audio clip import.
-- **Variable Tape Speed & Reverse Playback**: Tape speed control from **`-5.00x` to `+5.00x`**, including **`-1.00x` reverse recording and overdubbing**.
+- **Track Region Editing**: `COPY`, `CUT`, `PASTE`, `DUPL`, `CLR`, and `.wav` audio clip import.
+- **Variable Tape Speed & Reverse Playback**: Tape speed control from **`-5.00x - +5.00x`**, including **`-1.00x` reverse recording and overdubbing**.
 - **Punch-In/Out & Looping**: independent **Punch In/Out** (`|o|`) and **Loop** modes.
-- **Audio & MIDI Threshold Triggered Recording**: Auto-start recording based on input threshold and configurable 1–4 bar woodblock metronome count-in.
-- **Configurable 1–4 bar metronome count-in**.
+- **Audio & MIDI Threshold Triggered Recording**: Auto-start recording based on input threshold.
+- **Configurable metronome with 0–4 bar count-in**.
 
 ### 8-Track Linear MIDI Recorder & Piano Roll Editor (`480 PPQN`)
 - **8 MIDI Tracks (`M1`–`M8`)**: `Note On/Off`, `Velocity`, `Control Change (CC)`, and `Pitch Bend`.
-- **MIDI Routing**: Per-track Input channel (`OFF`, `ALL`, `01`–`16`) and Output destination (`OFF`, external TRS/USB MIDI `C01`–`C16`, or internal instruments `I01`–`I08`).
-- **Interactive Piano Roll Editor**: Double-tap `EDIT` on any MIDI track waveform to open the 1/32nd-note grid Piano Roll editor with note placement, length adjustment, velocity editing, and auditions.
+- **MIDI Routing**: Per-track Input channel (`OFF`, `ALL`, `C01`–`C16`) and Output destination (`OFF`, MIDI channels `C01`–`C16`, or internal instruments `I01`–`I08`).
+- **Interactive Piano Roll Editor**: Double-tap `EDIT` on any MIDI track waveform to open the 1/32nd-note grid Piano Roll editor.
 - **Track Region Editing & Standard MIDI File support (`.mid`)**: `QUANTIZE` (`1/4`, `1/8`, `1/16`, `1/32`), `COPY`, `CUT`, `PASTE`, `DUPL`, `CLR`, and MIDI `.mid` clip import/export.
 
 ### 8-Slot Multi-Engine Synthesizer & Sampler (`I01`–`I08`)
-- **32-voice** dynamically shared global polyphony (up to 8 voices per instrument) with per-instrument **Amp** & **Filter ADSR**, **Drive**, **Chorus**, **Delay**, **Reverb** sends.
-1. **2-Op FM synth**: Operator A & B with 3 algorithms (`[A] [B]`, `[B]>[A]`, `[A]>[B]`), `0.00`–`24.00` frequency ratios, feedback, and per-operator ADSR envelopes.
-2. **Phase Distortion synth**: 8 waveforms (`Saw`, `Square`, `Pulse`, `Double Sine`, `Saw-Pulse`, `Resonance I/II/III`) with dual-line combinations (`Line 1`, `Line 2`, `Line 2 > Line 1`).
-3. **4-Octave SD Card WAV Sampler**: 48 keys (`C3`–`B6`) per sampler instance with direct SD `.WAV` streaming, live audio-input sample recording, and 4 trigger modes (`STOP`, `ONCE`, `REP`, `REPTHRU`).
-4. **Noise Texture Drone synth**: 3-section atmospheric synth (`DRONE OSC`, `NOISE BED`, `CRACKLE & MOD`) with `Gate`, `Latch`, and `Auto` drone modes.
+- **32-voice** shared global polyphony (up to 8 voices per instrument) with per-instrument **Amp** & **Filter ADSR**, **Drive**, **Chorus**, **Delay**, and **Reverb** sends.
+- Current instruments included:
+  1. **2-op FM synth**
+  2. **Phase Distortion synth**
+  3. **Noise Texture Drone synth**
+  4. **Sampler**: 48 sample keys (`C3`–`B6`) per sampler instance, with live audio-input sample recording.
+
 
 ### Master Mixing, Effects, MIDI Mapping, & USB Connectivity
 - **Master Page Track Control**: 8-track Audio (`VOL`, `BAL`/`PAN`, `M`, `S`) and MIDI (`IN`, `OUT`, `M`, `S`) console strips.
-- **Master Page FX chain**:  `CHOR -> DLAY -> D.FB -> RVRB -> TAPE -> COMP`) and Master `VOL`.
-- **Global & Per-Instrument MIDI CC Mapping**: Map any external MIDI CC to Transport, Track Mixer, Master FX, Navigation, or any Synthesizer/Sampler parameter.
-- **Composite USB Device**: Simultaneous **USB Audio** (14-channel output: Master L/R + Tracks 1–4 Stereo + Tracks 5–8 Mono; 2-channel stereo input), **USB MIDI**, **USB Serial**, and **USB Mass Storage Drive** mode.
+- **Master Page FX chain**:  `Chorus -> Delay -> Reverb -> Tape Saturator -> Compressor`.
+- **Transport control, track mixer, navigation, & per-instrument MIDI CC Mapping** with learn assignment.
+- **Composite USB Device**: **USB Audio**, **USB MIDI**, **USB Serial**, and **USB Mass Storage Drive** mode.
+  - 14-channel output: Master L/R, Tracks 1–4 L/R, Tracks 5–8 Mono
+  - 2-channel stereo input
 
 ---
 
 ## 3. Navigation & Core Controls
 
-Hold **`SHIFT` + Directional Arrows** to navigate between pages
-
 | Keys | Action |
 |---|---|
-| `SHIFT + UP / DOWN / LEFT / RIGHT` | Navigate between pages in the spatial map |
-| `PLAY` | Start / Stop transport |
+| `SHIFT + UP / DOWN / LEFT / RIGHT` | Navigate between pages in the spatial map.<br>**NOTE:** When on `Audio` & `MIDI` pages, cursor first navigates to top timeline or bottom transport bars before moving to other pages above/below |
+| when in overlay/confirmation<br>`OPT` | Cancel/exit |
+| in `File browser`<br>`OPT` | Exit |
+| `PLAY` | Start / Stop transport at current playhead position |
 | `SHIFT + PLAY` | Start transport from beginning |
 | `EDIT + UP / DOWN / LEFT / RIGHT` | Coarse/fine adjust selected parameter |
 | `EDIT` | Toggle button, cycle option, or open modal/editor |
 | `OPT + EDIT` | Reset parameter to default |
-| `Double-Tap EDIT` (on `MIDI` track waveform) | Open **Piano Roll Note Editor** |
-| `Double-Tap OPT` (on `Master` page) | Toggle track strips between **Audio (`A1`–`A8`) & MIDI Tracks (`M1`–`M8`)** |
+| on top timeline bar<br>`EDIT+UP/DOWN/LEFT/RIGHT`<br>`SHIFT+EDIT` | Coarse/fine adjust selected time or beat.bar.8th.16th.32nd granularity<br>Toggles seek to punch/loop start and end times |
+| on `Transport bar` `Play`/`Stop` button<br>`EDIT`<br>`EDIT+LEFT/RIGHT`<br>`EDIT+UP/DOWN`<br>`OPT+EDIT` while playing<br>`OPT+EDIT` when note playing | Plays/stops<br>Decrease/increase playback speed (will go negative for reverse playback)<br>Immediately change to `-1x` or `1x` playback<br>Sets playback to `1x`<br>Return to zero |
+| on `Transport bar` record button<br>`SHIFT+EDIT` | Toggle `Punch In` |
+| on `Transport bar` `<<` and `>>`<br>`EDIT`<br>`OPT`<br>`SHIFT+EDIT` | Move 1ms (hold to scrub faster)<br>Move `1/32nd` grid<br>Seeks to punch/loop start/end times |
+| on `Audio` & `MIDI` pages track waveform<br>(1) `SHIFT + OPT`<br>then (2) `OPT`<br>then (3) `SHIT + OPT` | (1) Enters highlight region start adjust (`EDIT+direction` to adjust time)<br>(2) toggles between being able to set start and end highlight region window<br>(3) present track edit options  |
+| on `MIDI` track waveform<br>`Double-Tap EDIT` | Opens **Piano Roll Note Editor**. from here,<br>`UP/DOWN/LEFT/RIGHT to navigate grid (hold `SHIFT` to move in larger increments)<br>`EDIT` to begin note placement, then `LEFT/RIGHT` to adjust note length, `UP/DOWN` to change note, `SHIFT+UP/DOWN` adjusts note velocity (`EDIT` again confirms placement, `OPT` cancels note edit)<br>place cursor on an existing note, then `EDIT` to begin editing that note, `OPT+EDIT` to clear that note<br>`SHIFT + OPT` to exit piano roll  |
+| on `Audio` & `MIDI` pages track waveform<br>`Double-Tap OPT` | Toggle zoom levels of timeline |
+| on 'Sampler' instrument<br>`SHIFT+EDIT` | Load/record sample to highlighted key
+| on `Master` page `Double-Tap OPT` | Toggle track strips between **Audio (`A1`–`A8`) & MIDI Tracks (`M1`–`M8`)** |
+| on `Master` page `EDIT+LEFT/RIGHT` when on `(M)ute` or `(S)olo` | Toggle `M`/`S` of all track left/right |
 
 ---
 
