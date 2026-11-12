@@ -4,8 +4,6 @@
 
 **Video tutorial:** https://www.youtube.com/watch?v=xBZS2HxJms4
 
----
-
 ## 1. Installing Pre-Built Firmware (`.hex`)
 
 Release builds provide two firmware images:
@@ -22,8 +20,6 @@ Notes:
   - On first boot, Capstan automatically creates the `/Capstan` directory structure on the SD card without modifying any other folders/files on the card.
   - If coming from a different firmware, may need to press the M8's reset button on the back. If TyUploader doesn't upload the Capstan .hex, use the reset button first then try again.
   - To revert back to a different firmware, simply use TyUploader again and choose the firmware you want to install.
-
----
 
 ## 2. Key Features
 
@@ -52,7 +48,6 @@ Notes:
   3. **Noise Texture Drone synth**
   4. **Sampler**: 48 sample keys (`C3`–`B6`) per sampler instance, with live audio-input sample recording.
 
-
 ### Master Mixing, Effects, MIDI Mapping, & USB Connectivity
 - **Master Page Track Control**: 8-track Audio (`VOL`, `BAL`/`PAN`, `M`, `S`) and MIDI (`IN`, `OUT`, `M`, `S`) console strips.
 - **Master Page FX chain**:  `Chorus -> Delay -> Reverb -> Tape Saturator -> Compressor`.
@@ -60,8 +55,6 @@ Notes:
 - **Composite USB Device**: **USB Audio**, **USB MIDI**, **USB Serial**, and **USB Mass Storage Drive** mode.
   - 14-channel output: Master L/R, Tracks 1–4 L/R, Tracks 5–8 Mono
   - 2-channel stereo input
-
----
 
 ## 3. Navigation & Core Controls
 
@@ -74,7 +67,7 @@ Notes:
 | `EDIT + UP/DOWN/LEFT/RIGHT` | Coarse/fine adjust selected parameter |
 | `EDIT` | Toggle button, cycle option, or open modal/editor |
 | `OPT + EDIT` | Reset parameter to default |
-| `OPT + LEFT/RIGHT`<br>`OPT + UP/DOWN` | Scrub timeline from any page or cell:<br>- `OPT + LEFT/RIGHT`: Move `1 ms` (hold to scrub faster)<br>- `OPT + UP/DOWN`: Step `-1` / `+1` beat |
+| `OPT + LEFT/RIGHT`<br>`OPT + UP/DOWN` | Scrub timeline from any page or cell:<br>- `OPT + LEFT/RIGHT`: Move `±1 ms` (hold to scrub faster)<br>- `OPT + UP/DOWN`: Step `±1 beat` |
 | on top timeline bar<br>- `EDIT+UP/DOWN/LEFT/RIGHT`<br>- `SHIFT+EDIT` | - Coarse/fine adjust selected time or beat.bar.8th.16th.32nd granularity<br>- Toggles seek to punch/loop start and end times |
 | on `Transport bar` `Play`/`Stop` button<br>- `EDIT`<br>- `EDIT+LEFT/RIGHT`<br>- `EDIT+UP/DOWN`<br>- `OPT+EDIT` while playing<br>- `OPT+EDIT` when note playing | - Plays/stops<br>- Decrease/increase playback speed (will go negative for reverse playback)<br>- Immediately change to `-1x` or `1x` playback<br>- Sets playback to `1x`<br>- Return to zero |
 | on `Transport bar` record button<br>- `SHIFT+EDIT` | Toggle `Punch In` |
@@ -85,8 +78,6 @@ Notes:
 | on 'Sampler' instrument<br>- `SHIFT+EDIT` | Load/record sample to highlighted key
 | on `Master` page<br>- `Double-Tap OPT` | Toggle track strips between **Audio (`A1`–`A8`) & MIDI Tracks (`M1`–`M8`)** |
 | on `Master` page<br>- `EDIT+LEFT/RIGHT` when on `(M)ute` or `(S)olo` | Toggle `M`/`S` of all track left/right |
-
----
 
 ## 4. SD Card Directory Structure (`/Capstan`)
 
@@ -115,10 +106,7 @@ Capstan stores all system settings, songs, projects, and presets inside `/Capsta
         └── SAMPLES/
             └── *.WAV                 # Recorded sampler audio files
 ```
-
 > **Note**: Songs **must be saved** from the **Main** page (`[ SAVE ]`).
-
----
 
 ## 5. Building from Source
 
@@ -146,3 +134,9 @@ python build_all.py --debug
 ```
 
 See [`docs/architecture.md`](docs/architecture.md) and [`docs/HARDWARE.md`](docs/HARDWARE.md) for detailed software architecture and hardware reference documentation.
+
+---
+
+## Shoutouts:
+- [minusro's](https://github.com/minusro ) work done with their [L7 looping firmware](https://github.com/minusro/L7).
+- Silen Audio's [Infinite Flow](https://www.silen.software/products/infinite-flow) software synth.
