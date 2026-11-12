@@ -51,6 +51,7 @@ void samplerRemapSongFolder(const char *oldSongName, const char *newSongName);
 // Real-time voice & SD stream hooks (called by instruments.cpp & storage.cpp)
 bool samplerPrepareVoiceOn(int instIdx, uint8_t note, uint32_t &outStreamIdx, uint32_t &outStreamGen, bool allowSdIo = true);
 void samplerActivateStream(uint32_t streamIdx, uint32_t streamGen, int voiceIdx);
+void samplerServiceActiveStreams();
 void samplerServiceStreams();
 
 // SD Card Persistence hooks (appended to INST.DAT and .FMI, staged in RAM1)

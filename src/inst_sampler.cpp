@@ -60,7 +60,7 @@ static int8_t clipboardSamplerSrcSlot = -1; // -1 = none, 0..7 = live slot, -2 =
 // Lock-Free SD WAV Streaming Pool (4 concurrent stereo streams)
 // ============================================================================
 static constexpr int NUM_SAMPLER_STREAMS = 4;
-static constexpr uint32_t SAMPLER_RING_FRAMES = 512;
+static constexpr uint32_t SAMPLER_RING_FRAMES = 2048;
 static constexpr uint32_t SAMPLER_RING_MASK = SAMPLER_RING_FRAMES - 1;
 
 struct SamplerStream {
@@ -238,7 +238,7 @@ FLASHMEM bool samplerIsKeyPlaying(int instIdx, int keyIdx) {
   if (instIdx < 0 || instIdx >= NUM_INSTRUMENTS) return false;
   if (keyIdx < 0 || keyIdx >= SAMPLER_NUM_KEYS) return false;
   for (int s = 0; s < NUM_SAMPLER_STREAMS; s++) {
-    if (samplerStreams[s].active &&
+    if ((samplerStreams[s].active || samplerStreams[s].pendingVoice) &&
         (int)samplerStreams[s].instIdx == instIdx &&
         (int)samplerStreams[s].keyIdx == keyIdx) {
       return true;
@@ -251,7 +251,8 @@ FLASHMEM uint64_t samplerPlayingKeyMask(int instIdx) {
   if (instIdx < 0 || instIdx >= NUM_INSTRUMENTS) return 0;
   uint64_t mask = 0;
   for (int s = 0; s < NUM_SAMPLER_STREAMS; s++) {
-    if (samplerStreams[s].active && (int)samplerStreams[s].instIdx == instIdx) {
+    if ((samplerStreams[s].active || samplerStreams[s].pendingVoice) &&
+        (int)samplerStreams[s].instIdx == instIdx) {
       uint8_t k = samplerStreams[s].keyIdx;
       if (k < SAMPLER_NUM_KEYS) mask |= (1ULL << k);
     }
@@ -417,13 +418,13 @@ FLASHMEM static void fillSamplerStream(SamplerStream &st, int maxPasses, bool fo
     return;
   }
 
-  // Stage multi-sector SD reads (up to 2,048 bytes = 4 sectors) through the shared RAM1 chunk buffer
-  // for DMA_SDIO cache safety and 4x lower SDIO command overhead.
-  static constexpr size_t SAMPLER_READ_BUF_BYTES = 2048;
+  // Stage multi-sector SD reads (up to 4,096 bytes = 8 sectors) through the shared RAM1 chunk buffer
+  // for DMA_SDIO cache safety and low SDIO command overhead.
+  static constexpr size_t SAMPLER_READ_BUF_BYTES = 4096;
   uint8_t *rawBuf = reinterpret_cast<uint8_t *>(storageSharedChunkBuf());
   const uint32_t maxFramesPerRead = max(1u, (uint32_t)(SAMPLER_READ_BUF_BYTES / st.bytesPerFrame));
 
-  const uint32_t minFree = forceHeld ? 32u : 128u;
+  const uint32_t minFree = forceHeld ? 64u : 512u;
   for (int pass = 0; pass < maxPasses; pass++) {
     uint32_t queued = st.head - st.tail;
     if (queued + minFree > SAMPLER_RING_FRAMES) break;
@@ -639,11 +640,12 @@ void samplerActivateStream(uint32_t streamIdx, uint32_t streamGen, int voiceIdx)
   }
 }
 
-FLASHMEM void samplerServiceStreams() {
+FLASHMEM void samplerServiceActiveStreams() {
+  if (fillingStreamIdx >= 0) return;
   for (int s = 0; s < NUM_SAMPLER_STREAMS; s++) {
     SamplerStream &st = samplerStreams[s];
     if (st.pendingVoice) {
-      if (!st.eofReached && (st.head - st.tail) < (SAMPLER_RING_FRAMES / 2)) {
+      if (!st.eofReached && (st.head - st.tail) < (SAMPLER_RING_FRAMES - 256u)) {
         fillingStreamIdx = (int8_t)s;
         fillSamplerStream(st, 2, true);
         fillingStreamIdx = -1;
@@ -662,6 +664,11 @@ FLASHMEM void samplerServiceStreams() {
       fillingStreamIdx = -1;
     }
   }
+}
+
+FLASHMEM void samplerServiceStreams() {
+  if (fillingStreamIdx >= 0) return;
+  samplerServiceActiveStreams();
 
   // Pre-warm at most 1 idle stream slot per pass so the first 4 Sampler keys trigger in ISR with 0 SD I/O
   for (int s = 0; s < NUM_SAMPLER_STREAMS; s++) {

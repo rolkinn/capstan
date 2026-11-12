@@ -16,7 +16,13 @@ using namespace looper;
 static constexpr int FM_MAX_COLS = 6;
 static uint64_t prevFmCellKey[FM_ROW_COUNT][FM_MAX_COLS] = {};
 static uint64_t prevSectionTitleKey[3] = {};
-static uint64_t prevSamplerKbKey = 0;
+static bool prevSamplerKbValid = false;
+static int prevSamplerKbInst = -1;
+static int prevSamplerKbScrollW = -1;
+static bool prevSamplerKbRowSel = false;
+static int prevSamplerKbSelKey = -1;
+static uint64_t prevSamplerKbHasMask = 0;
+static uint64_t prevSamplerKbPlayMask = 0;
 static uint64_t prevBrowserBannerKey = 0;
 static uint64_t prevBrowserRowKey[SAMPLER_BROWSER_VISIBLE_ROWS] = {};
 static uint64_t prevInstBrowserBannerKey = 0;
@@ -79,7 +85,7 @@ FLASHMEM void invalidateInstBrowserCache() {
 FLASHMEM static void instEditInvalidateCache() {
   memset(prevFmCellKey, 0, sizeof(prevFmCellKey));
   memset(prevSectionTitleKey, 0, sizeof(prevSectionTitleKey));
-  prevSamplerKbKey = 0;
+  prevSamplerKbValid = false;
   prevBrowserBannerKey = 0;
   memset(prevBrowserRowKey, 0, sizeof(prevBrowserRowKey));
   prevSaveToBannerKey = 0;
@@ -377,16 +383,6 @@ FLASHMEM static void drawSamplerKeyboard(int instIdx, int selKey, bool rowSel, b
   const uint64_t hasMask = samplerKeyMask(instIdx);
   const uint64_t playMask = samplerPlayingKeyMask(instIdx);
 
-  uint64_t ck = hashInit();
-  ck = hashMix(ck, (uint64_t)instIdx |
-                   ((uint64_t)selKey << 8) |
-                   ((uint64_t)scrollW << 16) |
-                   ((uint64_t)rowSel << 24));
-  ck = hashMix(ck, hasMask);
-  ck = hashMix(ck, playMask);
-  if (!full && ck == prevSamplerKbKey) return;
-  prevSamplerKbKey = ck;
-
   const int kbX = SX(6);
   const int kbY = SY(84);
   const int kbW = SX(308); // 11 white keys * SX(28) = SX(308)
@@ -396,16 +392,77 @@ FLASHMEM static void drawSamplerKeyboard(int instIdx, int selKey, bool rowSel, b
   const int blackW = SX(22);
   const int blackH = SY(86);
 
+  const bool fullKb = full || !prevSamplerKbValid ||
+                      (prevSamplerKbInst != instIdx) ||
+                      (prevSamplerKbScrollW != scrollW);
+
+  int sliceX0 = 0;
+  int sliceX1 = kbW;
+  bool dirtyWhiteVis = true;
+
+  if (!fullKb) {
+    uint64_t dirtyKeys = (hasMask ^ prevSamplerKbHasMask) | (playMask ^ prevSamplerKbPlayMask);
+    if (rowSel != prevSamplerKbRowSel || selKey != prevSamplerKbSelKey) {
+      dirtyKeys |= (1ULL << selKey);
+      if (prevSamplerKbSelKey >= 0 && prevSamplerKbSelKey < SAMPLER_NUM_KEYS) {
+        dirtyKeys |= (1ULL << prevSamplerKbSelKey);
+      }
+    }
+    if (dirtyKeys == 0) return;
+
+    sliceX0 = kbW;
+    sliceX1 = 0;
+    dirtyWhiteVis = false;
+
+    for (int wVis = 0; wVis < SAMPLER_VISIBLE_WHITE_KEYS; wVis++) {
+      int k = whiteKeyToKeyIdx(scrollW + wVis);
+      if (dirtyKeys & (1ULL << k)) {
+        sliceX0 = min(sliceX0, wVis * whiteW);
+        sliceX1 = max(sliceX1, (wVis + 1) * whiteW);
+        dirtyWhiteVis = true;
+      }
+    }
+    for (int wVis = 0; wVis < SAMPLER_VISIBLE_WHITE_KEYS - 1; wVis++) {
+      int wGlobal = scrollW + wVis;
+      int deg = wGlobal % 7;
+      if (deg == 2 || deg == 6) continue;
+      int k = whiteKeyToKeyIdx(wGlobal) + 1;
+      if (dirtyKeys & (1ULL << k)) {
+        int bx = (wVis + 1) * whiteW - blackW / 2;
+        sliceX0 = min(sliceX0, bx);
+        sliceX1 = max(sliceX1, bx + blackW);
+      }
+    }
+
+    sliceX0 = max(0, sliceX0);
+    sliceX1 = min(kbW, sliceX1);
+  }
+
+  prevSamplerKbValid = true;
+  prevSamplerKbInst = instIdx;
+  prevSamplerKbScrollW = scrollW;
+  prevSamplerKbRowSel = rowSel;
+  prevSamplerKbSelKey = selKey;
+  prevSamplerKbHasMask = hasMask;
+  prevSamplerKbPlayMask = playMask;
+
+  if (sliceX0 >= sliceX1) return;
+  const int sliceW = sliceX1 - sliceX0;
+
   for (int strip = 0; strip < 6; strip++) {
     const int stripY0 = strip * stripH;
-    Surface s(kbW, stripH);
-    s.fillRect(0, 0, kbW, stripH, BG);
+    if (!fullKb && !dirtyWhiteVis && stripY0 >= blackH) {
+      continue;
+    }
+    Surface s(sliceW, stripH);
+    s.fillRect(0, 0, sliceW, stripH, BG);
 
-    // 1. Draw the 11 visible White Keys across the current scroll window
+    // 1. Draw visible White Keys overlapping [sliceX0, sliceX1)
     for (int wVis = 0; wVis < SAMPLER_VISIBLE_WHITE_KEYS; wVis++) {
+      int wx = wVis * whiteW - sliceX0;
+      if (wx + whiteW <= 0 || wx >= sliceW) continue;
       int wGlobal = scrollW + wVis;
       int k = whiteKeyToKeyIdx(wGlobal);
-      int wx = wVis * whiteW;
       bool isCur = rowSel && (selKey == k);
       bool isRef = !rowSel && (selKey == k);
       bool isPlay = (playMask & (1ULL << k)) != 0;
@@ -430,15 +487,16 @@ FLASHMEM static void drawSamplerKeyboard(int instIdx, int selKey, bool rowSel, b
       drawStripTextLocal(s, stripY0, wx + max(1, (whiteW - lw) / 2), SY(126), lbl, txtCol);
     }
 
-    // 2. Draw Black Keys between adjacent visible White Keys overlapping top SY(86)
+    // 2. Draw Black Keys overlapping [sliceX0, sliceX1) across top SY(86)
     if (stripY0 < blackH) {
       for (int wVis = 0; wVis < SAMPLER_VISIBLE_WHITE_KEYS - 1; wVis++) {
         int wGlobal = scrollW + wVis;
         int deg = wGlobal % 7;
         if (deg == 2 || deg == 6) continue; // No black key after E or B
-        int k = whiteKeyToKeyIdx(wGlobal) + 1;
         int center = (wVis + 1) * whiteW;
-        int bx = center - blackW / 2;
+        int bx = center - blackW / 2 - sliceX0;
+        if (bx + blackW <= 0 || bx >= sliceW) continue;
+        int k = whiteKeyToKeyIdx(wGlobal) + 1;
         bool isCur = rowSel && (selKey == k);
         bool isRef = !rowSel && (selKey == k);
         bool isPlay = (playMask & (1ULL << k)) != 0;
@@ -464,7 +522,7 @@ FLASHMEM static void drawSamplerKeyboard(int instIdx, int selKey, bool rowSel, b
       }
     }
 
-    s.blit(kbX, kbY + stripY0);
+    s.blit(kbX + sliceX0, kbY + stripY0);
     keepStreaming();
   }
 }
@@ -1319,7 +1377,7 @@ FLASHMEM static void instEditDrawPage(bool full) {
       memset(prevFmCellKey[r], 0, sizeof(prevFmCellKey[r]));
     }
     memset(prevSectionTitleKey, 0, sizeof(prevSectionTitleKey));
-    prevSamplerKbKey = 0;
+    prevSamplerKbValid = false;
   }
 
   // Row 0: [0: Instrument Name] [1: Load] [2: Save To...]

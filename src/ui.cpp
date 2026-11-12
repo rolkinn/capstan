@@ -294,7 +294,7 @@ FLASHMEM static void drawHeaderBar(bool full) {
   const bool armedNow = anyTrackArmed();
   const bool hdrSel = isHeaderRowSelected();
   const int selField = hdrSel ? constrain(headerCell, 0, HEADER_CELL_COUNT - 1) : -1;
-  const int optHlField = hdrSel ? -1 : inputOptHeaderHighlightCell();
+  const int optHlField = inputOptHeaderHighlightCell();
 
   // During steady-state playback, update the live MM:SS.mmm & BBB.B.E.S.T header counter at 10 Hz
   if (!full && prevHeaderKey != 0 && tm == TransportMode::Running &&
@@ -375,11 +375,11 @@ FLASHMEM static void drawHeaderBar(bool full) {
 
       for (int i = 0; i < HEADER_CELL_COUNT; i++) {
         int tw = textWidth(tok[i]);
-        if (i == selField) {
-          s.fillRect(max(0, curX - PX), pillY, tw + 2 * PX, pillH, pageAccent);
-          s.drawText(curX, ty, tok[i], BG);
-        } else if (i == optHlField) {
+        if (i == optHlField) {
           s.fillRect(max(0, curX - PX), pillY, tw + 2 * PX, pillH, LIGHT);
+          s.drawText(curX, ty, tok[i], BG);
+        } else if (i == selField) {
+          s.fillRect(max(0, curX - PX), pillY, tw + 2 * PX, pillH, pageAccent);
           s.drawText(curX, ty, tok[i], BG);
         } else {
           s.drawText(curX, ty, tok[i], c);

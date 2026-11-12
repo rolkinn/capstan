@@ -678,8 +678,8 @@ def verify_dma_and_storage_source_invariants():
         and "audioRestoreLastTrackCursor()" in app_cpp
         and "midiRestoreLastTrackCursor()" in app_cpp
         and "inputOptHeaderHighlightCell()" in input_cpp
-        and "isCursorOnTrackWaveCell()" in input_cpp,
-        "Track OPT+EDIT 3-row overlay (CLEAR/SEEK/PUNCH-LOOP) and waveform cell OPT+LEFT/RIGHT (ms) & OPT+UP/DOWN (beat) shortcuts are configured",
+        and "canOptScrubTimeline()" in input_cpp,
+        "Track OPT+EDIT 3-row overlay (CLEAR/SEEK/PUNCH-LOOP) and global OPT+LEFT/RIGHT (ms) & OPT+UP/DOWN (beat) shortcuts are configured",
     )
 
     # 1u. Per-Instrument MIDI CC Mapping Subview (SHIFT+RIGHT from Instrument Edit, IMAP/IM1P persistence, external & routed CC control)
@@ -698,6 +698,22 @@ def verify_dma_and_storage_source_invariants():
         and "closeInstMidiMap()" in page_inst_edit_cpp
         and '"I%02d MIDI MAP: %s"' in page_inst_edit_cpp,
         "Per-Instrument MIDI CC Mapping page (SHIFT+RIGHT from Instrument Edit, IMAP/IM1P persistence, and external + routed track CC control) is configured",
+    )
+
+    # 1v. Audio Track Clear & WAV Truncation Safety (prevents cleared audio from resurrecting on record/load clip)
+    clear_idx = storage_cpp.find("FLASHMEM void clearAudioTrack(int t)")
+    clear_end = storage_cpp.find("AUDIO_CLIP_PATH", clear_idx)
+    ensure_idx = storage_cpp.find("FLASHMEM static void ensureTrackWavOpen(int recTrk)")
+    ensure_end = storage_cpp.find("FLASHMEM static void armRecordingStateForTrack(", ensure_idx)
+    check(clear_idx != -1 and clear_end != -1 and ensure_idx != -1 and ensure_end != -1, "clearAudioTrack() and ensureTrackWavOpen() exist in storage.cpp")
+    clear_body = storage_cpp[clear_idx:clear_end]
+    ensure_body = storage_cpp[ensure_idx:ensure_end]
+    check(
+        "!songSaved" not in clear_body
+        and "SD.sdfs.remove(wPath)" in clear_body
+        and "O_TRUNC" in ensure_body
+        and "tr.file.truncate()" in ensure_body,
+        "clearAudioTrack() unconditionally removes/truncates track WAV on SD and ensureTrackWavOpen() truncates stale trailing bytes",
     )
 
 

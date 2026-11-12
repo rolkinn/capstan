@@ -867,7 +867,8 @@ bool fmSynthNoteOn(int instIdx, uint8_t note, uint8_t velocity, uint8_t sampleOf
     if (!samplerPrepareVoiceOn(instIdx, note, samplerStreamIdx, samplerStreamGen, allowSdIo)) {
       return allowSdIo; // false when allowSdIo == false (ISR cache miss -> defer to main thread)
     }
-  } else if (allowSdIo) {
+  }
+  if (allowSdIo) {
     refreshInstEnvelopeRates(instIdx, p);
   }
 

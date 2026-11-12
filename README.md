@@ -74,6 +74,7 @@ Notes:
 | `EDIT + UP/DOWN/LEFT/RIGHT` | Coarse/fine adjust selected parameter |
 | `EDIT` | Toggle button, cycle option, or open modal/editor |
 | `OPT + EDIT` | Reset parameter to default |
+| `OPT + LEFT/RIGHT`<br>`OPT + UP/DOWN` | Scrub timeline from any page or cell:<br>- `OPT + LEFT/RIGHT`: Move `1 ms` (hold to scrub faster)<br>- `OPT + UP/DOWN`: Step `-1` / `+1` beat |
 | on top timeline bar<br>- `EDIT+UP/DOWN/LEFT/RIGHT`<br>- `SHIFT+EDIT` | - Coarse/fine adjust selected time or beat.bar.8th.16th.32nd granularity<br>- Toggles seek to punch/loop start and end times |
 | on `Transport bar` `Play`/`Stop` button<br>- `EDIT`<br>- `EDIT+LEFT/RIGHT`<br>- `EDIT+UP/DOWN`<br>- `OPT+EDIT` while playing<br>- `OPT+EDIT` when note playing | - Plays/stops<br>- Decrease/increase playback speed (will go negative for reverse playback)<br>- Immediately change to `-1x` or `1x` playback<br>- Sets playback to `1x`<br>- Return to zero |
 | on `Transport bar` record button<br>- `SHIFT+EDIT` | Toggle `Punch In` |

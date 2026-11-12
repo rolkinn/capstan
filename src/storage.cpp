@@ -1462,6 +1462,9 @@ FLASHMEM bool deleteSongAt(int index) {
 
 FLASHMEM void clearAudioTrack(int t) {
   if (t < 0 || t >= NUM_AUDIO_TRACKS) return;
+  if (transport.mode != TransportMode::Stopped) {
+    storageStopTransport();
+  }
   Track &tr = tracks[t];
   noInterrupts();
   tr.live = false;
@@ -1469,16 +1472,36 @@ FLASHMEM void clearAudioTrack(int t) {
   tr.solo = false;
   tr.recordedFrames = 0;
   tr.head = tr.tail = 0;
+  tr.peakL = 0.0f;
+  tr.peakR = 0.0f;
+  memset(tr.curMix, 0, sizeof(tr.curMix));
   interrupts();
+  tr.fileFrame = transport.tapeFrame;
+
   if (tr.file.isOpen()) {
+    if (tr.file.seekSet(0)) {
+      tr.file.truncate();
+      tr.file.sync();
+    }
     tr.file.close();
   }
-  if (!songSaved) {
+  if (activeSongName[0] != '\0') {
     char wPath[64];
     trackWavByName(activeSongName, t, wPath, sizeof(wPath));
-    if (SD.sdfs.exists(wPath)) {
-      SD.sdfs.remove(wPath);
+    if (SD.sdfs.exists(wPath) && !SD.sdfs.remove(wPath)) {
+      FsFile wf = SD.sdfs.open(wPath, O_RDWR | O_TRUNC);
+      if (wf.isOpen()) {
+        wf.truncate();
+        wf.sync();
+        wf.close();
+      }
     }
+    char legPath[64];
+    snprintf(legPath, sizeof(legPath), "%s/%s/TRACK%d.WAV", SONGS_DIR, activeSongName, t + 1);
+    if (SD.sdfs.exists(legPath)) {
+      SD.sdfs.remove(legPath);
+    }
+    syncSdCard();
   }
   memset(tr.wavePeaks, 0, sizeof(tr.wavePeaks));
   tr.overviewVersion++;
@@ -1623,6 +1646,10 @@ FLASHMEM bool storagePasteAudioClipToTrack(int dstTrack, uint32_t destStartFrame
   }
   if (tr.recordedFrames > 0 && tr.state == TrackState::Empty) {
     tr.state = TrackState::Playing;
+  }
+  uint64_t validBytes = trackWavByteOffset(dstTrack, tr.recordedFrames);
+  if (tr.file.fileSize() > validBytes && tr.file.seekSet(validBytes)) {
+    tr.file.truncate();
   }
   writeWavHeader(tr.file, tr.recordedFrames, dstTrack);
   tr.file.sync();
@@ -2151,9 +2178,19 @@ FLASHMEM static void ensureTrackWavOpen(int recTrk) {
     char wPath[64];
     ensureSongAudioDir(activeSongName);
     trackWavByName(activeSongName, recTrk, wPath, sizeof(wPath));
-    tr.file = SD.sdfs.open(wPath, O_RDWR | O_CREAT);
+    const oflag_t openFlags = (tr.recordedFrames == 0) ? (O_RDWR | O_CREAT | O_TRUNC) : (O_RDWR | O_CREAT);
+    tr.file = SD.sdfs.open(wPath, openFlags);
     if (tr.file.isOpen() && tr.recordedFrames == 0) {
       writeWavHeader(tr.file, 0, recTrk);
+      tr.file.truncate();
+      tr.file.sync();
+    }
+  }
+  if (tr.file.isOpen()) {
+    const uint64_t validBytes = trackWavByteOffset(recTrk, tr.recordedFrames);
+    if (tr.file.fileSize() > validBytes && tr.file.seekSet(validBytes)) {
+      tr.file.truncate();
+      writeWavHeader(tr.file, tr.recordedFrames, recTrk);
       tr.file.sync();
     }
   }
@@ -2241,9 +2278,22 @@ FLASHMEM void storageSyncArmedAudioTrack() {
     }
     interrupts();
     drainRecordingBuffer(true);
-    if (tracks[oldRecTrk].file.isOpen() && tracks[oldRecTrk].recordedFrames > 0) {
-      writeWavHeader(tracks[oldRecTrk].file, tracks[oldRecTrk].recordedFrames, oldRecTrk);
-      tracks[oldRecTrk].file.sync();
+    if (tracks[oldRecTrk].file.isOpen()) {
+      if (tracks[oldRecTrk].recordedFrames > 0) {
+        uint64_t validBytes = trackWavByteOffset(oldRecTrk, tracks[oldRecTrk].recordedFrames);
+        if (tracks[oldRecTrk].file.fileSize() > validBytes && tracks[oldRecTrk].file.seekSet(validBytes)) {
+          tracks[oldRecTrk].file.truncate();
+        }
+        writeWavHeader(tracks[oldRecTrk].file, tracks[oldRecTrk].recordedFrames, oldRecTrk);
+        tracks[oldRecTrk].file.sync();
+      } else {
+        tracks[oldRecTrk].file.close();
+        char wPath[64];
+        trackWavByName(activeSongName, oldRecTrk, wPath, sizeof(wPath));
+        if (SD.sdfs.exists(wPath)) {
+          SD.sdfs.remove(wPath);
+        }
+      }
     }
     recording.windowExited = false;
   }
@@ -2543,6 +2593,10 @@ FLASHMEM void storageStopTransport() {
   if (wasActive || recording.windowExited || recording.mode == Recording::Finishing) {
     drainRecordingBuffer(true);
     if (recTrk >= 0 && tracks[recTrk].file.isOpen() && tracks[recTrk].recordedFrames > 0) {
+      uint64_t validBytes = trackWavByteOffset(recTrk, tracks[recTrk].recordedFrames);
+      if (tracks[recTrk].file.fileSize() > validBytes && tracks[recTrk].file.seekSet(validBytes)) {
+        tracks[recTrk].file.truncate();
+      }
       writeWavHeader(tracks[recTrk].file, tracks[recTrk].recordedFrames, recTrk);
       tracks[recTrk].file.sync();
       songDirty = true;
@@ -2554,7 +2608,8 @@ FLASHMEM void storageStopTransport() {
     Track &tr = tracks[recTrk];
     if (recording.writtenFrames > 0) {
       tr.armMode = ArmMode::Off;
-    } else if (tr.recordedFrames == 0) {
+    }
+    if (tr.recordedFrames == 0) {
       if (tr.file.isOpen()) {
         tr.file.close();
       }
@@ -2567,6 +2622,7 @@ FLASHMEM void storageStopTransport() {
       uint64_t validBytes = trackWavByteOffset(recTrk, tr.recordedFrames);
       if (tr.file.fileSize() > validBytes && tr.file.seekSet(validBytes)) {
         tr.file.truncate();
+        writeWavHeader(tr.file, tr.recordedFrames, recTrk);
         tr.file.sync();
       }
     }
@@ -2584,6 +2640,7 @@ FLASHMEM void storageStopTransport() {
 }
 
 static bool inKeepStreaming = false;
+static bool smpRecOpen = false;
 
 FLASHMEM void keepStreaming() {
   if (inKeepStreaming) return;
@@ -2594,6 +2651,9 @@ FLASHMEM void keepStreaming() {
     for (int t = 0; t < NUM_AUDIO_TRACKS; t++) {
       if (tracks[t].live) fillTrackRing(t, chunks);
     }
+  }
+  if (!smpRecOpen) {
+    samplerServiceActiveStreams();
   }
   inKeepStreaming = false;
 }
@@ -2606,7 +2666,6 @@ static char smpRecFinalPath[SAMPLER_PATH_MAX] = {};
 static char smpRecTempPath[96] = {};
 static int smpRecInst = 0;
 static int smpRecKey = 0;
-static bool smpRecOpen = false;
 static bool smpRecTriggered = false;
 static SamplerRecMode smpRecMode = SamplerRecMode::ThreshAutoStartStop;
 static int16_t smpRecThreshAmp = 1000;
@@ -2940,6 +2999,10 @@ FLASHMEM void serviceStorage() {
       recording.windowExited = false;
       int recTrk = recording.track;
       if (recTrk >= 0 && tracks[recTrk].file.isOpen()) {
+        uint64_t validBytes = trackWavByteOffset(recTrk, tracks[recTrk].recordedFrames);
+        if (tracks[recTrk].file.fileSize() > validBytes && tracks[recTrk].file.seekSet(validBytes)) {
+          tracks[recTrk].file.truncate();
+        }
         writeWavHeader(tracks[recTrk].file, tracks[recTrk].recordedFrames, recTrk);
         tracks[recTrk].file.sync();
       }

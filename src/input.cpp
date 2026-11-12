@@ -508,23 +508,31 @@ static uint32_t scrubHoldStartMs = 0;
 static uint32_t scrubLastTickMs = 0;
 static float scrubFracFrames = 0.0f;
 
-FLASHMEM static bool isCursorOnTrackWaveCell() {
-  if (trackEditPhase() != TrackEditPhase::Off || isMidiNoteEditorOpen() ||
-      isClearTrackModalOpen() || isClearTrackModalRevealing()) {
+FLASHMEM static bool canOptScrubTimeline() {
+  if (isSysProjectPlayLocked() ||
+      isSaveKeyboardOpen() ||
+      isSamplerKeyModalOpen() ||
+      isSamplerBrowserOpen() ||
+      isInstBrowserOpen() ||
+      isInstSaveToModalOpen() ||
+      isSysPresetsModalOpen() ||
+      isSysProjectsModalOpen() ||
+      isSysMidiMapModalOpen() ||
+      isUsbSavePromptModalOpen() ||
+      isTypePresetModalOpen() ||
+      isClearTrackModalOpen() ||
+      isClearTrackModalRevealing() ||
+      isMidiClipBrowserOpen() ||
+      trackEditIsModalOpen() ||
+      trackEditPhase() == TrackEditPhase::DuplReveal ||
+      isMidiNoteEditorOpen()) {
     return false;
   }
-  Page pg = currentPage();
-  if (pg == Page::Audio) {
-    return audioRow >= 0 && audioRow < TRACK_ROWS && audioCell == AUD_CELL_WAVE;
-  }
-  if (pg == Page::Midi) {
-    return midiRow >= 0 && midiRow < TRACK_ROWS && midiCell == MID_CELL_WAVE;
-  }
-  return false;
+  return true;
 }
 
 FLASHMEM int inputOptHeaderHighlightCell() {
-  if (!inputOptHeld() || !isCursorOnTrackWaveCell()) return -1;
+  if (!inputOptHeld() || !canOptScrubTimeline()) return -1;
   return optHeaderHighlightCell;
 }
 
@@ -826,11 +834,19 @@ FLASHMEM void pollKeys() {
       swallowModalKeys = false;
     }
     repeatDir = 0;
+    waveOptScrubDir = 0;
+    optHeaderHighlightCell = -1;
     prevKeys = now;
     return;
   }
 
   constexpr uint8_t DIR_MASK = BTN_UP | BTN_DOWN | BTN_LEFT | BTN_RIGHT;
+
+  if (!canOptScrubTimeline() && (optHeaderHighlightCell >= 0 || waveOptScrubDir != 0)) {
+    optHeaderHighlightCell = -1;
+    waveOptScrubDir = 0;
+    uiForceRedraw();
+  }
 
   // Modal On-Screen Keyboard input handling when saving a song or naming an instrument
   if (isSaveKeyboardOpen()) {
@@ -1390,13 +1406,14 @@ FLASHMEM void pollKeys() {
     } else if (now & BTN_OPT) {
       optUsedAsModifier = true;
       lastOptTapMs = 0;
-      if (isCursorOnTrackWaveCell() && !(now & (BTN_SHIFT | BTN_EDIT | BTN_PLAY)) && !midiEditHeld) {
+      if (canOptScrubTimeline() && !(now & (BTN_SHIFT | BTN_EDIT | BTN_PLAY)) && !midiEditHeld) {
         if (activeDir & (BTN_UP | BTN_DOWN)) {
           waveOptScrubDir = 0;
           optHeaderHighlightCell = HDR_CELL_BEAT;
           int beatDir = ((activeDir & BTN_UP) ? 1 : 0) - ((activeDir & BTN_DOWN) ? 1 : 0);
           if (beatDir != 0) {
             appStepTapeBeat(beatDir, transport.tapeFrame);
+            trackEditOnPlayheadAdjusted();
           }
           uiForceRedraw();
         }
@@ -1479,8 +1496,8 @@ FLASHMEM void pollKeys() {
     scrubHoldDir = 0;
   }
 
-  // OPT + LEFT/RIGHT on track waveform cell 2: replicates << / >> behavior and highlights top bar ms cell
-  if (!(now & BTN_OPT) || !isCursorOnTrackWaveCell() || (now & (BTN_SHIFT | BTN_EDIT | BTN_PLAY)) || midiEditHeld) {
+  // OPT + LEFT/RIGHT on any page or cell: replicates << / >> behavior and highlights top bar ms cell
+  if (!(now & BTN_OPT) || !canOptScrubTimeline() || (now & (BTN_SHIFT | BTN_EDIT | BTN_PLAY)) || midiEditHeld) {
     if (optHeaderHighlightCell >= 0 || waveOptScrubDir != 0) {
       optHeaderHighlightCell = -1;
       waveOptScrubDir = 0;
@@ -1493,6 +1510,7 @@ FLASHMEM void pollKeys() {
       lastOptTapMs = 0;
       optHeaderHighlightCell = HDR_CELL_MS;
       appStepTapeMs(dir);
+      trackEditOnPlayheadAdjusted();
       waveOptScrubDir = dir;
       scrubHoldStartMs = ms;
       scrubLastTickMs = ms;
@@ -1513,6 +1531,7 @@ FLASHMEM void pollKeys() {
           if (stepFrames > 0) {
             scrubFracFrames -= (float)stepFrames;
             appStepTape(waveOptScrubDir * stepFrames);
+            trackEditOnPlayheadAdjusted();
             uiForceRedraw();
           }
         }
@@ -1857,17 +1876,19 @@ FLASHMEM void inputTriggerNav(uint8_t dirBit, bool withShift) {
   } else if (now & BTN_OPT) {
     optUsedAsModifier = true;
     lastOptTapMs = 0;
-    if (isCursorOnTrackWaveCell() && !(now & (BTN_SHIFT | BTN_EDIT | BTN_PLAY))) {
+    if (canOptScrubTimeline() && !(now & (BTN_SHIFT | BTN_EDIT | BTN_PLAY))) {
       if (dirBit & (BTN_LEFT | BTN_RIGHT)) {
         optHeaderHighlightCell = HDR_CELL_MS;
         int dir = (dirBit & BTN_RIGHT) ? 1 : -1;
         appStepTapeMs(dir);
+        trackEditOnPlayheadAdjusted();
         uiForceRedraw();
       } else if (dirBit & (BTN_UP | BTN_DOWN)) {
         optHeaderHighlightCell = HDR_CELL_BEAT;
         int beatDir = ((dirBit & BTN_UP) ? 1 : 0) - ((dirBit & BTN_DOWN) ? 1 : 0);
         if (beatDir != 0) {
           appStepTapeBeat(beatDir, transport.tapeFrame);
+          trackEditOnPlayheadAdjusted();
         }
         uiForceRedraw();
       }
