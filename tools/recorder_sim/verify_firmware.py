@@ -318,7 +318,11 @@ def verify_dma_and_storage_source_invariants():
         and "drawUsbOverlayStatus(" in usb_drive_cpp
         and "drawUsbOverlayHint(" in usb_drive_cpp
         and "t.fillScreen(" not in usb_drive_cpp
-        and "usbInputMonitor = false" in storage_h
+        and "recLineIn = true" in storage_h
+        and "recUsbIn = true" in storage_h
+        and "lineMonitor = MonitorMode::On" in storage_h
+        and "usbMonitor = MonitorMode::On" in storage_h
+        and "usbInputMonitor = true" in storage_h
         and "midiClockOut = MidiClockOut::Off" in storage_h,
         "System Settings displays 'SYS | vX.Y' header with Brightness (5..100, default 50), Metronome Volume (0..100, default 80), Instrument Presets (VIEW/DEL), and USB Storage Drive overlay ('USB STORAGE MODE')",
     )

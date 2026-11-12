@@ -68,9 +68,9 @@ enum MidiPortMask : uint8_t {
   MIDI_PORT_BOTH = MIDI_PORT_TRS | MIDI_PORT_USB
 };
 enum class AudioInputSource : uint8_t {
-  LineAndSynth = 0, // Analog Line-In + Internal Synth (default)
+  LineAndSynth = 0, // Analog Line-In + Internal Synth
   UsbAndSynth  = 1, // USB Audio In + Internal Synth
-  All          = 2, // Analog Line-In + USB Audio In + Internal Synth
+  All          = 2, // Analog Line-In + USB Audio In + Internal Synth (default)
   LineOnly     = 3, // Analog Line-In only
   UsbOnly      = 4, // USB Audio In only
   SynthOnly    = 5, // Internal Synth only

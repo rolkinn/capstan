@@ -385,14 +385,14 @@ FLASHMEM static void songSettingsOnResetParam() {
     case PSET_REC_SRC: {
       int col = constrain(songSetCol, 0, 1);
       if (col == 0) ps.recLineIn = true;
-      else ps.recUsbIn = false;
+      else ps.recUsbIn = true;
       applySongSettings();
       break;
     }
     case PSET_MONITOR: {
       int col = constrain(songSetCol, 0, 1);
       if (col == 0) ps.lineMonitor = MonitorMode::On;
-      else ps.usbMonitor = MonitorMode::Off;
+      else ps.usbMonitor = MonitorMode::On;
       applySongSettings();
       break;
     }

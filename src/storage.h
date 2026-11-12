@@ -20,18 +20,18 @@ struct SongSettings {
   uint8_t masterTape = 0;                // 0..100% Lofi Oddity Tape macro
   uint8_t masterComp = 0;                // 0..100% Lofi Oddity Comp macro
   uint8_t masterVolume = MASTER_VOLUME_DEFAULT; // 0 (Off) .. MASTER_VOLUME_MAX (100), default 80
-  AudioInputSource audioInputSource = AudioInputSource::LineAndSynth;
+  AudioInputSource audioInputSource = AudioInputSource::All;
   bool inputMonitor = true;              // Legacy v1 field retained for SONG.DAT v2 layout compatibility (superseded by lineMonitor)
-  bool usbInputMonitor = false;          // Legacy v1 field retained for SONG.DAT v2 layout compatibility (superseded by usbMonitor)
+  bool usbInputMonitor = true;           // Legacy v1 field retained for SONG.DAT v2 layout compatibility (superseded by usbMonitor)
   int8_t defaultThreshDb = DEFAULT_THRESH_DB;
   bool midiThru = false;
   MidiClockOut midiClockOut = MidiClockOut::Off;
   bool loopEnabled = false;
   bool recLineIn = true;
-  bool recUsbIn = false;
+  bool recUsbIn = true;
   bool recInternalInstr = true;
   MonitorMode lineMonitor = MonitorMode::On;
-  MonitorMode usbMonitor = MonitorMode::Off;
+  MonitorMode usbMonitor = MonitorMode::On;
   MidiTransportIn midiTransportIn = MidiTransportIn::Auto;
 };
 

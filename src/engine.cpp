@@ -18,11 +18,11 @@ Transport transport;
 Recording recording;
 
 volatile MonitorMode lineMonitorMode = MonitorMode::On;
-volatile MonitorMode usbMonitorMode = MonitorMode::Off;
+volatile MonitorMode usbMonitorMode = MonitorMode::On;
 volatile bool recLineInEnabled = true;
-volatile bool recUsbInEnabled = false;
+volatile bool recUsbInEnabled = true;
 volatile bool recInstrEnabled = true;
-volatile AudioInputSource audioInputSource = AudioInputSource::LineAndSynth;
+volatile AudioInputSource audioInputSource = AudioInputSource::All;
 volatile bool metronomeOn = false;
 volatile bool masterExportActive = false;
 volatile bool samplerRecActive = false;
