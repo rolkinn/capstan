@@ -20,7 +20,6 @@ import re
 import shutil
 import subprocess
 import sys
-import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -153,20 +152,12 @@ def package_release(version: str) -> None:
     m02_src = TARGETS["model02"]["out_hex"]
     m01_dst = DIST_ROOT / f"M8_Capstan_v{version}_Model01.hex"
     m02_dst = DIST_ROOT / f"M8_Capstan_v{version}_Model02.hex"
-    zip_dst = DIST_ROOT / f"M8_Capstan_v{version}_Release.zip"
     sums_dst = DIST_ROOT / "SHA256SUMS.txt"
 
     shutil.copy2(m01_src, m01_dst)
     shutil.copy2(m02_src, m02_dst)
 
-    readme_path = ROOT / "README.md"
-    with zipfile.ZipFile(zip_dst, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        zf.write(m01_dst, arcname=m01_dst.name)
-        zf.write(m02_dst, arcname=m02_dst.name)
-        if readme_path.exists():
-            zf.write(readme_path, arcname="README.md")
-
-    artifacts = [m01_dst, m02_dst, zip_dst]
+    artifacts = [m01_dst, m02_dst]
     lines = [f"{sha256_file(p)}  {p.name}" for p in artifacts]
     sums_dst.write_text("\n".join(lines) + "\n", encoding="utf-8")
 

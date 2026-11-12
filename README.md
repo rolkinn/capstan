@@ -126,7 +126,7 @@ python build_all.py
 python build_all.py model01
 python build_all.py model02
 
-# Package a versioned release bundle (.hex files, .zip archive, and SHA256SUMS.txt in dist/)
+# Package a versioned release bundle (.hex files and SHA256SUMS.txt in dist/)
 python build_all.py --release
 
 # Build with runtime Serial diagnostics and freeze watchdog enabled (CAPSTAN_DEBUG=1)
