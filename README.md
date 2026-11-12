@@ -13,11 +13,15 @@ Release builds provide two firmware images:
 - **`M8_Capstan_v1.0_Model02.hex`** — for **M8 Model:02** (Teensy MicroMod, 480×320 display)
 
 To flash onto your hardware:
-1. Connect your M8 to your computer over USB.
-2. Open **TyUploader**, select the `.hex` file matching your hardware model (`Model01` or `Model02`).
-3. Press the small reset button on the back of the M8.
-4. Allow the M8 and TyUploader to refresh, then upload.
-3. On first boot, Capstan automatically creates the `/Capstan` directory structure on the SD card without modifying any other folders on the card.
+1. Install **TyUploader** if not already installed: https://github.com/Koromix/tytools/releases
+2. Connect your M8 to your computer over USB.
+3. Open **TyUploader**, and ensure your device is selected in the dropdown.
+4. Click Upload and choose the Capstan .hex file matching your hardware model (`Model01` or `Model02`).
+
+Notes:
+  - On first boot, Capstan automatically creates the `/Capstan` directory structure on the SD card without modifying any other folders/files on the card.
+  - If coming from a different firmware, may need to press the M8's reset button on the back. If TyUploader doesn't upload the Capstan .hex, use the reset button first then try again.
+  - To revert back to a different firmware, simply use TyUploader again and choose the firmware you want to install.
 
 ---
 
