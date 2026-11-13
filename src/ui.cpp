@@ -1250,10 +1250,12 @@ FLASHMEM void uiRefresh() {
   static uint8_t lastSmpKeyModalState = 0;
   static bool lastInstBrowserOpen = false;
   static bool lastInstSaveToOpen = false;
+  static bool lastInstMidiMapOpen = false;
   static bool lastSysPresetsOpen = false;
   static bool lastSysPresetDelOpen = false;
   static bool lastUsbSavePromptOpen = false;
   static uint8_t lastSysProjState = 0;
+  static bool lastSysMidiMapOpen = false;
   static bool lastTypePresetOpen = false;
   static bool lastMidiBrowserOpen = false;
   bool kbOpen = isSaveKeyboardOpen() &&
@@ -1267,6 +1269,7 @@ FLASHMEM void uiRefresh() {
   bool instBrowserOpen = isInstBrowserOpen() &&
                          (pg == Page::Instruments || pg == Page::InstrumentEdit);
   bool instSaveToOpen = isInstSaveToModalOpen() && (pg == Page::InstrumentEdit);
+  bool instMidiMapOpen = isInstMidiMapOpen() && (pg == Page::InstrumentEdit);
   bool sysPresetsOpen = isSysPresetsModalOpen() &&
                         (pg == Page::SystemSettings || pg == Page::SongSettings);
   bool sysPresetDelOpen = isSysPresetDeleteConfirmOpen() &&
@@ -1274,6 +1277,7 @@ FLASHMEM void uiRefresh() {
   bool usbSavePromptOpen = isUsbSavePromptModalOpen() && (pg == Page::SystemSettings);
   uint8_t sysProjState = (pg == Page::SystemSettings) ? sysProjectsModalState() : 0;
   bool sysProjConfirmOpen = isSysProjectsConfirmOpen() && (pg == Page::SystemSettings);
+  bool sysMidiMapOpen = isSysMidiMapModalOpen() && (pg == Page::SystemSettings);
   bool typePresetOpen = isTypePresetModalOpen() && (pg == Page::InstrumentType);
   bool midiBrowserOpen = isMidiClipBrowserOpen() && (pg == Page::Midi || pg == Page::Audio);
   bool pageOrScreenChanged = (lastDrawnGen != uiGeneration) || (lastDrawnPage != pg);
@@ -1283,8 +1287,10 @@ FLASHMEM void uiRefresh() {
                        (noteEdOpen != lastNoteEdOpen) || (smpBrowserOpen != lastSmpBrowserOpen) ||
                        (smpKeyModalSt != lastSmpKeyModalState) ||
                        (instBrowserOpen != lastInstBrowserOpen) || (instSaveToOpen != lastInstSaveToOpen) ||
+                       (instMidiMapOpen != lastInstMidiMapOpen) ||
                        (sysPresetsOpen != lastSysPresetsOpen) || (sysPresetDelOpen != lastSysPresetDelOpen) ||
                        (usbSavePromptOpen != lastUsbSavePromptOpen) || (sysProjState != lastSysProjState) ||
+                       (sysMidiMapOpen != lastSysMidiMapOpen) ||
                        (typePresetOpen != lastTypePresetOpen) || (midiBrowserOpen != lastMidiBrowserOpen));
 
   if (!pageOrScreenChanged && !modalChanged && !uiImmediate && (now - lastRefreshMs < 33)) return;
@@ -1307,10 +1313,12 @@ FLASHMEM void uiRefresh() {
     lastSmpKeyModalState = smpKeyModalSt;
     lastInstBrowserOpen = instBrowserOpen;
     lastInstSaveToOpen = instSaveToOpen;
+    lastInstMidiMapOpen = instMidiMapOpen;
     lastSysPresetsOpen = sysPresetsOpen;
     lastSysPresetDelOpen = sysPresetDelOpen;
     lastUsbSavePromptOpen = usbSavePromptOpen;
     lastSysProjState = sysProjState;
+    lastSysMidiMapOpen = sysMidiMapOpen;
     lastTypePresetOpen = typePresetOpen;
     lastMidiBrowserOpen = midiBrowserOpen;
     invalidateUiCache();
@@ -1324,10 +1332,12 @@ FLASHMEM void uiRefresh() {
     lastSmpKeyModalState = smpKeyModalSt;
     lastInstBrowserOpen = instBrowserOpen;
     lastInstSaveToOpen = instSaveToOpen;
+    lastInstMidiMapOpen = instMidiMapOpen;
     lastSysPresetsOpen = sysPresetsOpen;
     lastSysPresetDelOpen = sysPresetDelOpen;
     lastUsbSavePromptOpen = usbSavePromptOpen;
     lastSysProjState = sysProjState;
+    lastSysMidiMapOpen = sysMidiMapOpen;
     lastTypePresetOpen = typePresetOpen;
     lastMidiBrowserOpen = midiBrowserOpen;
     invalidateUiCache();

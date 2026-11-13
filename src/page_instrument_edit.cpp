@@ -1157,7 +1157,6 @@ FLASHMEM static void openInstMidiMap() {
   const InstType iType = (InstType)fmSynthPatch(instIdx).type;
   syncInstMidiMapScroll(instMidiMapRowCount(iType));
   instEditInvalidateCache();
-  board.tft().fillRect(0, SY(24), SCREEN_W, SCREEN_H - SY(24), BG);
   uiForceRedraw();
 }
 
@@ -1167,7 +1166,6 @@ FLASHMEM void closeInstMidiMap() {
   instMidiMapClrConfirm = false;
   instMidiMapOpen = false;
   instEditInvalidateCache();
-  board.tft().fillRect(0, SY(24), SCREEN_W, SCREEN_H - SY(24), BG);
   uiForceRedraw();
 }
 

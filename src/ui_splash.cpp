@@ -1,6 +1,7 @@
 // ui_splash.cpp — Animated Tape Deck startup screen for Capstan
 #include "ui.h"
 #include "ui_font.h"
+#include "config.h"
 #include "storage.h"
 #include "usb_drive.h"
 #include <Arduino.h>
@@ -141,6 +142,126 @@ FLASHMEM static inline float sdRoundBoxOutline(float px, float py, float cx, flo
   return fabsf(outD);
 }
 
+// Unsigned distance from point (px, py) to circular arc centered at (cx, cy) with radius r,
+// mid-angle unit vector (ux, uy), cos(halfAngle) = cosHalf, and endpoint offsets (e0x, e0y), (e1x, e1y)
+FLASHMEM static inline float sdArcFast(float px, float py, float cx, float cy, float r,
+                                       float ux, float uy, float cosHalf,
+                                       float e0x, float e0y, float e1x, float e1y) {
+  float dx = px - cx, dy = py - cy;
+  float ln = sqrtf(dx * dx + dy * dy);
+  if (ln > 0.0f && (dx * ux + dy * uy) >= ln * cosHalf) {
+    return fabsf(ln - r);
+  }
+  float d0x = dx - e0x, d0y = dy - e0y;
+  float d1x = dx - e1x, d1y = dy - e1y;
+  return sqrtf(fminf(d0x * d0x + d0y * d0y, d1x * d1x + d1y * d1y));
+}
+
+static constexpr float BADGE_CHAR_GAP = 1.55f;
+
+static constexpr float badgeCharWidth(char ch) {
+  return (ch == '.') ? 1.1f : (ch == '1') ? 2.5f : (ch == 'v') ? 3.8f : 4.2f;
+}
+
+static constexpr float computeBadgeSpan(const char *s) {
+  float span = 0.0f;
+  for (int i = 0; s[i] != '\0'; i++) {
+    if (i > 0) span += BADGE_CHAR_GAP;
+    span += badgeCharWidth(s[i]);
+  }
+  return span;
+}
+
+static constexpr int computeStrLen(const char *s) {
+  int n = 0;
+  while (s[n] != '\0') n++;
+  return n;
+}
+
+PROGMEM static constexpr char SPLASH_VER_TEXT[] = "v" CAPSTAN_VERSION;
+static constexpr int   SPLASH_VER_LEN  = computeStrLen("v" CAPSTAN_VERSION);
+static constexpr float BADGE_TEXT_SPAN = computeBadgeSpan("v" CAPSTAN_VERSION);
+static constexpr float BADGE_BOX_LEFT  = 13.5f;
+static constexpr float BADGE_BOX_HX    = (0.5f * BADGE_TEXT_SPAN + 3.1f > 10.5f) ? (0.5f * BADGE_TEXT_SPAN + 3.1f) : 10.5f;
+static constexpr float BADGE_BOX_CX    = BADGE_BOX_LEFT + BADGE_BOX_HX;
+static constexpr float BADGE_BOX_RIGHT = BADGE_BOX_LEFT + 2.0f * BADGE_BOX_HX;
+static constexpr float BADGE_TEXT_X0   = BADGE_BOX_CX - 0.5f * BADGE_TEXT_SPAN;
+
+// SDF strokes for 'v', '.', and '0'..'9' inside the top-left [vX.Y] cassette badge (cap span y = 16.3..24.1)
+FLASHMEM static inline float evalBadgeCharDist(float x, float y, char ch, float gx) {
+  const float gw = badgeCharWidth(ch);
+  const float xm = gx + 0.5f * gw;
+  switch (ch) {
+    case 'v':
+      return fminf(sdSegment(x, y, gx, 18.2f, xm, 24.1f),
+                   sdSegment(x, y, gx + gw, 18.2f, xm, 24.1f));
+    case '.': {
+      float dx = x - xm, dy = y - 23.85f;
+      return fmaxf(0.0f, sqrtf(dx * dx + dy * dy) - 0.12f);
+    }
+    case '0':
+      return sdRoundBoxOutline(x, y, xm, 20.2f, 2.05f, 3.9f, 1.95f);
+    case '1': {
+      float sx = gx + 1.75f;
+      return fminf(sdSegment(x, y, sx, 16.3f, sx, 24.1f),
+                   sdSegment(x, y, gx + 0.25f, 17.85f, sx, 16.3f));
+    }
+    case '2': {
+      float dArc  = sdArcFast(x, y, xm, 18.3f, 2.0f, 0.3681246f, -0.9297765f, -0.1253332f,
+                              -1.9371663f, -0.4973798f, 1.7526134f, 0.9635073f);
+      float dDiag = sdSegment(x, y, xm + 1.7526134f, 18.3f + 0.9635073f, gx + 0.1f, 24.1f);
+      float dBase = sdSegment(x, y, gx + 0.1f, 24.1f, gx + 4.1f, 24.1f);
+      return fminf(dArc, fminf(dDiag, dBase));
+    }
+    case '3': {
+      float dTop = sdArcFast(x, y, xm - 0.05f, 18.25f, 1.95f, 0.8526402f, -0.5224986f, -0.5224986f,
+                             -1.7374627f, -0.8852815f, 0.0f, 1.95f);
+      float dBot = sdArcFast(x, y, xm, 22.15f, 1.95f, 0.8526402f, 0.5224986f, -0.5224986f,
+                             0.0f, -1.95f, -1.7374627f, 0.8852815f);
+      float dMid = sdSegment(x, y, xm - 0.65f, 20.2f, xm, 20.2f);
+      return fminf(dTop, fminf(dBot, dMid));
+    }
+    case '4': {
+      float sx = gx + 3.0f;
+      return fminf(sdSegment(x, y, sx, 16.3f, gx + 0.1f, 21.6f),
+                   fminf(sdSegment(x, y, gx + 0.1f, 21.6f, gx + 4.15f, 21.6f),
+                         sdSegment(x, y, sx, 16.3f, sx, 24.1f)));
+    }
+    case '5': {
+      float dTop = sdSegment(x, y, gx + 0.35f, 16.3f, gx + 3.95f, 16.3f);
+      float dLft = sdSegment(x, y, gx + 0.35f, 16.3f, gx + 0.25f, 19.95f);
+      float dMid = sdSegment(x, y, gx + 0.25f, 19.95f, xm + 0.1f, 19.85f);
+      float dArc = sdArcFast(x, y, xm + 0.05f, 21.95f, 2.1f, 0.8910065f, 0.4539905f, -0.5877853f,
+                             -0.3285124f, -2.0741455f, -1.8711137f, 0.9533800f);
+      return fminf(fminf(dTop, dLft), fminf(dMid, dArc));
+    }
+    case '6': {
+      float dLoop = sdRoundBoxOutline(x, y, xm, 22.05f, 2.05f, 2.05f, 1.95f);
+      float dTop  = sdArcFast(x, y, xm + 0.1f, 18.35f, 2.05f, -0.2789911f, -0.9602937f, 0.2789911f,
+                              -2.05f, 0.0f, 1.7308722f, -1.0984449f);
+      float dLft  = sdSegment(x, y, xm - 1.95f, 18.35f, xm - 2.05f, 22.05f);
+      return fminf(dLoop, fminf(dTop, dLft));
+    }
+    case '7':
+      return fminf(sdSegment(x, y, gx + 0.1f, 16.3f, gx + 4.1f, 16.3f),
+                   sdSegment(x, y, gx + 4.1f, 16.3f, gx + 1.2f, 24.1f));
+    case '8':
+      return fminf(sdRoundBoxOutline(x, y, xm, 18.2f, 1.95f, 1.9f, 1.6f),
+                   sdRoundBoxOutline(x, y, xm, 22.1f, 2.1f, 2.0f, 1.7f));
+    case '9': {
+      float rx = 2.0f * xm - x;
+      float ry = 40.4f - y;
+      float dLoop = sdRoundBoxOutline(rx, ry, xm, 22.05f, 2.05f, 2.05f, 1.95f);
+      float dTop  = sdArcFast(rx, ry, xm + 0.1f, 18.35f, 2.05f, -0.2789911f, -0.9602937f, 0.2789911f,
+                              -2.05f, 0.0f, 1.7308722f, -1.0984449f);
+      float dLft  = sdSegment(rx, ry, xm - 1.95f, 18.35f, xm - 2.05f, 22.05f);
+      return fminf(dLoop, fminf(dTop, dLft));
+    }
+    default:
+      return 1e9f;
+  }
+}
+
 // Evaluate distance to the neon wireframe cassette in canonical 176x108 coordinates
 FLASHMEM static inline float evalCassetteDist(float x, float y, const float ux[3], const float uy[3]) {
   // 1. Outer cassette shell: center (88, 54), half-size (82.5, 49.5), corner radius 9.5
@@ -153,17 +274,21 @@ FLASHMEM static inline float evalCassetteDist(float x, float y, const float ux[3
     d = fminf(d, fminf(dw1, dw2));
   }
 
-  // 3. Top-left ['87] badge: center (24.0, 20.2), half-size (10.5, 7.0), radius 0.6
-  if (x <= 39.0f && y <= 32.0f) {
-    float daBox = sdRoundBoxOutline(x, y, 24.0f, 20.2f, 10.5f, 7.0f, 0.6f);
+  // 3. Top-left [vX.Y] firmware version badge
+  if (x <= BADGE_BOX_RIGHT + 4.5f && y <= 32.0f) {
+    float daBox = sdRoundBoxOutline(x, y, BADGE_BOX_CX, 20.2f, BADGE_BOX_HX, 7.0f, 0.6f);
     d = fminf(d, daBox);
-    if (x >= 14.0f && x <= 34.0f && y >= 13.5f && y <= 27.0f) {
-      float dTick = sdSegment(x, y, 17.0f, 16.2f, 16.5f, 19.0f);
-      float d8Top = sdRoundBoxOutline(x, y, 22.0f, 18.2f, 2.0f, 1.95f, 1.6f);
-      float d8Bot = sdRoundBoxOutline(x, y, 22.0f, 22.1f, 2.15f, 2.0f, 1.7f);
-      float d7Top = sdSegment(x, y, 26.6f, 16.3f, 31.2f, 16.3f);
-      float d7Stem = sdSegment(x, y, 31.2f, 16.3f, 28.0f, 24.1f);
-      d = fminf(d, fminf(dTick, fminf(fminf(d8Top, d8Bot), fminf(d7Top, d7Stem))));
+    if (x >= BADGE_BOX_LEFT + 0.5f && x <= BADGE_BOX_RIGHT - 0.5f && y >= 13.5f && y <= 27.0f) {
+      float gx = BADGE_TEXT_X0;
+      #pragma GCC unroll 8
+      for (int i = 0; i < SPLASH_VER_LEN; i++) {
+        char ch = SPLASH_VER_TEXT[i];
+        float gw = badgeCharWidth(ch);
+        if (x >= gx - 3.5f && x <= gx + gw + 3.5f) {
+          d = fminf(d, evalBadgeCharDist(x, y, ch, gx));
+        }
+        gx += gw + BADGE_CHAR_GAP;
+      }
     }
   }
 
@@ -304,7 +429,7 @@ FLASHMEM void drawTapeDeckGraphic(int x, int y, int w, int h, uint32_t ms, uint1
   uint16_t dotCol = COLOR_REC;
   const bool hasLabel = (labelText != nullptr && labelText[0] != '\0');
   if (hasLabel) {
-    int boxRightX = (int)lroundf(34.5f * (float)w / 176.0f);
+    int boxRightX = (int)lroundf(BADGE_BOX_RIGHT * (float)w / 176.0f);
     int deckRightX = (int)lroundf(170.5f * (float)w / 176.0f);
     int badgeCy = (int)lroundf(20.2f * (float)h / 108.0f);
     if (showRecDot) {

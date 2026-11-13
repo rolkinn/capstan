@@ -238,6 +238,7 @@ def verify_dma_and_storage_source_invariants():
     # 1h-2. System Settings vs Song Settings separation & Master Balance removal invariants
     storage_h = (SRC_DIR / "storage.h").read_text(encoding="utf-8")
     page_sys_cpp = (SRC_DIR / "page_system_settings.cpp").read_text(encoding="utf-8")
+    ui_splash_cpp = (SRC_DIR / "ui_splash.cpp").read_text(encoding="utf-8")
     usb_drive_cpp = (SRC_DIR / "usb_drive.cpp").read_text(encoding="utf-8")
     page_song_cpp = (SRC_DIR / "page_song_settings.cpp").read_text(encoding="utf-8")
     page_master_cpp = (SRC_DIR / "page_master.cpp").read_text(encoding="utf-8")
@@ -292,6 +293,8 @@ def verify_dma_and_storage_source_invariants():
         and '"Remove song?"' in page_sys_cpp
         and 'PROJECTS_DIR = "/Capstan/PROJECTS"' in config_h
         and 'return "SYS | v" CAPSTAN_VERSION;' in page_sys_cpp
+        and 'SPLASH_VER_TEXT[] = "v" CAPSTAN_VERSION;' in ui_splash_cpp
+        and "'87" not in ui_splash_cpp
         and re.search(r'#define\s+CAPSTAN_VERSION\s+"\d+\.\d+"', config_h) is not None
         and "max(SX(62), textWidth(title) + SX(8))" in ui_cpp
         and "SSET_BRIGHTNESS   = 0" in (SRC_DIR / "app.h").read_text(encoding="utf-8")

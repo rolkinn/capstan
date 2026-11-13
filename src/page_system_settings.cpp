@@ -1666,7 +1666,6 @@ FLASHMEM void closeSysMidiMapModal() {
   midiMapEditModUsed = false;
   invalidateSysMidiMapModalCache();
   memset(prevSysSettingsKey, 0, sizeof(prevSysSettingsKey));
-  board.tft().fillRect(0, SY(24), SCREEN_W, SCREEN_H - SY(24), BG);
   uiForceRedraw();
 }
 
