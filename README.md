@@ -6,7 +6,7 @@
 
 **Video tutorial:** https://www.youtube.com/watch?v=xBZS2HxJms4
 
-## 1. Installing Pre-Built Firmware (`.hex`)
+## 1. Installing Pre-Built Firmware
 
 Release builds provide two firmware images:
 - **`M8_Capstan_v1.0_Model01.hex`** — for **M8 Model:01** (Teensy 4.0, 320×240 display)
@@ -20,7 +20,7 @@ To flash onto your hardware:
 
 Notes:
   - On first boot, Capstan automatically creates the `/Capstan` directory structure on the SD card without modifying any other folders/files on the card.
-  - If coming from a different firmware, may need to press the M8's reset button on the back. If TyUploader doesn't upload the Capstan .hex, use the reset button first then try again.
+  - If coming from a different firmware, you may need to press the M8's reset button on the back. If TyUploader doesn't upload the Capstan .hex, use the reset button first then try again.
   - To revert back to a different firmware, simply use TyUploader again and choose the firmware you want to install.
 
 ## 2. Key Features
