@@ -2,6 +2,8 @@
 
 **Capstan** is a linear tape-style **4-stereo, 4-mono track audio recorder**, **8-track MIDI sequencer**, and **multi-engine synthesizer & sampler** firmware for the **M8 Model:01** and **M8 Model:02**.
 
+### Get the latest release here: https://github.com/rolkinn/capstan/releases
+
 **Video tutorial:** https://www.youtube.com/watch?v=xBZS2HxJms4
 
 ## 1. Installing Pre-Built Firmware (`.hex`)
