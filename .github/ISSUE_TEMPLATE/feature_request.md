@@ -2,7 +2,7 @@
 name: Feature request
 about: Suggest an idea or change
 title: USER FEATURE REQUEST
-labels: triage
+labels: triage, user reported
 assignees: ''
 type: Feature
 

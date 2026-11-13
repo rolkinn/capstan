@@ -2,7 +2,7 @@
 name: Bug report
 about: Create a bug issue
 title: USER REPORTED BUG
-labels: triage
+labels: triage, user reported
 assignees: ''
 type: Bug
 
