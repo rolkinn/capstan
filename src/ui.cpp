@@ -633,7 +633,7 @@ FLASHMEM void drawTransportBar(bool isSelectedRow, int selCell, bool full) {
     char cellTxt[INFO_CELL_COUNT][24];
     bool cellDim[INFO_CELL_COUNT] = {false, false, false};
 
-    int bpmTenths = (int)lrintf(bpm * 10.0f);
+    int bpmTenths = (int)(bpm * 10.0f + 0.5f);
     snprintf(cellTxt[INFO_CELL_BPM], sizeof(cellTxt[INFO_CELL_BPM]), "%3d.%dBPM",
              bpmTenths / 10, bpmTenths % 10);
 

@@ -10,10 +10,10 @@ namespace looper {
 
 enum class InstType : uint8_t;
 
-// Per-Instrument MIDI CC Mapping slot layout (up to 16 Engine-specific + 15 Shared AMP/FLT/FX = 31 slots)
+// Per-Instrument MIDI CC Mapping slot layout (up to 16 Engine-specific + 16 Shared AMP/FLT/FX/OUT = 32 slots)
 static constexpr int INST_MIDI_MAP_ENGINE_SLOTS = 16;
-static constexpr int INST_MIDI_MAP_SHARED_SLOTS = 15;
-static constexpr int INST_MIDI_MAP_TOTAL_SLOTS  = INST_MIDI_MAP_ENGINE_SLOTS + INST_MIDI_MAP_SHARED_SLOTS; // 31
+static constexpr int INST_MIDI_MAP_SHARED_SLOTS = 16;
+static constexpr int INST_MIDI_MAP_TOTAL_SLOTS  = INST_MIDI_MAP_ENGINE_SLOTS + INST_MIDI_MAP_SHARED_SLOTS; // 32
 
 // Categories shown in the System Settings -> MIDI MAPPINGS modal
 enum MidiMapCategory : uint8_t {

@@ -24,6 +24,7 @@ void drawSysProjectsConfirmModal(bool full);
 void handleSysProjectsModalInput(uint8_t pressed, uint8_t now, uint32_t ms);
 void commitProjectKeyboard(const char *enteredName, bool isRename);
 void sysProjectPlayService();
+void sysProjectPlayOnOutputSwitched(bool phonesConnected);
 
 bool isSysMidiMapModalOpen();
 void openSysMidiMapModal();

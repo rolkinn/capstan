@@ -253,6 +253,7 @@ def verify_dma_and_storage_source_invariants():
         all(lbl in page_song_cpp for lbl in (
             '"RECORD LINE/USB"',
             '"MONITOR LINE/USB"',
+            '"LINE IN GAIN"',
             '"REC TRIG THRESH"',
             '"MIDI CLOCK OUT"',
             '"MIDI CLOCK SOURCE"',
@@ -283,6 +284,7 @@ def verify_dma_and_storage_source_invariants():
     check(
         '"SCREEN BRIGHTNESS"' in page_sys_cpp
         and '"METRONOME VOLUME"' in page_sys_cpp
+        and '"HEADPHONE GAIN"' in page_sys_cpp
         and '"INSTRUMENT PRESETS"' in page_sys_cpp
         and '"PROJECTS"' in page_sys_cpp
         and '"MIDI MAPPINGS"' in page_sys_cpp
@@ -299,11 +301,12 @@ def verify_dma_and_storage_source_invariants():
         and "max(SX(62), textWidth(title) + SX(8))" in ui_cpp
         and "SSET_BRIGHTNESS   = 0" in (SRC_DIR / "app.h").read_text(encoding="utf-8")
         and "SSET_METRO_VOL    = 1" in (SRC_DIR / "app.h").read_text(encoding="utf-8")
-        and "SSET_INST_PRESETS = 2" in (SRC_DIR / "app.h").read_text(encoding="utf-8")
-        and "SSET_PROJECTS     = 3" in (SRC_DIR / "app.h").read_text(encoding="utf-8")
-        and "SSET_MIDI_MAP     = 4" in (SRC_DIR / "app.h").read_text(encoding="utf-8")
-        and "SSET_USB_DRIVE    = 5" in (SRC_DIR / "app.h").read_text(encoding="utf-8")
-        and "SSET_COUNT        = 6" in (SRC_DIR / "app.h").read_text(encoding="utf-8")
+        and "SSET_HP_GAIN      = 2" in (SRC_DIR / "app.h").read_text(encoding="utf-8")
+        and "SSET_INST_PRESETS = 3" in (SRC_DIR / "app.h").read_text(encoding="utf-8")
+        and "SSET_PROJECTS     = 4" in (SRC_DIR / "app.h").read_text(encoding="utf-8")
+        and "SSET_MIDI_MAP     = 5" in (SRC_DIR / "app.h").read_text(encoding="utf-8")
+        and "SSET_USB_DRIVE    = 6" in (SRC_DIR / "app.h").read_text(encoding="utf-8")
+        and "SSET_COUNT        = 7" in (SRC_DIR / "app.h").read_text(encoding="utf-8")
         and "ps.masterVolume" in page_master_cpp
         and "systemSettings" not in page_master_cpp
         and "MIN_BRIGHTNESS = 5" in config_h
@@ -314,7 +317,7 @@ def verify_dma_and_storage_source_invariants():
         and "setMetronomeVolume(" in engine_cpp
         and "VOLUME_MAX = 100, VOLUME_UNITY = 80" in config_h
         and "PAN_MAX = 100" in config_h
-        and "MASTER_VOLUME_MAX = 100, MASTER_VOLUME_UNITY = 80, MASTER_VOLUME_DEFAULT = 80" in config_h
+        and "MASTER_VOLUME_MAX = 100, MASTER_VOLUME_UNITY = 80, MASTER_VOLUME_DEFAULT = 40" in config_h
         and '"USB STORAGE MODE"' in usb_drive_cpp
         and '"PRESS ANY KEY TO EXIT"' in usb_drive_cpp
         and "drawUsbOverlayHeader(" in usb_drive_cpp
@@ -721,6 +724,31 @@ def verify_dma_and_storage_source_invariants():
         and "O_TRUNC" in ensure_body
         and "tr.file.truncate()" in ensure_body,
         "clearAudioTrack() unconditionally removes/truncates track WAV on SD and ensureTrackWavOpen() truncates stale trailing bytes",
+    )
+
+    # 1w. Audio Gain Staging, Hybrid Headphone Volume, Dual HP/Speaker Master Vol Memory, Lookahead Limiting, Q14 Delay Headroom, & Instrument Output Level invariants
+    check(
+        "HeadphoneGain" in config_h
+        and "DEFAULT_HEADPHONE_GAIN = HeadphoneGain::Normal" in config_h
+        and '"LOW"' in page_sys_cpp
+        and '"NORMAL"' in page_sys_cpp
+        and '"HIGH"' in page_sys_cpp
+        and '"LOW (IEM)"' not in page_sys_cpp
+        and '"HIGH (STUDIO)"' not in page_sys_cpp
+        and "MIN_LINE_IN_GAIN_TENTHS = -120" in config_h
+        and "MAX_LINE_IN_GAIN_TENTHS = 120" in config_h
+        and "DEFAULT_LINE_IN_GAIN_TENTHS = 0" in config_h
+        and "masterVolHpEnc" in storage_h
+        and "masterVolSpkEnc" in storage_h
+        and "appSetMasterVolume(" in app_cpp
+        and "recomputeHybridMasterGain(" in engine_cpp
+        and "PostFxLimiter" in engine_cpp
+        and "LookaheadMonitorLimiter" in engine_cpp
+        and "appServiceCodecHardware(" in app_cpp
+        and "readDelayTapQ14(" in master_fx_cpp
+        and '"OUT: OUTPUT LEVEL"' in page_inst_edit_cpp
+        and '"OUT LEVEL"' in midi_map_cpp,
+        "Hybrid SGTL5000 headphone gain (LOW/NORMAL/HIGH, default NORMAL), dual HP/Speaker Master Volume memory (default 40), decoupled PostFx/Monitor lookahead limiters, Q14 Delay headroom, -12.0..+12.0 dB Line In Gain, and Instrument Output Level are configured",
     )
 
 

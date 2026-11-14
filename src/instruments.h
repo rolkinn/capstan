@@ -78,9 +78,20 @@ struct FmPatch {
   InstEnvParams amp;                    // 5 bytes: General AMP envelope (AMT, Attack, Decay, Sustain, Release 0..127)
   InstEnvParams flt;                    // 5 bytes: General FLT envelope (AMT, Attack, Decay, Sustain, Release 0..127)
   InstFxParams fx;                      // 5 bytes: General FX row (DRIVE, CHORUS, DELAY, DELAY.FEEDBACK, REVERB 0..100)
-  uint8_t pad;                          // 1 byte: Pad struct to 48 bytes
+  uint8_t levelEnc;                     // 1 byte: 0 = default/legacy 80 (0.0 dB unity), 1..101 = LEVEL 0..100 (lvl + 1)
 };
 static_assert(sizeof(FmPatch) == 48, "FmPatch must be 48 bytes");
+
+inline uint8_t instPatchLevel(const FmPatch &p) {
+  if (p.levelEnc == 0) return (uint8_t)VOLUME_UNITY;
+  int v = (int)p.levelEnc - 1;
+  return (uint8_t)(v < 0 ? 0 : (v > VOLUME_MAX ? VOLUME_MAX : v));
+}
+
+inline void setInstPatchLevel(FmPatch &p, int lvl) {
+  int c = lvl < 0 ? 0 : (lvl > VOLUME_MAX ? VOLUME_MAX : lvl);
+  p.levelEnc = (uint8_t)(c + 1);
+}
 
 // Shared voice & runtime state passed to modular instrument engines
 enum class EnvStage : uint8_t { Idle = 0, Attack = 1, Decay = 2, Sustain = 3, Release = 4 };

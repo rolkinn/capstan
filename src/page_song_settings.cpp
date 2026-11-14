@@ -107,6 +107,7 @@ FLASHMEM static void songSettingsDrawPage(bool full) {
   PROGMEM static const char *const LABELS[PSET_COUNT] = {
     "RECORD LINE/USB",
     "MONITOR LINE/USB",
+    "LINE IN GAIN",
     "REC TRIG THRESH",
     "MIDI CLOCK OUT",
     "MIDI CLOCK SOURCE",
@@ -158,6 +159,19 @@ FLASHMEM static void songSettingsDrawPage(bool full) {
     bool isPill = false;
 
     switch (i) {
+      case PSET_LINE_IN_GAIN: {
+        int tenths = constrain((int)ps.lineInGainTenths,
+                               (int)MIN_LINE_IN_GAIN_TENTHS,
+                               (int)MAX_LINE_IN_GAIN_TENTHS);
+        if (tenths == 0) {
+          snprintf(val, sizeof(val), "0.0 DB");
+        } else {
+          int absT = (tenths > 0) ? tenths : -tenths;
+          snprintf(val, sizeof(val), "%c%d.%d DB",
+                   (tenths > 0) ? '+' : '-', absT / 10, absT % 10);
+        }
+        break;
+      }
       case PSET_DEF_THRESH:
         snprintf(val, sizeof(val), "%d DB", (int)ps.defaultThreshDb);
         break;
@@ -248,8 +262,6 @@ FLASHMEM static void songSettingsOnShiftNavigate(uint8_t dir) {
 }
 
 FLASHMEM static void songSettingsOnOptAdjust(int dx, int dy, int delta) {
-  (void)dx;
-  (void)dy;
   SongSettings &ps = songSettings();
   switch (songSetRow) {
     case PSET_REC_SRC: {
@@ -267,6 +279,15 @@ FLASHMEM static void songSettingsOnOptAdjust(int dx, int dy, int delta) {
       } else {
         ps.usbMonitor = stepMonitorMode(ps.usbMonitor, delta);
       }
+      applySongSettings();
+      saveSessionWhenIdle();
+      break;
+    }
+    case PSET_LINE_IN_GAIN: {
+      int step = (dx != 0) ? dx : (dy != 0 ? dy * 10 : delta * 10);
+      ps.lineInGainTenths = (int16_t)constrain((int)ps.lineInGainTenths + step,
+                                               (int)MIN_LINE_IN_GAIN_TENTHS,
+                                               (int)MAX_LINE_IN_GAIN_TENTHS);
       applySongSettings();
       saveSessionWhenIdle();
       break;
@@ -396,6 +417,10 @@ FLASHMEM static void songSettingsOnResetParam() {
       applySongSettings();
       break;
     }
+    case PSET_LINE_IN_GAIN:
+      ps.lineInGainTenths = DEFAULT_LINE_IN_GAIN_TENTHS;
+      applySongSettings();
+      break;
     case PSET_DEF_THRESH: {
       int8_t oldDef = ps.defaultThreshDb;
       ps.defaultThreshDb = DEFAULT_THRESH_DB;

@@ -133,7 +133,7 @@ FLASHMEM int instGenBaseRow() {
 }
 
 FLASHMEM int instEditRowCount() {
-  return instGenBaseRow() + 3;
+  return instGenBaseRow() + 4;
 }
 
 FLASHMEM int fmRowColCount(int row) {
@@ -142,7 +142,11 @@ FLASHMEM int fmRowColCount(int row) {
   if (row == FM_ROW_HEADER) {
     return INST_HDR_COL_COUNT;
   }
-  if (row >= instGenBaseRow()) {
+  const int genBase = instGenBaseRow();
+  if (row == genBase + 3) {
+    return 1;
+  }
+  if (row >= genBase) {
     return 5;
   }
   if (iType == InstType::Sampler) {
@@ -163,7 +167,18 @@ FLASHMEM void syncInstEditScroll() {
   const InstType iType = (InstType)fmSynthPatch(instIdx).type;
   fmEditRow = constrain(fmEditRow, 0, instEditRowCount() - 1);
   if (iType == InstType::Sampler) {
-    instEditScroll = (fmEditRow >= SMP_ROW_AMP) ? 1 : 0;
+    if (fmEditRow < SMP_ROW_AMP) {
+      instEditScroll = 0;
+      return;
+    }
+    int genIdx = fmEditRow - SMP_ROW_AMP; // 0..3 (AMP, FLT, FX, LEVEL)
+    int genScroll = max(0, instEditScroll - 1);
+    if (genIdx < genScroll) {
+      genScroll = genIdx;
+    } else if (genIdx >= genScroll + 3) {
+      genScroll = genIdx - 3 + 1;
+    }
+    instEditScroll = 1 + constrain(genScroll, 0, 1);
     return;
   }
   if (fmEditRow == FM_ROW_HEADER) {
@@ -176,7 +191,7 @@ FLASHMEM void syncInstEditScroll() {
   } else if (bodyIdx >= instEditScroll + 3) {
     instEditScroll = bodyIdx - 3 + 1;
   }
-  instEditScroll = constrain(instEditScroll, 0, 3);
+  instEditScroll = constrain(instEditScroll, 0, 4);
 }
 
 char saveKeyboardBuf[MAX_SONG_NAME_LEN + 1] = "SONG_001";
@@ -639,16 +654,129 @@ FLASHMEM void syncSongListCursor(bool snapToActive) {
 SongSettings &songSettings() { return songCfg; }
 SystemSettings &systemSettings() { return sysCfg; }
 
+// File-scope SGTL5000 hardware sync state (written from loop() only; never inside FLASHMEM static locals)
+static bool codecHwEnabled = false;
+static bool phonesStateInitialized = false;
+static bool lastKnownPhonesIn = false;
+static int8_t appliedCodecMicMode = -1;
+static int8_t appliedCodecLineIn = -1;
+static int16_t appliedCodecHpStep = -1;
+
+FLASHMEM static void ensureSongDualMasterVolInit(SongSettings &ps) {
+  uint8_t cur = (uint8_t)constrain((int)ps.masterVolume, 0, MASTER_VOLUME_MAX);
+  ps.masterVolume = cur;
+  if (ps.masterVolHpEnc == 0 || ps.masterVolHpEnc > (uint8_t)(MASTER_VOLUME_MAX + 1)) {
+    ps.masterVolHpEnc = (uint8_t)(cur + 1);
+  }
+  if (ps.masterVolSpkEnc == 0 || ps.masterVolSpkEnc > (uint8_t)(MASTER_VOLUME_MAX + 1)) {
+    ps.masterVolSpkEnc = (uint8_t)(cur + 1);
+  }
+}
+
+FLASHMEM bool appAreHeadphonesConnected() {
+  return lastKnownPhonesIn;
+}
+
+FLASHMEM void appInitHeadphoneState(bool phonesConnected) {
+  lastKnownPhonesIn = phonesConnected;
+  phonesStateInitialized = true;
+  setHeadphonesConnectedState(phonesConnected);
+}
+
+FLASHMEM void appSetMasterVolume(uint8_t vol) {
+  ensureSongDualMasterVolInit(songCfg);
+  vol = (uint8_t)constrain((int)vol, 0, MASTER_VOLUME_MAX);
+  songCfg.masterVolume = vol;
+  if (lastKnownPhonesIn) {
+    songCfg.masterVolHpEnc = (uint8_t)(vol + 1);
+  } else {
+    songCfg.masterVolSpkEnc = (uint8_t)(vol + 1);
+  }
+  setMasterVolume(vol);
+  appServiceCodecHardware();
+}
+
+FLASHMEM void appEnableCodecHardware() {
+  codecHwEnabled = true;
+}
+
+FLASHMEM void appServiceCodecHardware() {
+  setHeadphonesConnectedState(lastKnownPhonesIn);
+
+  const int8_t wantMic = (songCfg.audioInputSource == AudioInputSource::MicAndSynth ||
+                          songCfg.audioInputSource == AudioInputSource::MicOnly) ? 1 : 0;
+  const int tenths = constrain((int)songCfg.lineInGainTenths,
+                               (int)MIN_LINE_IN_GAIN_TENTHS,
+                               (int)MAX_LINE_IN_GAIN_TENTHS);
+  const int hwStep = constrain((tenths + 120) / 15, 0, (int)SGTL_MAX_LINE_IN_LEVEL);
+  const int remTenths = tenths - (hwStep - (int)SGTL_UNITY_LINE_IN_LEVEL) * 15;
+  const float digTrim = (wantMic || remTenths == 0) ? 1.0f : powf(10.0f, (float)remTenths / 200.0f);
+  setLineInDigitalTrim(digTrim);
+
+  if (!codecHwEnabled) return;
+
+  const int8_t wantLineIn = (int8_t)hwStep;
+  if (wantMic != appliedCodecMicMode || (!wantMic && wantLineIn != appliedCodecLineIn)) {
+    if (wantMic) {
+      codec.inputSelect(AUDIO_INPUT_MIC);
+      codec.micGain(30);
+      appliedCodecMicMode = 1;
+    } else {
+      if (appliedCodecMicMode != 0) {
+        codec.inputSelect(AUDIO_INPUT_LINEIN);
+        codec.micGain(0);
+        appliedCodecMicMode = 0;
+      }
+      if (appliedCodecLineIn != wantLineIn) {
+        codec.lineInLevel((uint8_t)wantLineIn);
+        appliedCodecLineIn = wantLineIn;
+      }
+    }
+  }
+
+  const int wantHpStep = targetHeadphoneVolumeStep();
+  if (wantHpStep != appliedCodecHpStep) {
+    appliedCodecHpStep = (int16_t)wantHpStep;
+    codec.volume((float)wantHpStep / 129.0f);
+  }
+}
+
+FLASHMEM void appServiceCodecHardware(bool phonesConnected) {
+  const bool wasInit = phonesStateInitialized;
+  const bool switched = !wasInit || (phonesConnected != lastKnownPhonesIn);
+  phonesStateInitialized = true;
+  lastKnownPhonesIn = phonesConnected;
+  if (switched) {
+    ensureSongDualMasterVolInit(songCfg);
+    uint8_t targetVol = (uint8_t)((phonesConnected ? songCfg.masterVolHpEnc : songCfg.masterVolSpkEnc) - 1);
+    songCfg.masterVolume = targetVol;
+    setHeadphonesConnectedState(phonesConnected);
+    setMasterVolume(targetVol);
+    sysProjectPlayOnOutputSwitched(phonesConnected);
+    if (wasInit) {
+      uiForceRedraw();
+    }
+  }
+  appServiceCodecHardware();
+}
+
 FLASHMEM void applySystemSettings() {
   sysCfg.brightness = (uint8_t)constrain((int)sysCfg.brightness, (int)MIN_BRIGHTNESS, (int)MAX_BRIGHTNESS);
   sysCfg.metroVolume = (uint8_t)constrain((int)sysCfg.metroVolume, 0, (int)VOLUME_MAX);
+  if ((uint8_t)sysCfg.headphoneGain > (uint8_t)HeadphoneGain::High) {
+    sysCfg.headphoneGain = DEFAULT_HEADPHONE_GAIN;
+  }
   if (!isScreenBlanked()) {
     board.setBacklight(brightnessToPwm(sysCfg.brightness));
   }
   setMetronomeVolume(sysCfg.metroVolume);
+  setHeadphoneGainMode(sysCfg.headphoneGain);
+  appServiceCodecHardware();
 }
 
 FLASHMEM void applyMasterFxSettings() {
+  ensureSongDualMasterVolInit(songCfg);
+  songCfg.masterVolume = (uint8_t)((lastKnownPhonesIn ? songCfg.masterVolHpEnc : songCfg.masterVolSpkEnc) - 1);
   setMasterChorus(songCfg.masterChorus);
   setMasterDelay(songCfg.masterDelay);
   setMasterDelayFeedback(songCfg.masterDelayFeedback);
@@ -656,9 +784,13 @@ FLASHMEM void applyMasterFxSettings() {
   setMasterTape(songCfg.masterTape);
   setMasterComp(songCfg.masterComp);
   setMasterVolume(songCfg.masterVolume);
+  appServiceCodecHardware();
 }
 
 FLASHMEM void applySongSettings() {
+  songCfg.lineInGainTenths = (int16_t)constrain((int)songCfg.lineInGainTenths,
+                                                (int)MIN_LINE_IN_GAIN_TENTHS,
+                                                (int)MAX_LINE_IN_GAIN_TENTHS);
   songCfg.inputMonitor = (songCfg.lineMonitor != MonitorMode::Off);
   songCfg.usbInputMonitor = (songCfg.usbMonitor != MonitorMode::Off);
   lineMonitorMode = songCfg.lineMonitor;
@@ -683,21 +815,6 @@ FLASHMEM void applySongSettings() {
     }
   }
   audioInputSource = songCfg.audioInputSource;
-
-  static int8_t lastCodecMicMode = 0;
-  int8_t wantMic = (songCfg.audioInputSource == AudioInputSource::MicAndSynth ||
-                    songCfg.audioInputSource == AudioInputSource::MicOnly) ? 1 : 0;
-  if (wantMic != lastCodecMicMode) {
-    lastCodecMicMode = wantMic;
-    if (wantMic) {
-      codec.inputSelect(AUDIO_INPUT_MIC);
-      codec.micGain(30);
-    } else {
-      codec.inputSelect(AUDIO_INPUT_LINEIN);
-      codec.micGain(0);
-      codec.lineInLevel(8);
-    }
-  }
 
   applyMasterFxSettings();
 }

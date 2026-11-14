@@ -19,6 +19,23 @@ namespace looper {
 // 1024-point sine lookup table in cached RAM2 (DMAMEM) — initialized once in fmSynthInit()
 DMAMEM static float sinLut[INST_LUT_SIZE];
 
+// Post-Drive Instrument Output Level table (0..100, unity 80, 0.3 dB/step, +6.0 dB at 100) in PROGMEM
+PROGMEM static const float INST_LEVEL_LUT[VOLUME_MAX + 1] = {
+  0.0f, 0.0653131f, 0.0676083f, 0.0699842f, 0.0724436f, 0.0749894f, 0.0776247f, 0.0803526f,
+  0.0831764f, 0.0860994f, 0.0891251f, 0.0922571f, 0.0954993f, 0.0988553f, 0.1023293f, 0.1059254f,
+  0.1096478f, 0.1135011f, 0.1174898f, 0.1216186f, 0.1258925f, 0.1303167f, 0.1348963f, 0.1396368f,
+  0.1445440f, 0.1496236f, 0.1548817f, 0.1603245f, 0.1659587f, 0.1717908f, 0.1778279f, 0.1840772f,
+  0.1905461f, 0.1972423f, 0.2041738f, 0.2113489f, 0.2187762f, 0.2264644f, 0.2344229f, 0.2426610f,
+  0.2511886f, 0.2600160f, 0.2691535f, 0.2786121f, 0.2884032f, 0.2985383f, 0.3090295f, 0.3198895f,
+  0.3311311f, 0.3427678f, 0.3548134f, 0.3672823f, 0.3801894f, 0.3935501f, 0.4073803f, 0.4216965f,
+  0.4365158f, 0.4518559f, 0.4677351f, 0.4841724f, 0.5011872f, 0.5188000f, 0.5370318f, 0.5559043f,
+  0.5754399f, 0.5956621f, 0.6165950f, 0.6382635f, 0.6606934f, 0.6839116f, 0.7079458f, 0.7328245f,
+  0.7585776f, 0.7852356f, 0.8128305f, 0.8413951f, 0.8709636f, 0.9015711f, 0.9332543f, 0.9660509f,
+  1.0f, 1.0351422f, 1.0715193f, 1.1091748f, 1.1481536f, 1.1885022f, 1.2302688f, 1.2735031f,
+  1.3182567f, 1.3645831f, 1.4125375f, 1.4621772f, 1.5135612f, 1.5667511f, 1.6218101f, 1.6788040f,
+  1.7378008f, 1.7988709f, 1.8620871f, 1.9275249f, 1.9952623f
+};
+
 // Exact 32-bit phase steps at 44.1 kHz for Octave 9 (MIDI notes 108..119 = C8..B8);
 // all other octaves are derived in O(1) via exact power-of-2 bit shifts in noteToBaseStep().
 static const uint32_t semitoneStepOct9[12] = {
@@ -85,6 +102,7 @@ struct FmInstEnvRates {
 };
 
 static FmInstRuntime instRt[NUM_INSTRUMENTS];
+static float instCurLevel[NUM_INSTRUMENTS];
 DMAMEM static FmInstEnvRates instEnvRates[NUM_INSTRUMENTS];
 
 // 64-voice polyphonic pool: 8 dedicated voices per instrument slot (I01..I08)
@@ -352,6 +370,12 @@ FLASHMEM bool fmSynthIsSlotEmpty(int instIdx) {
   return instEngineForType((InstType)patches[instIdx].type) == nullptr;
 }
 
+static inline void syncInstCurLevel(int instIdx) {
+  if (instIdx < 0 || instIdx >= NUM_INSTRUMENTS) return;
+  int lvl = constrain(instPatchLevel(patches[instIdx]), 0, (int)VOLUME_MAX);
+  instCurLevel[instIdx] = INST_LEVEL_LUT[lvl];
+}
+
 FLASHMEM void fmSynthResetToDefault(int instIdx, bool keepName) {
   if (instIdx < 0 || instIdx >= NUM_INSTRUMENTS) return;
   InstType curType = (InstType)patches[instIdx].type;
@@ -377,6 +401,7 @@ FLASHMEM void fmSynthResetToDefault(int instIdx, bool keepName) {
     samplerClearSlot(instIdx);
   }
   resetInstDriveState(instIdx);
+  syncInstCurLevel(instIdx);
 }
 
 FLASHMEM void fmSynthCreateInSlot(int instIdx, InstType type) {
@@ -395,6 +420,7 @@ FLASHMEM void fmSynthCreateInSlot(int instIdx, InstType type) {
     memset(&patches[instIdx], 0, sizeof(FmPatch));
     patches[instIdx].type = (uint8_t)InstType::None;
   }
+  syncInstCurLevel(instIdx);
 }
 
 FLASHMEM void fmSynthDeleteSlot(int instIdx) {
@@ -405,6 +431,7 @@ FLASHMEM void fmSynthDeleteSlot(int instIdx) {
   instMidiMapClearInst(instIdx);
   memset(&patches[instIdx], 0, sizeof(FmPatch));
   patches[instIdx].type = (uint8_t)InstType::None;
+  instCurLevel[instIdx] = 1.0f;
 }
 
 FLASHMEM bool fmSynthCopySlot(int instIdx) {
@@ -422,6 +449,7 @@ FLASHMEM bool fmSynthPasteSlot(int instIdx) {
   fmSynthSilenceInst(instIdx);
   resetInstDriveState(instIdx);
   patches[instIdx] = clipboardPatch;
+  syncInstCurLevel(instIdx);
   samplerPasteSlot(instIdx);
   instMidiMapPasteInst(instIdx);
   memset(&clipboardPatch, 0, sizeof(clipboardPatch));
@@ -455,6 +483,7 @@ FLASHMEM void fmSynthResetAll() {
     instRt[i].pitchBendRatio = 1.0f;
     instRt[i].modWheelBoost = 0.0f;
     instRt[i].sustainPedal = false;
+    instCurLevel[i] = 1.0f;
     memset(&instEnvRates[i].lastAmp, 0xFF, sizeof(InstEnvParams));
     memset(&instEnvRates[i].lastFlt, 0xFF, sizeof(InstEnvParams));
   }
@@ -1085,6 +1114,33 @@ FLASHMEM void fmSynthService() {
 // ============================================================================
 // Audio ISR Block Renderer — Dispatches Active Voices + General FX Bus
 // ============================================================================
+__attribute__((noinline)) static void applyInstDriveBlock(int drvSlot, uint8_t drive,
+                                                          int32_t *bufL, int32_t *bufR, int numFrames) {
+  for (int i = 0; i < numFrames; i++) {
+    float xL = (float)bufL[i] * (1.0f / 32768.0f);
+    float drvL = processInstDriveSample(drvSlot, drive, xL);
+    int32_t sL = (int32_t)(drvL * 32768.0f);
+    if (bufR[i] == bufL[i]) {
+      bufL[i] = sL;
+      bufR[i] = sL;
+    } else {
+      float xR = (float)bufR[i] * (1.0f / 32768.0f);
+      bufL[i] = sL;
+      bufR[i] = (int32_t)(processInstDriveSample(drvSlot, drive, xR) * 32768.0f);
+    }
+  }
+}
+
+__attribute__((noinline)) static void scaleInstLevelBlock(int32_t *bufL, int32_t *bufR, int numFrames,
+                                                          float startLvl, float gStep) {
+  float g = startLvl;
+  for (int i = 0; i < numFrames; i++) {
+    g += gStep;
+    bufL[i] = (int32_t)((float)bufL[i] * g);
+    bufR[i] = (int32_t)((float)bufR[i] * g);
+  }
+}
+
 bool fmSynthRenderBlock(int32_t *outL, int32_t *outR, int numFrames,
                         int captureMidiTrack, int32_t *capOutL, int32_t *capOutR) {
   fmSynthProcessQueuedEvents();
@@ -1145,9 +1201,14 @@ bool fmSynthRenderBlock(int32_t *outL, int32_t *outR, int numFrames,
 
       const bool hasDrive = (p.fx.drive > 0);
       const bool hasBusFx = (p.fx.chorus > 0 || p.fx.delay > 0 || p.fx.reverb > 0);
+      const int instLvl = constrain(instPatchLevel(p), 0, (int)VOLUME_MAX);
+      const float targetLvl = INST_LEVEL_LUT[instLvl];
+      const float startLvl = instCurLevel[inst];
+      const bool rampingLvl = (fabsf(targetLvl - startLvl) > 1e-4f);
+      const bool hasLevelScale = rampingLvl || (instLvl != (int)VOLUME_UNITY);
       const FmInstRuntime &rt = instRt[inst];
 
-      if (!hasCapVoice && !hasDrive && !hasBusFx) {
+      if (!hasCapVoice && !hasDrive && !hasBusFx && !hasLevelScale) {
         for (int vIdx = 0; vIdx < NUM_FM_VOICES; vIdx++) {
           FmVoice &v = voices[vIdx];
           if (v.active && v.instIdx == (uint8_t)inst) {
@@ -1177,21 +1238,12 @@ bool fmSynthRenderBlock(int32_t *outL, int32_t *outR, int numFrames,
           instL[i] += capInstL[i];
           instR[i] += capInstR[i];
         }
+        const float gStep = rampingLvl ? ((targetLvl - startLvl) / (float)max(1, numFrames)) : 0.0f;
         if (hasDrive) {
-          const int capDrvSlot = NUM_INSTRUMENTS + inst;
-          for (int i = 0; i < numFrames; i++) {
-            float xL = (float)capInstL[i] * (1.0f / 32768.0f);
-            float drvL = processInstDriveSample(capDrvSlot, p.fx.drive, xL);
-            int32_t sL = (int32_t)(drvL * 32768.0f);
-            if (capInstR[i] == capInstL[i]) {
-              capInstL[i] = sL;
-              capInstR[i] = sL;
-            } else {
-              float xR = (float)capInstR[i] * (1.0f / 32768.0f);
-              capInstL[i] = sL;
-              capInstR[i] = (int32_t)(processInstDriveSample(capDrvSlot, p.fx.drive, xR) * 32768.0f);
-            }
-          }
+          applyInstDriveBlock(NUM_INSTRUMENTS + inst, p.fx.drive, capInstL, capInstR, numFrames);
+        }
+        if (hasLevelScale) {
+          scaleInstLevelBlock(capInstL, capInstR, numFrames, startLvl, gStep);
         }
         for (int i = 0; i < numFrames; i++) {
           capOutL[i] += capInstL[i];
@@ -1207,22 +1259,17 @@ bool fmSynthRenderBlock(int32_t *outL, int32_t *outR, int numFrames,
       }
 
       if (hasDrive) {
-        for (int i = 0; i < numFrames; i++) {
-          float xL = (float)instL[i] * (1.0f / 32768.0f);
-          float drvL = processInstDriveSample(inst, p.fx.drive, xL);
-          int32_t sL = (int32_t)(drvL * 32768.0f);
-          if (instR[i] == instL[i]) {
-            instL[i] = sL;
-            instR[i] = sL;
-          } else {
-            float xR = (float)instR[i] * (1.0f / 32768.0f);
-            instL[i] = sL;
-            instR[i] = (int32_t)(processInstDriveSample(inst, p.fx.drive, xR) * 32768.0f);
-          }
-        }
+        applyInstDriveBlock(inst, p.fx.drive, instL, instR, numFrames);
       }
 
-      if (hasBusFx) {
+      if (hasLevelScale) {
+        const float gStep = rampingLvl ? ((targetLvl - startLvl) / (float)max(1, numFrames)) : 0.0f;
+        scaleInstLevelBlock(instL, instR, numFrames, startLvl, gStep);
+        instCurLevel[inst] = targetLvl;
+      }
+
+      const bool silentInst = (!rampingLvl && instLvl <= 0);
+      if (hasBusFx && !silentInst) {
         if (!anyFxSend) {
           memset(fxSendL, 0, numFrames * sizeof(int32_t));
           memset(fxSendR, 0, numFrames * sizeof(int32_t));
@@ -1426,6 +1473,7 @@ FLASHMEM static void validateAndClampPatch(FmPatch &p, int slotIdx) {
   p.fx.delay         = (uint8_t)constrain((int)p.fx.delay,         0, (int)INST_FX_MAX);
   p.fx.delayFeedback = (uint8_t)constrain((int)p.fx.delayFeedback, 0, (int)INST_FX_MAX);
   p.fx.reverb        = (uint8_t)constrain((int)p.fx.reverb,        0, (int)INST_FX_MAX);
+  setInstPatchLevel(p, instPatchLevel(p));
 }
 
 FLASHMEM bool fmSynthSaveSong(FsFile &f) {
@@ -1460,6 +1508,7 @@ FLASHMEM bool fmSynthLoadSong(FsFile &f) {
     for (int i = 0; i < n; i++) {
       patches[i] = df.patches[i];
       validateAndClampPatch(patches[i], i);
+      syncInstCurLevel(i);
     }
     samplerLoadSongData(f);
     instMidiMapLoadSongData(f);
@@ -1497,6 +1546,7 @@ FLASHMEM bool fmSynthLoadSong(FsFile &f) {
       dst.fx = { 0, 0, 0, 0, 0 };
       patches[i] = dst;
       validateAndClampPatch(patches[i], i);
+      syncInstCurLevel(i);
     }
     return true;
   }
@@ -1597,6 +1647,7 @@ FLASHMEM bool fmSynthLoadInstrumentFile(int instIdx, const char *fullPath) {
   resetInstDriveState(instIdx);
   patches[instIdx] = sid.patch;
   validateAndClampPatch(patches[instIdx], instIdx);
+  syncInstCurLevel(instIdx);
   if ((InstType)patches[instIdx].type == InstType::Sampler) {
     samplerLoadSingleInstData(f, instIdx);
   } else {

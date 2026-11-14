@@ -8,7 +8,7 @@
 
 // Firmware version formatted as "x.y" (updated only when explicitly requested)
 #ifndef CAPSTAN_VERSION
-#define CAPSTAN_VERSION "1.2"
+#define CAPSTAN_VERSION "1.3"
 #endif
 
 // Compile-time debug flag (0 in normal/release builds, 1 via `python build_all.py --debug`)
@@ -99,12 +99,25 @@ constexpr float VOLUME_STEP_DB = 0.3f;
 constexpr int PAN_MAX = 100;                       // -100 (full Left) .. 0 (Center) .. +100 (full Right)
 
 // Master volume
-constexpr int MASTER_VOLUME_MAX = 100, MASTER_VOLUME_UNITY = 80, MASTER_VOLUME_DEFAULT = 80;
+constexpr int MASTER_VOLUME_MAX = 100, MASTER_VOLUME_UNITY = 80, MASTER_VOLUME_DEFAULT = 40;
 constexpr float MASTER_TOP_GAIN = 4.0f;
 constexpr float MASTER_STEP_DB = 12.0412f / (MASTER_VOLUME_MAX - MASTER_VOLUME_UNITY);
 inline float masterStepDb(int step) { return (step - MASTER_VOLUME_UNITY) * MASTER_STEP_DB; }
 
-// Screen brightness (5..100, scaled to 0..255 PWM) & Metronome volume (0..100, default 80)
+// Screen brightness (5..100, scaled to 0..255 PWM), Metronome volume (0..100, default 80),
+// Analog Headphone Gain preset (LOW, NORMAL, HIGH; default NORMAL), & Line-In Gain (-12.0..+12.0 dB, default 0.0 dB)
+enum class HeadphoneGain : uint8_t {
+  Low    = 0,  // -19.5 dB analog base
+  Normal = 1,  // -10.0 dB analog base (+13 dB over legacy, default)
+  High   = 2   //   0.0 dB clean analog unity ceiling
+};
+constexpr HeadphoneGain DEFAULT_HEADPHONE_GAIN = HeadphoneGain::Normal;
+constexpr int16_t MIN_LINE_IN_GAIN_TENTHS = -120;      // -12.0 dB
+constexpr int16_t MAX_LINE_IN_GAIN_TENTHS = 120;       // +12.0 dB
+constexpr int16_t DEFAULT_LINE_IN_GAIN_TENTHS = 0;     //   0.0 dB
+constexpr uint8_t SGTL_UNITY_LINE_IN_LEVEL = 8;        // SGTL5000 0.0 dB step (0..15, 1.5 dB/step)
+constexpr uint8_t SGTL_MAX_LINE_IN_LEVEL = 15;         // SGTL5000 +10.5 dB step
+
 constexpr uint8_t MIN_BRIGHTNESS = 5;
 constexpr uint8_t MAX_BRIGHTNESS = 100;
 constexpr uint8_t DEFAULT_BRIGHTNESS = 50;

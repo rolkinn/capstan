@@ -143,16 +143,30 @@ FLASHMEM static void reloadFromCard() {
   uiForceRedraw();
 }
 
+static bool phonesInState = false;
+static bool speakerOnState = false;
+static bool speakerInitDone = false;
+
 FLASHMEM static void updateSpeakerFromHeadphones() {
-  static bool phonesIn = false, speakerOn = false, first = true;
   bool phones;
   if (board.headphonesChanged(phones)) {
-    phonesIn = phones;
+    phonesInState = phones;
   }
-  if (first || speakerOn != !phonesIn) {
-    first = false;
-    speakerOn = !phonesIn;
-    board.setSpeaker(speakerOn);
+  const bool wantSpeaker = !phonesInState;
+  if (wantSpeaker) {
+    appServiceCodecHardware(phonesInState);
+    if (!speakerInitDone || speakerOnState != wantSpeaker) {
+      speakerInitDone = true;
+      speakerOnState = true;
+      board.setSpeaker(true);
+    }
+  } else {
+    if (!speakerInitDone || speakerOnState != wantSpeaker) {
+      speakerInitDone = true;
+      speakerOnState = false;
+      board.setSpeaker(false);
+    }
+    appServiceCodecHardware(phonesInState);
   }
 }
 
@@ -167,6 +181,13 @@ FLASHMEM void setup() {
 #endif
   board.begin();
   board.powerButtonPressed();
+  {
+    bool initPhones = false;
+    if (board.headphonesChanged(initPhones)) {
+      phonesInState = initPhones;
+    }
+    appInitHeadphoneState(phonesInState);
+  }
   for (int i = 0; i < 6 && !codec.enable(); i++) delay(10);
   codec.muteLineout();
   codec.dacVolume(0.0f);
@@ -175,7 +196,7 @@ FLASHMEM void setup() {
   codec.adcHighPassFilterEnable();
   codec.inputSelect(AUDIO_INPUT_LINEIN);
   codec.micGain(0);
-  codec.lineInLevel(8);
+  codec.lineInLevel(SGTL_UNITY_LINE_IN_LEVEL);
   codec.lineOutLevel(13);
   codec.unmuteLineout();
   uint32_t codecReadyAt = millis();
@@ -202,7 +223,7 @@ FLASHMEM void setup() {
 
   while (millis() - codecReadyAt < 150) delay(1);
   codec.dacVolume(1.0f);
-  codec.volume(0.45f);
+  appEnableCodecHardware();
   updateSpeakerFromHeadphones();
 
   if (MIDI_OUT_ENABLED) midiBegin(board.midiOutBegin());

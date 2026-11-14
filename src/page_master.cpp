@@ -596,8 +596,7 @@ FLASHMEM static void masterOnOptAdjust(int dx, int dy, int delta) {
     if (col == MASTER_COL_VOL) {
       uint8_t nextVol = (uint8_t)constrain((int)ps.masterVolume + step, 0, MASTER_VOLUME_MAX);
       if (ps.masterVolume != nextVol) {
-        ps.masterVolume = nextVol;
-        setMasterVolume(ps.masterVolume);
+        appSetMasterVolume(nextVol);
         saveSessionWhenIdle();
       }
     } else {
@@ -767,8 +766,8 @@ FLASHMEM static void masterOnEditPress(bool shiftHeld) {
   SongSettings &ps = songSettings();
   int col = constrain(masterCell, 0, MASTER_FX_ROW_COLS - 1);
   if (col == MASTER_COL_VOL) {
-    ps.masterVolume = (ps.masterVolume > 0) ? 0 : MASTER_VOLUME_DEFAULT;
-    setMasterVolume(ps.masterVolume);
+    uint8_t nextVol = (ps.masterVolume > 0) ? 0 : MASTER_VOLUME_DEFAULT;
+    appSetMasterVolume(nextVol);
     saveSessionWhenIdle();
     uiForceRedraw();
     return;
@@ -867,8 +866,7 @@ FLASHMEM static void masterOnResetParam() {
     if (col == MASTER_COL_VOL) {
       SongSettings &ps = songSettings();
       if (ps.masterVolume != MASTER_VOLUME_DEFAULT) {
-        ps.masterVolume = MASTER_VOLUME_DEFAULT;
-        setMasterVolume(ps.masterVolume);
+        appSetMasterVolume(MASTER_VOLUME_DEFAULT);
         saveSessionWhenIdle();
       }
     } else {

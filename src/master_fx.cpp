@@ -277,29 +277,26 @@ static uint8_t masterDfbPct = 0;
 static uint8_t instDlyPct = 0;
 static uint8_t instDfbPct = 0;
 
-static inline float readDelayTapQ15(const int16_t *buf, int bufLen, int writeIdx, float delaySamples) {
+static inline float readDelayTapQ14(const int16_t *buf, int bufLen, int writeIdx, float delaySamples) {
   int dInt = (int)delaySamples;
   float dFrac = delaySamples - (float)dInt;
   int r0 = writeIdx + dInt;
   if (r0 >= bufLen) r0 -= bufLen;
   int r1 = r0 + 1;
   if (r1 >= bufLen) r1 -= bufLen;
-  float s0 = (float)buf[r0] * (1.0f / 32767.0f);
-  float s1 = (float)buf[r1] * (1.0f / 32767.0f);
+  float s0 = (float)buf[r0] * (1.0f / 16384.0f);
+  float s1 = (float)buf[r1] * (1.0f / 16384.0f);
   return s0 + dFrac * (s1 - s0);
 }
 
-static inline int16_t floatToDelayQ15(float x) {
-  float c = constrain(x, -1.0f, 1.0f) * 32767.0f;
-  return (int16_t)((c >= 0.0f) ? (c + 0.5f) : (c - 0.5f));
-}
-
 static inline float warmDelaySaturate(float x, float drive, float invDrive, float asym) {
-  float u = constrain(x * drive, -1.25f, 1.25f);
+  constexpr float HEADROOM = 1.85f;
+  constexpr float INV_HEADROOM = 1.0f / HEADROOM;
+  float u = constrain((x * drive) * INV_HEADROOM, -1.45f, 1.45f);
   float u2 = u * u;
-  // Soft cubic tape knee with subtle even-harmonic warmth (zero DC at u = 0)
-  float shaped = (u - 0.14814815f * u2 * u + asym * (u2 - 0.15f * u2 * u2)) * invDrive;
-  return constrain(shaped, -1.0f, 1.0f);
+  // Soft cubic tape knee scaled to Q14 (+6 dBFS) headroom with subtle even-harmonic warmth (zero DC at u = 0)
+  float shaped = HEADROOM * (u - 0.14814815f * u2 * u + asym * (u2 - 0.15f * u2 * u2)) * invDrive;
+  return constrain(shaped, -1.90f, 1.90f);
 }
 
 FLASHMEM static void resetDelayUnit(DelayState &u) {
@@ -390,8 +387,8 @@ static inline void processDelayUnit(DelayState &u, float &xL, float &xR) {
   float dL = u.baseL + wowExc * fastSin01(u.wowPhase);
   float dR = u.baseR + wowExc * fastSin01(u.wowPhase + 0.2f);
 
-  float rawTapL = readDelayTapQ15(u.bufL, u.bufLen, u.writeIdx, dL);
-  float rawTapR = readDelayTapQ15(u.bufR, u.bufLen, u.writeIdx, dR);
+  float rawTapL = readDelayTapQ14(u.bufL, u.bufLen, u.writeIdx, dL);
+  float rawTapR = readDelayTapQ14(u.bufR, u.bufLen, u.writeIdx, dR);
 
   // Warm analog/tape filtering + subtle saturation in the delay path
   const float aHp = u.hpAlpha;
@@ -417,8 +414,8 @@ static inline void processDelayUnit(DelayState &u, float &xL, float &xR) {
   float fbL = fb * (0.86f * tapL + 0.16f * tapR);
   float fbR = fb * (0.82f * tapR + 0.14f * tapL);
 
-  u.bufL[u.writeIdx] = floatToDelayQ15(inL + fbL);
-  u.bufR[u.writeIdx] = floatToDelayQ15(inR + fbR);
+  u.bufL[u.writeIdx] = floatToQ14(inL + fbL);
+  u.bufR[u.writeIdx] = floatToQ14(inR + fbR);
   if (--u.writeIdx < 0) u.writeIdx = u.bufLen - 1;
 
   const float mix = u.curWetMix;

@@ -1069,6 +1069,23 @@ FLASHMEM static void drawSectionRowInSlot(const FmPatch &p, InstType iType, cons
     return;
   }
 
+  if (rowIdx == genBase + 3) {
+    drawSectionTitle(slotIdx, titleY, titleH, "OUT: OUTPUT LEVEL", COLOR_WARN, forceFull);
+    int lvl = instPatchLevel(p);
+    char val[12];
+    if (lvl <= 0) {
+      snprintf(val, sizeof(val), "OFF");
+    } else {
+      snprintf(val, sizeof(val), "%d", lvl);
+    }
+    drawFmParamCell(rowIdx, 0, SX(6), cellY, SX(100), cellH, 0,
+                    "LEVEL", val, lvl, VOLUME_MAX, COLOR_WARN, forceFull);
+    if (forceFull) {
+      blitBgStrip(SX(6) + SX(100), cellY, SX(308) - SX(100), cellH);
+    }
+    return;
+  }
+
   if (iType == InstType::PhaseDist || iType == InstType::NoiseDrone) {
     int opIdx = rowIdx - 1;
     const char *title = (opIdx == 0) ? ops->sec0Title : (opIdx == 1) ? ops->sec1Title : ops->sec2Title;
@@ -1500,7 +1517,7 @@ FLASHMEM static void instEditDrawPage(bool full) {
     }
     for (int slotIdx = 0; slotIdx < 3; slotIdx++) {
       int rowIdx = (iType == InstType::Sampler)
-                       ? (SMP_ROW_AMP + slotIdx)
+                       ? (SMP_ROW_AMP + (instEditScroll - 1) + slotIdx)
                        : (1 + instEditScroll + slotIdx);
       drawSectionRowInSlot(p, iType, ops, slotIdx, rowIdx, scrollOrTypeChanged);
       keepStreaming();
@@ -1637,6 +1654,10 @@ FLASHMEM static void instEditOnOptAdjust(int dx, int dy, int delta) {
   } else if (fmEditRow == genBase + 2) {
     int cur = (int)getFxField(p.fx, fmEditCol);
     setFxField(p.fx, fmEditCol, (uint8_t)constrain(cur + step, 0, (int)INST_FX_MAX));
+    saveSessionWhenIdle();
+  } else if (fmEditRow == genBase + 3) {
+    int cur = (int)instPatchLevel(p);
+    setInstPatchLevel(p, (uint8_t)constrain(cur + step, 0, (int)VOLUME_MAX));
     saveSessionWhenIdle();
   } else if (iType == InstType::Sampler) {
     if (fmEditRow == SMP_ROW_PRESS) {
@@ -1796,6 +1817,8 @@ FLASHMEM static void instEditOnResetParam() {
     setEnvField(p.flt, fmEditCol, getEnvField(def.flt, fmEditCol));
   } else if (fmEditRow == genBase + 2) {
     setFxField(p.fx, fmEditCol, getFxField(def.fx, fmEditCol));
+  } else if (fmEditRow == genBase + 3) {
+    setInstPatchLevel(p, instPatchLevel(def));
   } else if (iType == InstType::Sampler) {
     if (fmEditRow == SMP_ROW_PRESS) {
       p.algorithm = (uint8_t)SamplerPressMode::Stop;

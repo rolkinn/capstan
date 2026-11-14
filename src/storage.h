@@ -19,7 +19,7 @@ struct SongSettings {
   uint8_t masterReverb = 0;              // 0..100% Lofi Oddity Reverb macro
   uint8_t masterTape = 0;                // 0..100% Lofi Oddity Tape macro
   uint8_t masterComp = 0;                // 0..100% Lofi Oddity Comp macro
-  uint8_t masterVolume = MASTER_VOLUME_DEFAULT; // 0 (Off) .. MASTER_VOLUME_MAX (100), default 80
+  uint8_t masterVolume = MASTER_VOLUME_DEFAULT; // 0 (Off) .. MASTER_VOLUME_MAX (100), default 40
   AudioInputSource audioInputSource = AudioInputSource::All;
   bool inputMonitor = true;              // Legacy v1 field retained for SONG.DAT v2 layout compatibility (superseded by lineMonitor)
   bool usbInputMonitor = true;           // Legacy v1 field retained for SONG.DAT v2 layout compatibility (superseded by usbMonitor)
@@ -33,11 +33,15 @@ struct SongSettings {
   MonitorMode lineMonitor = MonitorMode::On;
   MonitorMode usbMonitor = MonitorMode::On;
   MidiTransportIn midiTransportIn = MidiTransportIn::Auto;
+  int16_t lineInGainTenths = DEFAULT_LINE_IN_GAIN_TENTHS; // -120..+120 (-12.0..+12.0 dB, default 0 = 0.0 dB)
+  uint8_t masterVolHpEnc = 0;   // 0 = unset/legacy -> masterVolume, 1..101 = 0..100 remembered Headphones VOL
+  uint8_t masterVolSpkEnc = 0;  // 0 = unset/legacy -> masterVolume, 1..101 = 0..100 remembered Speaker VOL
 };
 
 struct SystemSettings {
-  uint8_t brightness = DEFAULT_BRIGHTNESS;    // 5..100 (default 50, scaled to 0..255 PWM)
-  uint8_t metroVolume = DEFAULT_METRO_VOLUME; // 0..100 (default 80)
+  uint8_t brightness = DEFAULT_BRIGHTNESS;             // 5..100 (default 50, scaled to 0..255 PWM)
+  uint8_t metroVolume = DEFAULT_METRO_VOLUME;          // 0..100 (default 80)
+  HeadphoneGain headphoneGain = DEFAULT_HEADPHONE_GAIN; // LOW, NORMAL (default), HIGH
 };
 
 bool storageBegin(void (*progress)(const char *));

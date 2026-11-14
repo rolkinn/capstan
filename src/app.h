@@ -93,25 +93,27 @@ enum TransportCell : int {
 enum SongSettingItem : int {
   PSET_REC_SRC      = 0,
   PSET_MONITOR      = 1,
-  PSET_DEF_THRESH   = 2,
-  PSET_CLOCK_OUT    = 3,
-  PSET_CLOCK        = 4,
-  PSET_TRANSPORT_IN = 5,
-  PSET_MIDI_THRU    = 6,
-  PSET_SAVED_INST   = 7,
-  PSET_EXPORT_MIDI  = 8,
-  PSET_EXPORT_AUDIO = 9,
-  PSET_COUNT        = 10
+  PSET_LINE_IN_GAIN = 2,
+  PSET_DEF_THRESH   = 3,
+  PSET_CLOCK_OUT    = 4,
+  PSET_CLOCK        = 5,
+  PSET_TRANSPORT_IN = 6,
+  PSET_MIDI_THRU    = 7,
+  PSET_SAVED_INST   = 8,
+  PSET_EXPORT_MIDI  = 9,
+  PSET_EXPORT_AUDIO = 10,
+  PSET_COUNT        = 11
 };
 
 enum SysSettingItem : int {
   SSET_BRIGHTNESS   = 0,
   SSET_METRO_VOL    = 1,
-  SSET_INST_PRESETS = 2,
-  SSET_PROJECTS     = 3,
-  SSET_MIDI_MAP     = 4,
-  SSET_USB_DRIVE    = 5,
-  SSET_COUNT        = 6
+  SSET_HP_GAIN      = 2,
+  SSET_INST_PRESETS = 3,
+  SSET_PROJECTS     = 4,
+  SSET_MIDI_MAP     = 5,
+  SSET_USB_DRIVE    = 6,
+  SSET_COUNT        = 7
 };
 
 // Main (Songs) page interactive zones & action buttons
@@ -177,22 +179,24 @@ enum InstHeaderCol : int {
 //     Row 4 (SMP_ROW_FLT):      FLT Envelope (5 cols: AMT, ATK, DEC, SUS, REL 0..127)
 //     Row 5 (SMP_ROW_FX):       Instrument FX (5 cols: DRIVE, CHORUS, DELAY, D.FB, REVERB 0..100)
 enum FmEditRow : int {
-  FM_ROW_HEADER    = 0,
-  FM_ROW_ALGO      = 1,
-  FM_ROW_OP1_MAIN  = 2,
-  FM_ROW_OP2_MAIN  = 3,
-  INST_GEN_ROW_AMP = 4,
-  INST_GEN_ROW_FLT = 5,
-  INST_GEN_ROW_FX  = 6,
-  FM_ROW_COUNT     = 7,
+  FM_ROW_HEADER      = 0,
+  FM_ROW_ALGO        = 1,
+  FM_ROW_OP1_MAIN    = 2,
+  FM_ROW_OP2_MAIN    = 3,
+  INST_GEN_ROW_AMP   = 4,
+  INST_GEN_ROW_FLT   = 5,
+  INST_GEN_ROW_FX    = 6,
+  INST_GEN_ROW_LEVEL = 7,
+  FM_ROW_COUNT       = 8,
 
-  SMP_ROW_HEADER   = 0,
-  SMP_ROW_PRESS    = 1,
-  SMP_ROW_KEYS     = 2,
-  SMP_ROW_AMP      = 3,
-  SMP_ROW_FLT      = 4,
-  SMP_ROW_FX       = 5,
-  SMP_ROW_COUNT    = 6
+  SMP_ROW_HEADER     = 0,
+  SMP_ROW_PRESS      = 1,
+  SMP_ROW_KEYS       = 2,
+  SMP_ROW_AMP        = 3,
+  SMP_ROW_FLT        = 4,
+  SMP_ROW_FX         = 5,
+  SMP_ROW_LEVEL      = 6,
+  SMP_ROW_COUNT      = 7
 };
 
 int instGenBaseRow();
@@ -311,9 +315,15 @@ void armDeleteConfirm(int songIdx);
 void cancelDeleteConfirm();
 void syncSongListCursor(bool snapToActive = false);
 
-// Settings accessors
+// Settings accessors & SGTL5000 codec hardware sync (loop() only, never ISR)
 SongSettings &songSettings();
 SystemSettings &systemSettings();
+bool appAreHeadphonesConnected();
+void appInitHeadphoneState(bool phonesConnected);
+void appSetMasterVolume(uint8_t vol);
+void appEnableCodecHardware();
+void appServiceCodecHardware();
+void appServiceCodecHardware(bool phonesConnected);
 void applySystemSettings();
 void applySongSettings();
 void applyMasterFxSettings();

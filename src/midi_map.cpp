@@ -213,10 +213,10 @@ FLASHMEM void midiMapInit() {
   learnIgnoreUntilMs = 0;
 }
 
-const MidiCcMapEntry *midiMapGlobalTable() { return globalMap; }
-MidiCcMapEntry *midiMapGlobalTableMut() { return globalMap; }
+FLASHMEM const MidiCcMapEntry *midiMapGlobalTable() { return globalMap; }
+FLASHMEM MidiCcMapEntry *midiMapGlobalTableMut() { return globalMap; }
 
-MidiCcMapEntry midiMapEffective(int targetId) {
+FLASHMEM MidiCcMapEntry midiMapEffective(int targetId) {
   if (targetId < 0 || targetId >= MIDI_TARGET_COUNT) {
     return MidiCcMapEntry{MIDI_MAP_CH_OFF, 0};
   }
@@ -575,8 +575,7 @@ FLASHMEM static void executeTargetAction(int targetId, uint8_t val) {
     case MIDI_TGT_MASTER_VOL: {
       uint8_t v = (uint8_t)(((int)val * MASTER_VOLUME_MAX + 63) / 127);
       if (ps.masterVolume != v) {
-        ps.masterVolume = v;
-        setMasterVolume(v);
+        appSetMasterVolume(v);
         saveSessionWhenIdle();
       }
       break;
@@ -1001,7 +1000,8 @@ PROGMEM static const char *const INST_MAP_SHARED_LABELS[INST_MIDI_MAP_SHARED_SLO
   "FX CHORUS",
   "FX DELAY",
   "FX D.FB",
-  "FX REVERB"
+  "FX REVERB",
+  "OUT LEVEL"
 };
 
 static inline int instEngineParamCount(InstType type) {
@@ -1092,7 +1092,7 @@ FLASHMEM const char *instMidiMapRowLabel(InstType type, int rowIdx) {
   return INST_MAP_SHARED_LABELS[sharedIdx];
 }
 
-MidiCcMapEntry instMidiMapGetSlot(int instIdx, int slot) {
+FLASHMEM MidiCcMapEntry instMidiMapGetSlot(int instIdx, int slot) {
   if (instIdx < 0 || instIdx >= NUM_INSTRUMENTS ||
       slot < 0 || slot >= INST_MIDI_MAP_TOTAL_SLOTS) {
     return MidiCcMapEntry{MIDI_MAP_CH_OFF, 0};
@@ -1228,6 +1228,12 @@ FLASHMEM static bool applyInstPatchSlotCc(FmPatch &p, InstType iType, int slot, 
       case 12: return assignU8(p.fx.delay,          scaleCcTo100(val));
       case 13: return assignU8(p.fx.delayFeedback,  scaleCcTo100(val));
       case 14: return assignU8(p.fx.reverb,         scaleCcTo100(val));
+      case 15: {
+        uint8_t nextLvl = scaleCcTo100(val);
+        if (instPatchLevel(p) == nextLvl) return false;
+        setInstPatchLevel(p, nextLvl);
+        return true;
+      }
       default: return false;
     }
   }
@@ -1370,15 +1376,15 @@ void instMidiMapApplyRoutedCc(int instIdx, uint8_t cc, uint8_t val) {
 struct DiskInstMidiMapChunk {
   char magic[4];     // "IMAP"
   uint16_t version;  // 1
-  uint16_t numSlots; // INST_MIDI_MAP_TOTAL_SLOTS (31)
+  uint16_t numSlots; // INST_MIDI_MAP_TOTAL_SLOTS (32)
   MidiCcMapEntry entries[NUM_INSTRUMENTS][INST_MIDI_MAP_TOTAL_SLOTS];
 };
-static_assert(sizeof(DiskInstMidiMapChunk) <= 512, "DiskInstMidiMapChunk must fit in one 512-byte sector");
+static_assert(sizeof(DiskInstMidiMapChunk) <= 544, "DiskInstMidiMapChunk size check");
 
 struct DiskSingleInstMidiMapChunk {
   char magic[4];     // "IM1P"
   uint16_t version;  // 1
-  uint16_t numSlots; // INST_MIDI_MAP_TOTAL_SLOTS (31)
+  uint16_t numSlots; // INST_MIDI_MAP_TOTAL_SLOTS (32)
   MidiCcMapEntry entries[INST_MIDI_MAP_TOTAL_SLOTS];
 };
 static_assert(sizeof(DiskSingleInstMidiMapChunk) <= 512, "DiskSingleInstMidiMapChunk must fit in one 512-byte sector");
@@ -1408,14 +1414,19 @@ FLASHMEM bool instMidiMapLoadSongData(FsFile &f) {
 
   DiskInstMidiMapChunk chunk{};
   int rd = f.read(&chunk, sizeof(chunk));
-  if (rd < 8 || memcmp(chunk.magic, "IMAP", 4) != 0 || chunk.version != 1) {
+  if (rd < 8 || memcmp(chunk.magic, "IMAP", 4) != 0 || chunk.version != 1 || chunk.numSlots == 0) {
     return true; // Songs saved before Instrument MIDI Map existed remain valid
   }
 
-  int slots = min((int)chunk.numSlots, INST_MIDI_MAP_TOTAL_SLOTS);
+  const int fileSlots = (int)chunk.numSlots;
+  const int copySlots = min(fileSlots, INST_MIDI_MAP_TOTAL_SLOTS);
+  const int availEntries = (rd - 8) / (int)sizeof(MidiCcMapEntry);
+  const MidiCcMapEntry *flat = &chunk.entries[0][0];
   for (int i = 0; i < NUM_INSTRUMENTS; i++) {
-    for (int s = 0; s < slots; s++) {
-      instMap[i][s] = chunk.entries[i][s];
+    for (int s = 0; s < copySlots; s++) {
+      int flatIdx = i * fileSlots + s;
+      if (flatIdx >= availEntries) break;
+      instMap[i][s] = flat[flatIdx];
       sanitizeLoadedMapEntry(instMap[i][s]);
     }
   }
@@ -1445,7 +1456,8 @@ FLASHMEM bool instMidiMapLoadSingleInstData(FsFile &f, int instIdx) {
     return true; // Presets saved before Instrument MIDI Map existed remain valid
   }
 
-  int slots = min((int)chunk.numSlots, INST_MIDI_MAP_TOTAL_SLOTS);
+  const int availEntries = (rd - 8) / (int)sizeof(MidiCcMapEntry);
+  int slots = min(min((int)chunk.numSlots, INST_MIDI_MAP_TOTAL_SLOTS), availEntries);
   for (int s = 0; s < slots; s++) {
     instMap[instIdx][s] = chunk.entries[s];
     sanitizeLoadedMapEntry(instMap[instIdx][s]);

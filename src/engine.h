@@ -215,6 +215,10 @@ void takeTrackPeaks(int t, float &left, float &right);
 void takeInputPeaks(float &left, float &right);
 void takeOutputPeaks(float &left, float &right);
 void setMasterVolume(int step);
+void setHeadphoneGainMode(HeadphoneGain mode);
+void setHeadphonesConnectedState(bool connected);
+int targetHeadphoneVolumeStep();
+void setLineInDigitalTrim(float gain);
 void setMetronomeVolume(int step);
 void takeEngineLoad(float &avg, float &most);
 

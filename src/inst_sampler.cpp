@@ -594,6 +594,7 @@ bool samplerPrepareVoiceOn(int instIdx, uint8_t note, uint32_t &outStreamIdx, ui
   // If this (instIdx, keyIdx) is already cached and its initial frames [0..head) are intact in st.ring,
   // claim or rewind the stream in-place in < 1 us without touching SdFat or chunk.
   uint32_t irq = saveIrq();
+#pragma GCC unroll 1
   for (int s = 0; s < NUM_SAMPLER_STREAMS; s++) {
     if (s == (int)fillingStreamIdx) continue;
     SamplerStream &st = samplerStreams[s];

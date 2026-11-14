@@ -37,27 +37,27 @@ static char lastActiveSongName[MAX_SONG_NAME_LEN + 1] = "";
 static bool songSaved = false;
 static bool songDirty = false;
 
-void markSongDirty() {
+FLASHMEM void markSongDirty() {
   songDirty = true;
 }
 
-bool songIsSaved() {
+FLASHMEM bool songIsSaved() {
   return songSaved;
 }
 
-bool songHasUnsavedChanges() {
+FLASHMEM bool songHasUnsavedChanges() {
   return songDirty;
 }
 
-const char *currentSongName() {
+FLASHMEM const char *currentSongName() {
   return activeSongName;
 }
 
-int songCount() {
+FLASHMEM int songCount() {
   return numSavedSongs;
 }
 
-const char *songNameAt(int index) {
+FLASHMEM const char *songNameAt(int index) {
   if (index < 0 || index >= numSavedSongs) return "";
   return songList[index];
 }
@@ -283,9 +283,22 @@ FLASHMEM static void updateTrackOverviewChunk(int t, uint32_t startFrame, const 
 }
 
 // ---- Song & System Settings serialization structs
-struct DiskSystem {
+struct LegacySystemSettingsV4 {
+  uint8_t brightness;
+  uint8_t metroVolume;
+};
+
+struct DiskSystemV4 {
   char magic[4]; // "M8SY"
   uint16_t version; // 4
+  LegacySystemSettingsV4 ss;
+  char lastSongName[MAX_SONG_NAME_LEN + 1];
+  MidiCcMapEntry globalMidiMap[MIDI_TARGET_COUNT];
+};
+
+struct DiskSystem {
+  char magic[4]; // "M8SY"
+  uint16_t version; // 5
   SystemSettings ss;
   char lastSongName[MAX_SONG_NAME_LEN + 1];
   MidiCcMapEntry globalMidiMap[MIDI_TARGET_COUNT];
@@ -315,6 +328,7 @@ struct DiskSong {
   DiskAudioTrack audio[NUM_AUDIO_TRACKS];
 };
 
+static_assert(sizeof(SongSettings) == 40, "SongSettings must remain 40 bytes for SONG.DAT v2 layout");
 static_assert(sizeof(DiskSystem) <= 512, "DiskSystem must fit in one 512-byte sector");
 static_assert(sizeof(DiskSong) <= sizeof(chunk), "DiskSong must fit in RAM1 chunk buffer");
 
@@ -335,7 +349,7 @@ FLASHMEM bool saveSystemSettings() {
   if (!f.isOpen()) return false;
   DiskSystem ds{};
   memcpy(ds.magic, "M8SY", 4);
-  ds.version = 4;
+  ds.version = 5;
   ds.ss = systemSettings();
   snprintf(ds.lastSongName, sizeof(ds.lastSongName), "%s", lastActiveSongName);
   memcpy(ds.globalMidiMap, midiMapGlobalTable(), sizeof(ds.globalMidiMap));
@@ -366,12 +380,15 @@ FLASHMEM static bool loadSystemSettingsFromDisk() {
   if (memcmp(magic, "M8SY", 4) != 0) return false;
 
   SystemSettings &ss = systemSettings();
-  constexpr int LEGACY_V4_SIZE = 4 + 2 + (int)sizeof(SystemSettings);
-  if (ver == 4 && rd >= LEGACY_V4_SIZE) {
+  constexpr int MIN_V5_SIZE = 4 + 2 + (int)sizeof(SystemSettings);
+  if (ver == 5 && rd >= MIN_V5_SIZE) {
     DiskSystem ds{};
     memcpy(&ds, chunk, min((size_t)rd, sizeof(DiskSystem)));
     ds.ss.brightness = (uint8_t)constrain((int)ds.ss.brightness, (int)MIN_BRIGHTNESS, (int)MAX_BRIGHTNESS);
     ds.ss.metroVolume = (uint8_t)constrain((int)ds.ss.metroVolume, 0, (int)VOLUME_MAX);
+    if ((uint8_t)ds.ss.headphoneGain > (uint8_t)HeadphoneGain::High) {
+      ds.ss.headphoneGain = DEFAULT_HEADPHONE_GAIN;
+    }
     ss = ds.ss;
     ds.lastSongName[MAX_SONG_NAME_LEN] = '\0';
     sanitizeSongName(ds.lastSongName, lastActiveSongName, sizeof(lastActiveSongName));
@@ -386,6 +403,26 @@ FLASHMEM static bool loadSystemSettingsFromDisk() {
     applySystemSettings();
     return true;
   }
+  constexpr int LEGACY_V4_SIZE = 4 + 2 + (int)sizeof(LegacySystemSettingsV4);
+  if (ver == 4 && rd >= LEGACY_V4_SIZE) {
+    DiskSystemV4 ds4{};
+    memcpy(&ds4, chunk, min((size_t)rd, sizeof(DiskSystemV4)));
+    ss.brightness = (uint8_t)constrain((int)ds4.ss.brightness, (int)MIN_BRIGHTNESS, (int)MAX_BRIGHTNESS);
+    ss.metroVolume = (uint8_t)constrain((int)ds4.ss.metroVolume, 0, (int)VOLUME_MAX);
+    ss.headphoneGain = DEFAULT_HEADPHONE_GAIN;
+    ds4.lastSongName[MAX_SONG_NAME_LEN] = '\0';
+    sanitizeSongName(ds4.lastSongName, lastActiveSongName, sizeof(lastActiveSongName));
+    MidiCcMapEntry *gMap = midiMapGlobalTableMut();
+    for (int i = 0; i < MIDI_TARGET_COUNT; i++) {
+      uint8_t ch = ds4.globalMidiMap[i].channel;
+      if (ch > MIDI_MAP_CH_ALL) ch = MIDI_MAP_CH_OFF;
+      gMap[i].channel = ch;
+      gMap[i].cc = ds4.globalMidiMap[i].cc & 0x7F;
+    }
+    midiMapRebuildMask();
+    applySystemSettings();
+    return true;
+  }
   if (ver == 3 && rd >= 7) {
     uint8_t oldBright = *((const uint8_t *)chunk + 6);
     ss.brightness = (oldBright == 125)
@@ -393,6 +430,7 @@ FLASHMEM static bool loadSystemSettingsFromDisk() {
                         : (uint8_t)constrain(((int)oldBright * 100 + 127) / 255,
                                              (int)MIN_BRIGHTNESS, (int)MAX_BRIGHTNESS);
     ss.metroVolume = DEFAULT_METRO_VOLUME;
+    ss.headphoneGain = DEFAULT_HEADPHONE_GAIN;
     applySystemSettings();
     return true;
   }
@@ -815,6 +853,8 @@ FLASHMEM static void resetSongToDefaults() {
   ps.masterTape = 0;
   ps.masterComp = 0;
   ps.masterVolume = MASTER_VOLUME_DEFAULT;
+  ps.masterVolHpEnc = (uint8_t)(MASTER_VOLUME_DEFAULT + 1);
+  ps.masterVolSpkEnc = (uint8_t)(MASTER_VOLUME_DEFAULT + 1);
   ps.audioInputSource = AudioInputSource::All;
   ps.inputMonitor = true;
   ps.usbInputMonitor = true;
@@ -828,6 +868,7 @@ FLASHMEM static void resetSongToDefaults() {
   ps.lineMonitor = MonitorMode::On;
   ps.usbMonitor = MonitorMode::On;
   ps.midiTransportIn = MidiTransportIn::Auto;
+  ps.lineInGainTenths = DEFAULT_LINE_IN_GAIN_TENTHS;
   applySongSettings();
   resetMasterFxState();
 
@@ -949,9 +990,24 @@ FLASHMEM static const DiskSong *readDiskSongFromFolder(const char *folderName) {
   pf.close();
 
   constexpr int LEGACY_4TRK_SIZE = (int)(sizeof(DiskSong) - 4 * sizeof(DiskAudioTrack));
-  constexpr int OLD_PS_DELTA = 4;
+  constexpr int PREV_PS_DELTA = 4; // 36-byte SongSettings (before lineInGainTenths / dual masterVol)
+  constexpr int OLD_PS_DELTA  = 8; // 32-byte SongSettings
   if (rd == (int)sizeof(DiskSong) || rd == LEGACY_4TRK_SIZE) {
     memcpy(static_cast<void *>(&outDp), raw, (size_t)rd);
+    if (outDp.ps.masterVolHpEnc == 0 && outDp.ps.masterVolSpkEnc == 0 && raw[8 + 37] == 0) {
+      // Migrate earlier 40-byte SongSettings where offset 36 stored 0..15 SGTL5000 step
+      int lvl = constrain((int)raw[8 + 36], 0, (int)SGTL_MAX_LINE_IN_LEVEL);
+      outDp.ps.lineInGainTenths = (int16_t)((lvl - (int)SGTL_UNITY_LINE_IN_LEVEL) * 15);
+    }
+    return (memcmp(outDp.magic, "M8PR", 4) == 0 && outDp.version == 2) ? &outDp : nullptr;
+  }
+  if (rd == (int)sizeof(DiskSong) - PREV_PS_DELTA || rd == LEGACY_4TRK_SIZE - PREV_PS_DELTA) {
+    memcpy(static_cast<void *>(&outDp), raw, 8 + 36);
+    outDp.ps.lineInGainTenths = DEFAULT_LINE_IN_GAIN_TENTHS;
+    outDp.ps.masterVolHpEnc = 0;
+    outDp.ps.masterVolSpkEnc = 0;
+    size_t tailBytes = (size_t)rd - (8 + 36);
+    memcpy(static_cast<void *>(&outDp.tapeFrame), raw + 8 + 36, tailBytes);
     return (memcmp(outDp.magic, "M8PR", 4) == 0 && outDp.version == 2) ? &outDp : nullptr;
   }
   if (rd == (int)sizeof(DiskSong) - OLD_PS_DELTA || rd == LEGACY_4TRK_SIZE - OLD_PS_DELTA) {
@@ -966,6 +1022,9 @@ FLASHMEM static const DiskSong *readDiskSongFromFolder(const char *folderName) {
                                  (uint8_t)src >= (uint8_t)SELECTABLE_AUDIO_INPUT_SOURCES);
     outDp.ps.lineMonitor = outDp.ps.inputMonitor ? MonitorMode::On : MonitorMode::Off;
     outDp.ps.usbMonitor = outDp.ps.usbInputMonitor ? MonitorMode::On : MonitorMode::Off;
+    outDp.ps.lineInGainTenths = DEFAULT_LINE_IN_GAIN_TENTHS;
+    outDp.ps.masterVolHpEnc = 0;
+    outDp.ps.masterVolSpkEnc = 0;
     size_t tailBytes = (size_t)rd - (8 + 32);
     memcpy(static_cast<void *>(&outDp.tapeFrame), raw + 8 + 32, tailBytes);
     return (memcmp(outDp.magic, "M8PR", 4) == 0 && outDp.version == 2) ? &outDp : nullptr;
@@ -1285,6 +1344,15 @@ FLASHMEM bool loadSongByName(const char *name) {
   }
   if ((uint8_t)ps.midiTransportIn > (uint8_t)MidiTransportIn::Off) {
     ps.midiTransportIn = MidiTransportIn::Auto;
+  }
+  ps.lineInGainTenths = (int16_t)constrain((int)ps.lineInGainTenths,
+                                           (int)MIN_LINE_IN_GAIN_TENTHS,
+                                           (int)MAX_LINE_IN_GAIN_TENTHS);
+  if (ps.masterVolHpEnc == 0 || ps.masterVolHpEnc > (uint8_t)(MASTER_VOLUME_MAX + 1)) {
+    ps.masterVolHpEnc = (uint8_t)(ps.masterVolume + 1);
+  }
+  if (ps.masterVolSpkEnc == 0 || ps.masterVolSpkEnc > (uint8_t)(MASTER_VOLUME_MAX + 1)) {
+    ps.masterVolSpkEnc = (uint8_t)(ps.masterVolume + 1);
   }
   applySongSettings();
   resetMasterFxState();

@@ -87,6 +87,8 @@ static int projPlayListScroll = 0;
 static uint8_t projPlayZone = PROJ_PLAY_ZONE_CONTROLS;
 static uint8_t projPlayCtrlCol = PROJ_PLAY_CTRL_PLAY;
 static uint8_t projPlayVol = MASTER_VOLUME_DEFAULT;
+static uint8_t projPlayVolHp = MASTER_VOLUME_DEFAULT;
+static uint8_t projPlayVolSpk = MASTER_VOLUME_DEFAULT;
 static int8_t projPlaySpeedQuarter = DEFAULT_SPEED_QUARTER;
 static bool projPlayLocked = false;
 static bool projPlayEditHeld = false;
@@ -455,8 +457,10 @@ FLASHMEM static bool projPlayStartSong(int startIdx, bool autoPlay) {
   for (int t = 0; t < NUM_MIDI_TRACKS; t++) {
     midiTracks[t].armMode = ArmMode::Off;
   }
-  songSettings().masterVolume = projPlayVol;
-  setMasterVolume(projPlayVol);
+  songSettings().masterVolHpEnc = (uint8_t)(projPlayVolHp + 1);
+  songSettings().masterVolSpkEnc = (uint8_t)(projPlayVolSpk + 1);
+  projPlayVol = appAreHeadphonesConnected() ? projPlayVolHp : projPlayVolSpk;
+  appSetMasterVolume(projPlayVol);
 
   transport.speedQuarter = projPlaySpeedQuarter;
   transport.loopEnabled = false;
@@ -482,6 +486,12 @@ FLASHMEM static bool projPlayStartSong(int startIdx, bool autoPlay) {
   invalidateSysProjectsModalCache();
   uiForceRedraw();
   return true;
+}
+
+FLASHMEM void sysProjectPlayOnOutputSwitched(bool phonesConnected) {
+  if (projModalView != ProjModalView::PlayProject) return;
+  projPlayVol = phonesConnected ? projPlayVolHp : projPlayVolSpk;
+  prevProjCtrlKey = 0;
 }
 
 FLASHMEM void sysProjectPlayService() {
@@ -1246,7 +1256,16 @@ FLASHMEM void handleSysProjectsModalInput(uint8_t pressed, uint8_t now, uint32_t
         } else if (projManageCol == PROJ_ACT_PLAY) {
           snprintf(projEditingName, sizeof(projEditingName), "%s", projectNameAt(projManageCursor));
           projEditSongCount = loadProjectSongs(projEditingName, projEditSongs, MAX_SONGS_PER_PROJECT);
-          projPlayVol = songSettings().masterVolume;
+          {
+            const SongSettings &curPs = songSettings();
+            projPlayVolHp = (curPs.masterVolHpEnc >= 1 && curPs.masterVolHpEnc <= MASTER_VOLUME_MAX + 1)
+                                ? (uint8_t)(curPs.masterVolHpEnc - 1)
+                                : curPs.masterVolume;
+            projPlayVolSpk = (curPs.masterVolSpkEnc >= 1 && curPs.masterVolSpkEnc <= MASTER_VOLUME_MAX + 1)
+                                 ? (uint8_t)(curPs.masterVolSpkEnc - 1)
+                                 : curPs.masterVolume;
+            projPlayVol = appAreHeadphonesConnected() ? projPlayVolHp : projPlayVolSpk;
+          }
           projPlaySpeedQuarter = DEFAULT_SPEED_QUARTER;
           projPlayLocked = false;
           projPlayEditHeld = false;
@@ -1479,8 +1498,9 @@ FLASHMEM void handleSysProjectsModalInput(uint8_t pressed, uint8_t now, uint32_t
                       ((pressed & BTN_OPT) && (now & BTN_EDIT)))) {
       projPlayEditModUsed = true;
       projPlayVol = MASTER_VOLUME_DEFAULT;
-      songSettings().masterVolume = projPlayVol;
-      setMasterVolume(projPlayVol);
+      if (appAreHeadphonesConnected()) projPlayVolHp = projPlayVol;
+      else projPlayVolSpk = projPlayVol;
+      appSetMasterVolume(projPlayVol);
       uiForceRedraw();
       return;
     }
@@ -1491,8 +1511,9 @@ FLASHMEM void handleSysProjectsModalInput(uint8_t pressed, uint8_t now, uint32_t
       if (step != 0) {
         projPlayEditModUsed = true;
         projPlayVol = (uint8_t)constrain((int)projPlayVol + step, 0, (int)MASTER_VOLUME_MAX);
-        songSettings().masterVolume = projPlayVol;
-        setMasterVolume(projPlayVol);
+        if (appAreHeadphonesConnected()) projPlayVolHp = projPlayVol;
+        else projPlayVolSpk = projPlayVol;
+        appSetMasterVolume(projPlayVol);
         uiForceRedraw();
       }
       return;
@@ -2075,6 +2096,7 @@ FLASHMEM static void sysSettingsDrawPage(bool full) {
   PROGMEM static const char *const LABELS[SSET_COUNT] = {
     "SCREEN BRIGHTNESS",
     "METRONOME VOLUME",
+    "HEADPHONE GAIN",
     "INSTRUMENT PRESETS",
     "PROJECTS",
     "MIDI MAPPINGS",
@@ -2097,6 +2119,20 @@ FLASHMEM static void sysSettingsDrawPage(bool full) {
       case SSET_METRO_VOL:
         isOff = (ss.metroVolume == 0);
         snprintf(val, sizeof(val), "%d", (int)ss.metroVolume);
+        break;
+      case SSET_HP_GAIN:
+        switch (ss.headphoneGain) {
+          case HeadphoneGain::Low:
+            snprintf(val, sizeof(val), "LOW");
+            break;
+          case HeadphoneGain::High:
+            snprintf(val, sizeof(val), "HIGH");
+            break;
+          case HeadphoneGain::Normal:
+          default:
+            snprintf(val, sizeof(val), "NORMAL");
+            break;
+        }
         break;
       case SSET_INST_PRESETS:
       case SSET_PROJECTS:
@@ -2131,6 +2167,12 @@ FLASHMEM static void sysSettingsOnOptAdjust(int dx, int dy, int delta) {
     case SSET_METRO_VOL:
       ss.metroVolume = (uint8_t)constrain((int)ss.metroVolume + step, 0, (int)VOLUME_MAX);
       break;
+    case SSET_HP_GAIN: {
+      int cur = (int)ss.headphoneGain;
+      int dir = (dx != 0) ? (dx > 0 ? 1 : -1) : (dy != 0 ? (dy > 0 ? 1 : -1) : (delta > 0 ? 1 : -1));
+      ss.headphoneGain = (HeadphoneGain)constrain(cur + dir, 0, 2);
+      break;
+    }
     case SSET_INST_PRESETS:
     case SSET_PROJECTS:
     case SSET_MIDI_MAP:
@@ -2188,6 +2230,12 @@ FLASHMEM static void sysSettingsOnEditPress(bool shiftHeld) {
     }
     inputClearRepeat();
     uiForceRedraw();
+  } else if (sysSetRow == SSET_HP_GAIN) {
+    SystemSettings &ss = systemSettings();
+    ss.headphoneGain = (HeadphoneGain)(((int)ss.headphoneGain + 1) % 3);
+    applySystemSettings();
+    saveSystemSettings();
+    uiForceRedraw();
   } else if (sysSetRow == SSET_INST_PRESETS) {
     openSysPresetsModal();
     inputSwallowModalKeys();
@@ -2209,6 +2257,8 @@ FLASHMEM static void sysSettingsOnResetParam() {
     ss.brightness = DEFAULT_BRIGHTNESS;
   } else if (sysSetRow == SSET_METRO_VOL) {
     ss.metroVolume = DEFAULT_METRO_VOLUME;
+  } else if (sysSetRow == SSET_HP_GAIN) {
+    ss.headphoneGain = DEFAULT_HEADPHONE_GAIN;
   } else {
     return;
   }
