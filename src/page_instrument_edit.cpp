@@ -5,6 +5,7 @@
 #include "page_instrument_edit.h"
 #include "inst_fm2op.h"
 #include "inst_sampler.h"
+#include "inst_sf2.h"
 #include "midi_map.h"
 #include <Arduino.h>
 #include <stdio.h>
@@ -14,8 +15,9 @@ using namespace m8;
 using namespace looper;
 
 static constexpr int FM_MAX_COLS = 6;
-static uint64_t prevFmCellKey[FM_ROW_COUNT][FM_MAX_COLS] = {};
-static uint64_t prevSectionTitleKey[3] = {};
+static constexpr int INST_EDIT_CACHE_SLOTS = 1 + INST_EDIT_MAX_VIS_BODY_ROWS; // 0 = Header, 1..5 = visible viewport slots
+static uint64_t prevFmCellKey[INST_EDIT_CACHE_SLOTS][FM_MAX_COLS] = {};
+static uint64_t prevSectionTitleKey[INST_EDIT_MAX_VIS_BODY_ROWS] = {};
 static bool prevSamplerKbValid = false;
 static int prevSamplerKbInst = -1;
 static int prevSamplerKbScrollW = -1;
@@ -25,6 +27,8 @@ static uint64_t prevSamplerKbHasMask = 0;
 static uint64_t prevSamplerKbPlayMask = 0;
 static uint64_t prevBrowserBannerKey = 0;
 static uint64_t prevBrowserRowKey[SAMPLER_BROWSER_VISIBLE_ROWS] = {};
+static uint64_t prevSf2BrowserBannerKey = 0;
+static uint64_t prevSf2BrowserRowKey[SF2_BROWSER_VISIBLE_ROWS] = {};
 static uint64_t prevInstBrowserBannerKey = 0;
 static uint64_t prevInstBrowserRowKey[INST_BROWSER_VISIBLE_ROWS] = {};
 static uint64_t prevSaveToBannerKey = 0;
@@ -42,6 +46,7 @@ static uint8_t samplerKbScrollWhite[NUM_INSTRUMENTS] = {};
 static int prevDrawnInstIdx = -1;
 static uint8_t prevDrawnInstType = 0;
 static int prevDrawnScroll = -1;
+static uint16_t prevDrawnSf2ModShape = 0xFFFFu;
 
 // Per-Instrument MIDI CC Mapping Subview State (SHIFT + RIGHT from Instrument Edit)
 static constexpr int INST_MIDI_MAP_VISIBLE_ROWS = 7;
@@ -88,6 +93,8 @@ FLASHMEM static void instEditInvalidateCache() {
   prevSamplerKbValid = false;
   prevBrowserBannerKey = 0;
   memset(prevBrowserRowKey, 0, sizeof(prevBrowserRowKey));
+  prevSf2BrowserBannerKey = 0;
+  memset(prevSf2BrowserRowKey, 0, sizeof(prevSf2BrowserRowKey));
   prevSaveToBannerKey = 0;
   memset(prevSaveToRowKey, 0, sizeof(prevSaveToRowKey));
   memset(prevSmpKeyRowKey, 0, sizeof(prevSmpKeyRowKey));
@@ -97,6 +104,7 @@ FLASHMEM static void instEditInvalidateCache() {
   prevDrawnInstIdx = -1;
   prevDrawnInstType = 0;
   prevDrawnScroll = -1;
+  prevDrawnSf2ModShape = 0xFFFFu;
   invalidateInstBrowserCache();
 }
 
@@ -126,7 +134,7 @@ FLASHMEM static void drawSectionTitle(int slotIdx, int y, int h, const char *tit
   s.blit(SX(6), y);
 }
 
-FLASHMEM static void drawFmParamCell(int r, int c, int x, int y, int w, int h, int gapAfterW,
+FLASHMEM static void drawFmParamCell(int cacheSlot, int r, int c, int x, int y, int w, int h, int gapAfterW,
                             const char *label, const char *valStr,
                             int barVal, int barMax, uint16_t accentCol, bool full) {
   bool sel = (fmEditRow == r && fmEditCol == c);
@@ -137,9 +145,10 @@ FLASHMEM static void drawFmParamCell(int r, int c, int x, int y, int w, int h, i
   uint64_t ck = hashStr(hashInit(), label);
   ck = hashStr(ck, valStr);
   ck = hashMix(ck, (uint64_t)bg | ((uint64_t)border << 16) | ((uint64_t)accentCol << 32) | ((uint64_t)barVal << 48));
-  ck = hashMix(ck, (uint64_t)y | ((uint64_t)h << 16) | ((uint64_t)gapAfterW << 32));
-  if (!full && ck == prevFmCellKey[r][c]) return;
-  prevFmCellKey[r][c] = ck;
+  ck = hashMix(ck, (uint64_t)y | ((uint64_t)h << 16) | ((uint64_t)gapAfterW << 32) | ((uint64_t)(uint16_t)r << 48));
+  const bool hasCacheSlot = ((unsigned)cacheSlot < (unsigned)INST_EDIT_CACHE_SLOTS) && ((unsigned)c < (unsigned)FM_MAX_COLS);
+  if (!full && hasCacheSlot && ck == prevFmCellKey[cacheSlot][c]) return;
+  if (hasCacheSlot) prevFmCellKey[cacheSlot][c] = ck;
 
   Surface s(w + gapAfterW, h);
   if (gapAfterW > 0) {
@@ -163,6 +172,55 @@ FLASHMEM static void drawFmParamCell(int r, int c, int x, int y, int w, int h, i
     int fillW = constrain(barVal * trackW / barMax, 0, trackW);
     if (fillW > 0) s.fillRect(padX, barY, fillW, barH, accentCol);
   }
+  s.blit(x, y);
+}
+
+FLASHMEM static void drawSf2ModParamCell(int cacheSlot, int r, int c, int x, int y, int w, int h, int gapAfterW,
+                                         const char *modTag, uint8_t cc, uint8_t val,
+                                         uint16_t accentCol, bool full) {
+  bool sel = (fmEditRow == r && fmEditCol == c);
+  bool editHeld = sel && inputEditHeld();
+  uint16_t bg = sel ? DARK : PANEL;
+  uint16_t border = sel ? (editHeld ? ACCENT : INK) : DARK;
+
+  uint64_t ck = hashStr(hashInit(), modTag);
+  ck = hashMix(ck, (uint64_t)bg | ((uint64_t)border << 16) |
+                   ((uint64_t)accentCol << 32) | ((uint64_t)cc << 48) | ((uint64_t)val << 56));
+  ck = hashMix(ck, (uint64_t)y | ((uint64_t)h << 16) |
+                   ((uint64_t)gapAfterW << 32) | ((uint64_t)(uint16_t)r << 48));
+  const bool hasCacheSlot = ((unsigned)cacheSlot < (unsigned)INST_EDIT_CACHE_SLOTS) &&
+                            ((unsigned)c < (unsigned)FM_MAX_COLS);
+  if (!full && hasCacheSlot && ck == prevFmCellKey[cacheSlot][c]) return;
+  if (hasCacheSlot) prevFmCellKey[cacheSlot][c] = ck;
+
+  Surface s(w + gapAfterW, h);
+  if (gapAfterW > 0) {
+    s.fillRect(w, 0, gapAfterW, h, BG);
+  }
+  s.fillRect(0, 0, w, PX, border);
+  s.fillRect(0, h - PX, w, PX, border);
+  s.fillRect(0, PX, PX, h - 2 * PX, border);
+  s.fillRect(w - PX, PX, PX, h - 2 * PX, border);
+  s.fillRect(PX, PX, w - 2 * PX, h - 2 * PX, bg);
+
+  const int padX = SX(4);
+  char ccStr[8];
+  char valStr[8];
+  snprintf(ccStr, sizeof(ccStr), "CC%03u", (unsigned)(cc & 0x7Fu));
+  snprintf(valStr, sizeof(valStr), "%u", (unsigned)(val & 0x7Fu));
+
+  s.drawText(padX, SY(3), modTag, sel ? INK : LIGHT);
+  s.drawText(padX, SY(14), ccStr, sel ? LIGHT : DIM);
+  int vw = textWidth(valStr);
+  s.drawText(max(padX, w - padX - vw), SY(14), valStr, sel ? INK : accentCol);
+
+  int trackW = w - 2 * padX;
+  int barY = h - SY(6);
+  int barH = SY(3);
+  s.fillRect(padX, barY, trackW, barH, BG);
+  int fillW = constrain((int)val * trackW / 127, 0, trackW);
+  if (fillW > 0) s.fillRect(padX, barY, fillW, barH, accentCol);
+
   s.blit(x, y);
 }
 
@@ -623,6 +681,125 @@ FLASHMEM void drawSamplerBrowserModal(bool full) {
   }
 }
 
+FLASHMEM void drawSf2BrowserModal(bool full) {
+  if (!isSf2BrowserOpen()) return;
+
+  const Sf2BrowserMode mode = sf2BrowserMode();
+  const int slotIdx = constrain(sf2BrowserTargetSlot(), 0, NUM_INSTRUMENTS - 1);
+  const int total = sf2BrowserEntryCount();
+  const int cur = sf2BrowserCursor();
+  const int scroll = sf2BrowserScroll();
+
+  // 1. Header Banner: [I01 SF2: <dir>] or [I01 SF2 PRST: <file> (<count>)]
+  {
+    char leftTxt[24];
+    char rightBuf[64];
+    const char *rightDisp = rightBuf;
+
+    if (mode == Sf2BrowserMode::PresetList) {
+      snprintf(leftTxt, sizeof(leftTxt), "I%02d SF2 PRST:", slotIdx + 1);
+      snprintf(rightBuf, sizeof(rightBuf), "%s (%d)", sf2FileDisplayName(slotIdx), total);
+      int maxRightW = SX(308) - SX(16) - textWidth(leftTxt);
+      while (textWidth(rightBuf) > maxRightW && strlen(rightBuf) > 6) {
+        rightBuf[strlen(rightBuf) - 1] = '\0';
+      }
+    } else {
+      snprintf(leftTxt, sizeof(leftTxt), "I%02d SF2:", slotIdx + 1);
+      snprintf(rightBuf, sizeof(rightBuf), "%s", sf2BrowserCurrentDir());
+      int maxDirW = SX(308) - SX(16) - textWidth(leftTxt);
+      while (*rightDisp && textWidth(rightDisp) > maxDirW) {
+        rightDisp++;
+      }
+    }
+
+    uint64_t bk = hashStr(hashInit(), leftTxt);
+    bk = hashStr(bk, rightDisp);
+    bk = hashMix(bk, (uint64_t)mode);
+    if (full || bk != prevSf2BrowserBannerKey) {
+      prevSf2BrowserBannerKey = bk;
+      const int bw = SX(308), bh = SY(22);
+      Surface s(bw, bh);
+      s.drawBox(DARK, ACCENT);
+      s.drawText(SX(6), TY(bh), leftTxt, ACCENT);
+      int dw = textWidth(rightDisp);
+      s.drawText(max(SX(72), bw - SX(6) - dw), TY(bh), rightDisp, LIGHT);
+      s.blit(SX(6), SY(26));
+    }
+  }
+
+  // 2. Scrollable 7-Row Directory/.SF2 File List or BBB:PPP Preset List
+  for (int r = 0; r < SF2_BROWSER_VISIBLE_ROWS; r++) {
+    const int y = SY(50) + r * SY(26);
+    const int rw = SX(308), rh = SY(24);
+    const int idx = scroll + r;
+    Sf2BrowserRowInfo info{};
+    const bool hasEnt = sf2BrowserRowAt(idx, info);
+    const bool sel = hasEnt && (idx == cur);
+
+    uint16_t bg = sel ? DARK : PANEL;
+    uint16_t border = sel ? ACCENT : MID;
+    uint16_t barCol = !hasEnt ? DIM
+                    : sel     ? ACCENT
+                    : (mode == Sf2BrowserMode::PresetList) ? COLOR_MIDI
+                    : info.isDir ? COLOR_MIDI : COLOR_PLAY;
+
+    uint64_t rk = hashStr(hashInit(), hasEnt ? info.label : "");
+    rk = hashMix(rk, (uint64_t)bg | ((uint64_t)border << 16) | ((uint64_t)barCol << 32) |
+                     ((uint64_t)sel << 48) | ((uint64_t)r << 52) |
+                     ((uint64_t)(hasEnt ? (info.isDir ? 1u : 0u) : 2u) << 56) |
+                     ((uint64_t)(total == 0) << 58) | ((uint64_t)mode << 60));
+    if (full || rk != prevSf2BrowserRowKey[r]) {
+      prevSf2BrowserRowKey[r] = rk;
+      char rowTxt[56] = "";
+      const char *pillLbl = nullptr;
+      if (hasEnt) {
+        if (mode == Sf2BrowserMode::PresetList) {
+          snprintf(rowTxt, sizeof(rowTxt), "%.44s", info.label);
+          pillLbl = "LOAD";
+        } else if (info.isDir) {
+          if (strcmp(info.label, "..") == 0) {
+            snprintf(rowTxt, sizeof(rowTxt), "[..]  PARENT FOLDER");
+          } else {
+            snprintf(rowTxt, sizeof(rowTxt), "[DIR] %.42s", info.label);
+          }
+          pillLbl = "OPEN";
+        } else {
+          snprintf(rowTxt, sizeof(rowTxt), "%.42s", info.label);
+          pillLbl = "LOAD";
+        }
+      } else if (total == 0 && r == 0) {
+        snprintf(rowTxt, sizeof(rowTxt), "%s",
+                 (mode == Sf2BrowserMode::PresetList) ? "NO PRESETS IN .SF2" : "NO .SF2 FILES IN FOLDER");
+      }
+
+      int maxRowTxtW = rw - (sel ? SX(64) : SX(16));
+      while (textWidth(rowTxt) > maxRowTxtW && strlen(rowTxt) > 4) {
+        rowTxt[strlen(rowTxt) - 1] = '\0';
+      }
+
+      Surface s(rw, rh);
+      s.drawBox(bg, border);
+      s.fillRect(PX, PX, SX(3), rh - 2 * PX, barCol);
+
+      if (rowTxt[0] != '\0') {
+        uint16_t fg = !hasEnt ? DIM
+                    : sel     ? INK
+                    : (mode == Sf2BrowserMode::PresetList) ? LIGHT
+                    : info.isDir ? COLOR_MIDI : LIGHT;
+        s.drawText(SX(10), TY(rh), rowTxt, fg);
+      }
+
+      if (sel && pillLbl) {
+        const int pw = SX(48), ph = SY(16);
+        const int px = rw - SX(6) - pw, py = (rh - ph) / 2;
+        s.drawPill(px, py, pw, ph, pillLbl, BG, ACCENT, INK);
+      }
+      s.blit(SX(6), y);
+    }
+    keepStreaming();
+  }
+}
+
 FLASHMEM void drawInstBrowserModal(bool full) {
   if (!isInstBrowserOpen()) return;
 
@@ -799,6 +976,7 @@ FLASHMEM uint8_t samplerKeyModalState() {
 
 FLASHMEM void openSamplerKeyModal(int instIdx, int keyIdx) {
   closeSamplerBrowser();
+  closeSf2Browser();
   closeInstBrowser();
   closeInstSaveToModal();
   storageCancelSamplerKeyRecord();
@@ -1017,12 +1195,13 @@ FLASHMEM void drawSamplerKeyModal(bool full) {
 }
 
 FLASHMEM static void drawSectionRowInSlot(const FmPatch &p, InstType iType, const InstEngineOps *ops,
-                                          int slotIdx, int rowIdx, bool forceFull) {
-  const int titleY  = SY(54) + slotIdx * SY(56);
-  const int cellY   = SY(66) + slotIdx * SY(56);
-  const int titleH  = cellY - titleY;
+                                          int slotIdx, int rowIdx, int rowTopY, bool hasHdr, bool forceFull) {
+  const int cacheSlot = 1 + slotIdx;
+  const int titleY  = rowTopY;
+  const int titleH  = hasHdr ? SY(12) : 0;
+  const int cellY   = rowTopY + titleH;
   const int cellH   = SY(34);
-  const int genBase = (iType == InstType::Sampler) ? SMP_ROW_AMP : INST_GEN_ROW_AMP;
+  const int genBase = instGenBaseRow();
 
   if (rowIdx == genBase) {
     drawSectionTitle(slotIdx, titleY, titleH, "AMP: ENVELOPE", COLOR_PLAY, forceFull);
@@ -1033,7 +1212,7 @@ FLASHMEM static void drawSectionRowInSlot(const FmPatch &p, InstType iType, cons
       uint8_t v = getEnvField(p.amp, c);
       char val[12];
       formatEnvCellValue(c, v, val, sizeof(val));
-      drawFmParamCell(rowIdx, c, x, cellY, w, cellH, gapW,
+      drawFmParamCell(cacheSlot, rowIdx, c, x, cellY, w, cellH, gapW,
                       ENV_COL_LABELS[c], val, v, INST_ENV_MAX, COLOR_PLAY, forceFull);
     }
     return;
@@ -1048,7 +1227,7 @@ FLASHMEM static void drawSectionRowInSlot(const FmPatch &p, InstType iType, cons
       uint8_t v = getEnvField(p.flt, c);
       char val[12];
       formatEnvCellValue(c, v, val, sizeof(val));
-      drawFmParamCell(rowIdx, c, x, cellY, w, cellH, gapW,
+      drawFmParamCell(cacheSlot, rowIdx, c, x, cellY, w, cellH, gapW,
                       ENV_COL_LABELS[c], val, v, INST_ENV_MAX, COLOR_PUNCH, forceFull);
     }
     return;
@@ -1063,7 +1242,7 @@ FLASHMEM static void drawSectionRowInSlot(const FmPatch &p, InstType iType, cons
       uint8_t v = getFxField(p.fx, c);
       char val[12];
       snprintf(val, sizeof(val), "%u%%", (unsigned)v);
-      drawFmParamCell(rowIdx, c, x, cellY, w, cellH, gapW,
+      drawFmParamCell(cacheSlot, rowIdx, c, x, cellY, w, cellH, gapW,
                       FX_COL_LABELS[c], val, v, INST_FX_MAX, ACCENT, forceFull);
     }
     return;
@@ -1078,7 +1257,7 @@ FLASHMEM static void drawSectionRowInSlot(const FmPatch &p, InstType iType, cons
     } else {
       snprintf(val, sizeof(val), "%d", lvl);
     }
-    drawFmParamCell(rowIdx, 0, SX(6), cellY, SX(100), cellH, 0,
+    drawFmParamCell(cacheSlot, rowIdx, 0, SX(6), cellY, SX(100), cellH, 0,
                     "LEVEL", val, lvl, VOLUME_MAX, COLOR_WARN, forceFull);
     if (forceFull) {
       blitBgStrip(SX(6) + SX(100), cellY, SX(308) - SX(100), cellH);
@@ -1086,7 +1265,163 @@ FLASHMEM static void drawSectionRowInSlot(const FmPatch &p, InstType iType, cons
     return;
   }
 
-  if (iType == InstType::PhaseDist || iType == InstType::NoiseDrone) {
+  if (iType == InstType::SoundFont && (rowIdx == 1 || rowIdx == 2)) {
+    const int instIdx = constrain(instListCursor, 0, NUM_INSTRUMENTS - 1);
+    const bool hasFile = sf2HasFile(instIdx);
+    const bool sel = (fmEditRow == rowIdx);
+    const bool editHeld = sel && inputEditHeld();
+    const uint16_t bg = sel ? DARK : PANEL;
+    const uint16_t border = sel ? (editHeld ? ACCENT : INK) : DARK;
+
+    // Split SX(308) x SY(34) into Left (SX(214) x SY(34)) + Right (SX(94) x SY(34))
+    // so both surfaces fit strictly within CELL_BUF_MAX (7,400 on M01 / 15,000 on M02) without height clamping.
+    const int wTotal = SX(308);
+    const int wL = SX(214);
+    const int wR = wTotal - wL;
+
+    if (rowIdx == 1) {
+      drawSectionTitle(slotIdx, titleY, titleH, ops->sec0Title, ACCENT, forceFull);
+      const char *dispFile = hasFile ? sf2FileDisplayName(instIdx) : "--- (EDIT TO LOAD)";
+      uint64_t ck = hashStr(hashInit(), dispFile);
+      ck = hashMix(ck, (uint64_t)bg | ((uint64_t)border << 16) |
+                       ((uint64_t)hasFile << 32) | ((uint64_t)sel << 36) |
+                       ((uint64_t)slotIdx << 40) | ((uint64_t)cellY << 44) | (1ULL << 56));
+      if (forceFull || ck != prevFmCellKey[cacheSlot][0]) {
+        prevFmCellKey[cacheSlot][0] = ck;
+
+        char valTxt[44];
+        snprintf(valTxt, sizeof(valTxt), "%s", dispFile);
+        while (textWidth(valTxt) > wL - SX(12) && strlen(valTxt) > 4) {
+          valTxt[strlen(valTxt) - 1] = '\0';
+        }
+        uint16_t valFg = hasFile ? (sel ? INK : ACCENT) : (sel ? LIGHT : DIM);
+
+        {
+          Surface sL(wL, cellH);
+          sL.fillRect(0, 0, wL, PX, border);
+          sL.fillRect(0, cellH - PX, wL, PX, border);
+          sL.fillRect(0, PX, PX, cellH - 2 * PX, border);
+          sL.fillRect(PX, PX, wL - PX, cellH - 2 * PX, bg);
+          sL.drawText(SX(8), TY(cellH), valTxt, valFg);
+          sL.blit(SX(6), cellY);
+        }
+        {
+          Surface sR(wR, cellH);
+          sR.fillRect(0, 0, wR, PX, border);
+          sR.fillRect(0, cellH - PX, wR, PX, border);
+          sR.fillRect(wR - PX, PX, PX, cellH - 2 * PX, border);
+          sR.fillRect(0, PX, wR - PX, cellH - 2 * PX, bg);
+
+          const int pw = SX(66), ph = SY(22);
+          const int px = max(0, wR - SX(6) - pw), py = (cellH - ph) / 2;
+          uint16_t pBg = sel ? ACCENT : PANEL;
+          uint16_t pFg = sel ? BG : LIGHT;
+          uint16_t pBd = sel ? INK : MID;
+          sR.drawPill(px, py, pw, ph, "BROWSE", pFg, pBg, pBd);
+          sR.blit(SX(6) + wL, cellY);
+        }
+      }
+      return;
+    }
+
+    // rowIdx == 2: BANK & PRESET
+    char secTitleBuf[44];
+    char valTxt[48];
+    if (hasFile) {
+      snprintf(secTitleBuf, sizeof(secTitleBuf), "%s  (%dP / %dZ)",
+               ops->sec1Title, sf2PresetCount(instIdx), sf2ActiveZoneCount(instIdx));
+      snprintf(valTxt, sizeof(valTxt), "%03u:%03u %s",
+               (unsigned)min(sf2CurrentBank(instIdx), (uint16_t)999u),
+               (unsigned)min(sf2CurrentPresetNum(instIdx), (uint16_t)999u),
+               sf2CurrentPresetName(instIdx));
+    } else {
+      snprintf(secTitleBuf, sizeof(secTitleBuf), "%s", ops->sec1Title);
+      snprintf(valTxt, sizeof(valTxt), "NO .SF2 LOADED");
+    }
+    drawSectionTitle(slotIdx, titleY, titleH, secTitleBuf, COLOR_MIDI, forceFull);
+
+    uint64_t ck = hashStr(hashInit(), valTxt);
+    ck = hashMix(ck, (uint64_t)bg | ((uint64_t)border << 16) |
+                     ((uint64_t)hasFile << 32) | ((uint64_t)sel << 36) |
+                     ((uint64_t)slotIdx << 40) | ((uint64_t)cellY << 44) | (2ULL << 56));
+    if (forceFull || ck != prevFmCellKey[cacheSlot][0]) {
+      prevFmCellKey[cacheSlot][0] = ck;
+
+      while (textWidth(valTxt) > wL - SX(12) && strlen(valTxt) > 4) {
+        valTxt[strlen(valTxt) - 1] = '\0';
+      }
+      uint16_t valFg = hasFile ? (sel ? INK : COLOR_MIDI) : DIM;
+
+      {
+        Surface sL(wL, cellH);
+        sL.fillRect(0, 0, wL, PX, border);
+        sL.fillRect(0, cellH - PX, wL, PX, border);
+        sL.fillRect(0, PX, PX, cellH - 2 * PX, border);
+        sL.fillRect(PX, PX, wL - PX, cellH - 2 * PX, bg);
+        sL.drawText(SX(8), TY(cellH), valTxt, valFg);
+        sL.blit(SX(6), cellY);
+      }
+      {
+        Surface sR(wR, cellH);
+        sR.fillRect(0, 0, wR, PX, border);
+        sR.fillRect(0, cellH - PX, wR, PX, border);
+        sR.fillRect(wR - PX, PX, PX, cellH - 2 * PX, border);
+        sR.fillRect(0, PX, wR - PX, cellH - 2 * PX, bg);
+
+        const int pw = SX(54), ph = SY(22);
+        const int px = max(0, wR - SX(6) - pw), py = (cellH - ph) / 2;
+        uint16_t pBg = (sel && hasFile) ? ACCENT : PANEL;
+        uint16_t pFg = (sel && hasFile) ? BG : (hasFile ? LIGHT : DIM);
+        uint16_t pBd = (sel && hasFile) ? INK : MID;
+        sR.drawPill(px, py, pw, ph, "LIST", pFg, pBg, pBd);
+        sR.blit(SX(6) + wL, cellY);
+      }
+    }
+    return;
+  }
+
+  if (iType == InstType::SoundFont && rowIdx >= 4 && rowIdx < genBase) {
+    const int instIdx = constrain(instListCursor, 0, NUM_INSTRUMENTS - 1);
+    const int pRows = sf2PresetModRowCount(instIdx);
+    const bool isPresetSec = (rowIdx < 4 + pRows);
+    const int subRow = isPresetSec ? (rowIdx - 4) : (rowIdx - (4 + pRows));
+    const int modCnt = isPresetSec ? sf2PresetModCount(instIdx) : sf2InstModCount(instIdx);
+    const uint16_t secCol = isPresetSec ? ACCENT : COLOR_MIDI;
+
+    if (hasHdr) {
+      const char *secTitle = isPresetSec ? "PRESET MODULATORS" : "INSTRUMENT MODULATORS";
+      drawSectionTitle(slotIdx, titleY, titleH, secTitle, secCol, forceFull);
+    }
+
+    if (modCnt <= 0) {
+      drawFmParamCell(cacheSlot, rowIdx, 0, SX(6), cellY, SX(74), cellH, 0,
+                      "NONE", "---", 0, 0, DIM, forceFull);
+      if (forceFull) {
+        blitBgStrip(SX(6) + SX(74), cellY, SX(308) - SX(74), cellH);
+      }
+      return;
+    }
+
+    const int colsOnRow = constrain(modCnt - subRow * SF2_MOD_COLS_PER_ROW, 1, SF2_MOD_COLS_PER_ROW);
+    for (int c = 0; c < colsOnRow; c++) {
+      int modIdx = subRow * SF2_MOD_COLS_PER_ROW + c;
+      int x = SX(6) + c * SX(78);
+      int w = SX(74);
+      int gapW = (c + 1 < colsOnRow) ? SX(4) : 0;
+      char modTag[12] = "";
+      uint8_t cc = 0, val = 0;
+      sf2GetModCellInfo(instIdx, isPresetSec, modIdx, modTag, sizeof(modTag), cc, val);
+      drawSf2ModParamCell(cacheSlot, rowIdx, c, x, cellY, w, cellH, gapW,
+                          modTag, cc, val, secCol, forceFull);
+    }
+    if (forceFull && colsOnRow < SF2_MOD_COLS_PER_ROW) {
+      int usedRightX = SX(6) + (colsOnRow - 1) * SX(78) + SX(74);
+      blitBgStrip(usedRightX, cellY, (SX(6) + SX(308)) - usedRightX, cellH);
+    }
+    return;
+  }
+
+  if (iType == InstType::PhaseDist || iType == InstType::NoiseDrone || iType == InstType::SoundFont) {
     int opIdx = rowIdx - 1;
     const char *title = (opIdx == 0) ? ops->sec0Title : (opIdx == 1) ? ops->sec1Title : ops->sec2Title;
     uint16_t mainCol = (opIdx == 0) ? ACCENT : (opIdx == 1) ? COLOR_MIDI : COLOR_PUNCH;
@@ -1117,7 +1452,7 @@ FLASHMEM static void drawSectionRowInSlot(const FmPatch &p, InstType iType, cons
       if (ops && ops->formatMainCell) {
         ops->formatMainCell(p, opIdx, c, lbl, val, sizeof(val), barV, barMax);
       }
-      drawFmParamCell(rowIdx, c, x, cellY, w, cellH, gapW, lbl, val, barV, barMax, mainCol, forceFull);
+      drawFmParamCell(cacheSlot, rowIdx, c, x, cellY, w, cellH, gapW, lbl, val, barV, barMax, mainCol, forceFull);
     }
     return;
   }
@@ -1137,7 +1472,7 @@ FLASHMEM static void drawSectionRowInSlot(const FmPatch &p, InstType iType, cons
     if (ops && ops->formatMainCell) {
       ops->formatMainCell(p, opIdx, c, lbl, val, sizeof(val), barV, barMax);
     }
-    drawFmParamCell(rowIdx, c, x, cellY, w, cellH, gapW, lbl, val, barV, barMax, mainCol, forceFull);
+    drawFmParamCell(cacheSlot, rowIdx, c, x, cellY, w, cellH, gapW, lbl, val, barV, barMax, mainCol, forceFull);
   }
 }
 
@@ -1166,6 +1501,7 @@ FLASHMEM bool isInstMidiMapOpen() {
 }
 
 FLASHMEM static void openInstMidiMap() {
+  closeSf2Browser();
   instMidiMapCancelLearn();
   instMidiMapOpen = true;
   instMidiMapZone = INST_MAP_ZONE_LIST;
@@ -1362,6 +1698,10 @@ FLASHMEM static void instEditDrawPage(bool full) {
     drawSamplerBrowserModal(full);
     return;
   }
+  if (isSf2BrowserOpen()) {
+    drawSf2BrowserModal(full);
+    return;
+  }
   if (isInstBrowserOpen()) {
     drawInstBrowserModal(full);
     return;
@@ -1378,18 +1718,30 @@ FLASHMEM static void instEditDrawPage(bool full) {
   if (!ops) {
     ops = instEngineAt(0);
   }
+  const uint16_t curSf2ModShape = (iType == InstType::SoundFont)
+                                      ? (uint16_t)(((uint16_t)sf2PresetModCount(instIdx) << 8) |
+                                                   (uint16_t)sf2InstModCount(instIdx))
+                                      : 0u;
+  if (curSf2ModShape != prevDrawnSf2ModShape) {
+    fmEditRow = constrain(fmEditRow, 0, instEditRowCount() - 1);
+    if (!(iType == InstType::Sampler && fmEditRow == SMP_ROW_KEYS)) {
+      fmEditCol = constrain(fmEditCol, 0, fmRowColCount(fmEditRow) - 1);
+    }
+  }
   syncInstEditScroll();
 
   bool scrollOrTypeChanged = full ||
                              (instIdx != prevDrawnInstIdx) ||
                              ((uint8_t)iType != prevDrawnInstType) ||
-                             (instEditScroll != prevDrawnScroll);
+                             (instEditScroll != prevDrawnScroll) ||
+                             (curSf2ModShape != prevDrawnSf2ModShape);
   if (scrollOrTypeChanged) {
     prevDrawnInstIdx = instIdx;
     prevDrawnInstType = (uint8_t)iType;
     prevDrawnScroll = instEditScroll;
-    for (int r = 1; r < FM_ROW_COUNT; r++) {
-      memset(prevFmCellKey[r], 0, sizeof(prevFmCellKey[r]));
+    prevDrawnSf2ModShape = curSf2ModShape;
+    for (int s = 1; s < INST_EDIT_CACHE_SLOTS; s++) {
+      memset(prevFmCellKey[s], 0, sizeof(prevFmCellKey[s]));
     }
     memset(prevSectionTitleKey, 0, sizeof(prevSectionTitleKey));
     prevSamplerKbValid = false;
@@ -1448,15 +1800,20 @@ FLASHMEM static void instEditDrawPage(bool full) {
       }
     }
   }
+  keepStreaming();
 
-  // Body Viewport (y = SY(54)..SY(84)+6*SY(24)): Specific controls at top, scrolling down to AMP / FLT / FX
-  const int viewportBottomY = SY(84) + 6 * SY(24);
+  // Body Viewport (y = INST_EDIT_VIEWPORT_TOP_Y..INST_EDIT_VIEWPORT_BOTTOM_Y): Specific controls at top, scrolling down to AMP / FLT / FX
+  const int viewportBottomY = INST_EDIT_VIEWPORT_BOTTOM_Y;
   if (iType == InstType::Sampler && instEditScroll == 0) {
     if (scrollOrTypeChanged && !full) {
       const int leftEnd = SX(6) + SX(128);
       blitBgStrip(leftEnd, SY(54), SX(138) - leftEnd, SY(24));
       const int pressBottomY = SY(54) + SY(24);
       blitBgStrip(SX(6), pressBottomY, SX(308), SY(84) - pressBottomY);
+      const int kbBottomY = SY(84) + 6 * SY(24);
+      if (kbBottomY < viewportBottomY) {
+        blitBgStrip(SX(6), kbBottomY, SX(308), viewportBottomY - kbBottomY);
+      }
     }
     if (fmEditRow == SMP_ROW_KEYS) {
       samplerSelectedKey[instIdx] = (uint8_t)constrain(fmEditCol, 0, SAMPLER_NUM_KEYS - 1);
@@ -1500,27 +1857,34 @@ FLASHMEM static void instEditDrawPage(bool full) {
         if (ops && ops->formatMainCell) {
           ops->formatMainCell(p, opIdx, c, lbl, val, sizeof(val), barV, barMax);
         }
-        drawFmParamCell(mainRow, c, x, mainY, w, cellH, gapW, lbl, val, barV, barMax, mainCol, scrollOrTypeChanged);
+        drawFmParamCell(2 + opIdx, mainRow, c, x, mainY, w, cellH, gapW, lbl, val, barV, barMax, mainCol, scrollOrTypeChanged);
       }
       keepStreaming();
     }
   } else {
-    if (scrollOrTypeChanged && !full) {
-      const int slot0BottomY = SY(66) + SY(34);
-      const int slot1TopY    = SY(54) + SY(56);
-      const int slot1BottomY = (SY(66) + SY(56)) + SY(34);
-      const int slot2TopY    = SY(54) + 2 * SY(56);
-      const int slot2BottomY = (SY(66) + 2 * SY(56)) + SY(34);
-      blitBgStrip(SX(6), slot0BottomY, SX(308), slot1TopY - slot0BottomY);
-      blitBgStrip(SX(6), slot1BottomY, SX(308), slot2TopY - slot1BottomY);
-      blitBgStrip(SX(6), slot2BottomY, SX(308), viewportBottomY - slot2BottomY);
-    }
-    for (int slotIdx = 0; slotIdx < 3; slotIdx++) {
-      int rowIdx = (iType == InstType::Sampler)
-                       ? (SMP_ROW_AMP + (instEditScroll - 1) + slotIdx)
-                       : (1 + instEditScroll + slotIdx);
-      drawSectionRowInSlot(p, iType, ops, slotIdx, rowIdx, scrollOrTypeChanged);
+    const int totalRows = instEditRowCount();
+    int curY = INST_EDIT_VIEWPORT_TOP_Y;
+    int slotIdx = 0;
+    int bodyIdx = (iType == InstType::Sampler) ? ((SMP_ROW_AMP - 1) + (instEditScroll - 1))
+                                               : instEditScroll;
+    for (; (1 + bodyIdx) < totalRows && slotIdx < INST_EDIT_MAX_VIS_BODY_ROWS; bodyIdx++, slotIdx++) {
+      const int rowIdx = 1 + bodyIdx;
+      const bool hasHdr = (iType == InstType::SoundFont) ? instEditRowStartsSection(rowIdx) : true;
+      const int gapY = (slotIdx == 0) ? 0 : (hasHdr ? SY(10) : SY(4));
+      const int titleH = hasHdr ? SY(12) : 0;
+      const int nextBottom = curY + gapY + titleH + SY(34);
+      if (slotIdx > 0 && nextBottom > viewportBottomY) {
+        break;
+      }
+      if (scrollOrTypeChanged && !full && gapY > 0) {
+        blitBgStrip(SX(6), curY, SX(308), gapY);
+      }
+      drawSectionRowInSlot(p, iType, ops, slotIdx, rowIdx, curY + gapY, hasHdr, scrollOrTypeChanged);
+      curY = nextBottom;
       keepStreaming();
+    }
+    if (scrollOrTypeChanged && !full && curY < viewportBottomY) {
+      blitBgStrip(SX(6), curY, SX(308), viewportBottomY - curY);
     }
   }
 }
@@ -1646,6 +2010,9 @@ FLASHMEM static void instEditOnOptAdjust(int dx, int dy, int delta) {
   } else if (fmEditRow == genBase) {
     int cur = (int)getEnvField(p.amp, fmEditCol);
     setEnvField(p.amp, fmEditCol, (uint8_t)constrain(cur + step, 0, (int)INST_ENV_MAX));
+    if (iType == InstType::SoundFont && fmEditCol != INST_ENV_AMT) {
+      sf2RefreshLivePatchParams(instIdx);
+    }
     saveSessionWhenIdle();
   } else if (fmEditRow == genBase + 1) {
     int cur = (int)getEnvField(p.flt, fmEditCol);
@@ -1667,6 +2034,31 @@ FLASHMEM static void instEditOnOptAdjust(int dx, int dy, int delta) {
       int octDir = (dx != 0) ? dx : dy;
       fmEditCol = constrain(fmEditCol + octDir * 12, 0, SAMPLER_NUM_KEYS - 1);
       samplerSelectedKey[instIdx] = (uint8_t)fmEditCol;
+    }
+  } else if (iType == InstType::SoundFont) {
+    if (fmEditRow == 2) {
+      int pStep = (dx != 0) ? dx : (dy * 10);
+      if (sf2StepPreset(instIdx, pStep)) {
+        syncInstEditScroll();
+        fmEditCol = constrain(fmEditCol, 0, fmRowColCount(fmEditRow) - 1);
+        saveSessionWhenIdle();
+      }
+    } else if (fmEditRow == 3) {
+      if (ops && ops->adjustMainCell) {
+        ops->adjustMainCell(p, 2, fmEditCol, dx, dy, delta, step);
+      }
+      if (fmEditCol == 4) {
+        sf2RefreshLivePatchParams(instIdx);
+      }
+      saveSessionWhenIdle();
+    } else if (fmEditRow >= 4 && fmEditRow < genBase) {
+      const int pRows = sf2PresetModRowCount(instIdx);
+      const bool isPresetSec = (fmEditRow < 4 + pRows);
+      const int subRow = isPresetSec ? (fmEditRow - 4) : (fmEditRow - (4 + pRows));
+      const int modIdx = subRow * SF2_MOD_COLS_PER_ROW + fmEditCol;
+      if (sf2AdjustModCell(instIdx, isPresetSec, modIdx, step)) {
+        saveSessionWhenIdle();
+      }
     }
   } else if (iType == InstType::PhaseDist || iType == InstType::NoiseDrone) {
     int opIdx = fmEditRow - 1;
@@ -1771,18 +2163,20 @@ FLASHMEM static void instEditOnEditPress(bool shiftHeld) {
       uiForceRedraw();
       return;
     }
+  } else if (iType == InstType::SoundFont && (fmEditRow == 1 || fmEditRow == 2)) {
+    if (fmEditRow == 1) {
+      openSf2FileBrowser(instIdx);
+    } else if (!sf2HasFile(instIdx) || !openSf2PresetBrowser(instIdx)) {
+      openSf2FileBrowser(instIdx);
+    }
+    inputSwallowModalKeys();
+    uiForceRedraw();
+    return;
   } else if (iType == InstType::Fm2Op && fmEditRow == FM_ROW_ALGO) {
     p.algorithm = (uint8_t)(((int)p.algorithm + 1) % NUM_FM_ALGOS);
     saveSessionWhenIdle();
+    uiForceRedraw();
   }
-
-  if (iType == InstType::Sampler) {
-    int keyIdx = constrain((int)samplerSelectedKey[instIdx], 0, SAMPLER_NUM_KEYS - 1);
-    fmSynthAudition(instIdx, (uint8_t)(SAMPLER_BASE_NOTE + keyIdx));
-  } else {
-    fmSynthAudition(instIdx);
-  }
-  uiForceRedraw();
 }
 
 FLASHMEM static void instEditOnResetParam() {
@@ -1813,6 +2207,9 @@ FLASHMEM static void instEditOnResetParam() {
     uiShowToast("INST RESET");
   } else if (fmEditRow == genBase) {
     setEnvField(p.amp, fmEditCol, getEnvField(def.amp, fmEditCol));
+    if (iType == InstType::SoundFont && fmEditCol != INST_ENV_AMT) {
+      sf2RefreshLivePatchParams(instIdx);
+    }
   } else if (fmEditRow == genBase + 1) {
     setEnvField(p.flt, fmEditCol, getEnvField(def.flt, fmEditCol));
   } else if (fmEditRow == genBase + 2) {
@@ -1826,6 +2223,35 @@ FLASHMEM static void instEditOnResetParam() {
       int keyIdx = constrain(fmEditCol, 0, SAMPLER_NUM_KEYS - 1);
       samplerClearKey(instIdx, keyIdx);
       uiShowToast("SAMPLE CLEARED");
+    }
+  } else if (iType == InstType::SoundFont) {
+    if (fmEditRow == 1) {
+      if (sf2HasFile(instIdx)) {
+        sf2UnloadFile(instIdx);
+        syncInstEditScroll();
+        fmEditCol = constrain(fmEditCol, 0, fmRowColCount(fmEditRow) - 1);
+        uiShowToast("SF2 UNLOADED");
+      }
+    } else if (fmEditRow == 2) {
+      if (sf2HasFile(instIdx)) {
+        sf2SelectPresetByIndex(instIdx, 0);
+        syncInstEditScroll();
+        fmEditCol = constrain(fmEditCol, 0, fmRowColCount(fmEditRow) - 1);
+        uiShowToast("PRESET RESET");
+      }
+    } else if (fmEditRow == 3) {
+      if (ops && ops->resetMainCell) {
+        ops->resetMainCell(p, def, 2, fmEditCol);
+      }
+      if (fmEditCol == 4) {
+        sf2RefreshLivePatchParams(instIdx);
+      }
+    } else if (fmEditRow >= 4 && fmEditRow < genBase) {
+      const int pRows = sf2PresetModRowCount(instIdx);
+      const bool isPresetSec = (fmEditRow < 4 + pRows);
+      const int subRow = isPresetSec ? (fmEditRow - 4) : (fmEditRow - (4 + pRows));
+      const int modIdx = subRow * SF2_MOD_COLS_PER_ROW + fmEditCol;
+      sf2ResetModCell(instIdx, isPresetSec, modIdx);
     }
   } else if (iType == InstType::PhaseDist || iType == InstType::NoiseDrone) {
     int opIdx = fmEditRow - 1;

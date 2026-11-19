@@ -285,8 +285,10 @@ FLASHMEM void Board::powerOff() {
   delay(100);
 
   if (_variant == VARIANT_B) {
-    // Stop BQ2589x continuous ADC conversion and disable 5V OTG boost converter
-    // (OTG_CONFIG=0) while preserving autonomous USB battery charging.
+    // Restore default VBUS input current limit, stop continuous ADC conversion, and
+    // disable 5V OTG boost (OTG_CONFIG=0) so autonomous USB battery charging always
+    // works while the unit is powered off.
+    bqWrite(0x00, _bqDefaultReg00);
     bqWrite(0x02, 0x00);
     bqWrite(0x03, _cgPaused ? 0x06 : 0x16);
 #if M8_MODEL == 2
@@ -358,7 +360,8 @@ FLASHMEM int Board::batteryPercent() {
   int chg = st < 0 ? 0 : (st >> 3) & 3;
   // Determine charging state from STC3115 net current when running, or fallback to BQ2589x CHRG_STAT.
   constexpr int CHARGING_CURRENT = 50;
-  _batCharging = _batSoc >= 0 ? _batCurrent > CHARGING_CURRENT : chg == 1 || chg == 2;
+  _batCharging = _usbChargeWhileOn &&
+                 (_batSoc >= 0 ? _batCurrent > CHARGING_CURRENT : chg == 1 || chg == 2);
   int v = bqRead(0x0E);                  // BQ2589x REG0E: BATV (2.304 V base + 20 mV/LSB)
   if (v >= 0) mv = 2304 + (v & 0x7F) * 20;
   _batMv = mv;
@@ -383,14 +386,32 @@ FLASHMEM bool Board::initChargerB() {
   if (r14 < 0) return false;             // Charger did not acknowledge
   bqWrite(0x14, (uint8_t)r14 | 0x80);    // REG14 REG_RST: reset registers to default
   delay(10);
+  int r00 = bqRead(0x00);
+  if (r00 >= 0) _bqDefaultReg00 = (uint8_t)(r00 & 0x7Fu);
+  bqWrite(0x00, _usbChargeWhileOn ? _bqDefaultReg00 : (uint8_t)(_bqDefaultReg00 & 0x40u));
   bqWrite(0x02, 0xE0);  delay(20);       // REG02: enable continuous ADC conversion
-  bqWrite(0x03, 0x36);  delay(10);       // REG03: CHG_CONFIG=1, OTG_CONFIG=1, SYS_MIN=3.3 V
+  bqWrite(0x03, _usbChargeWhileOn ? 0x36 : 0x26);  delay(10); // REG03: CHG_CONFIG, OTG_CONFIG=1, SYS_MIN=3.3 V
   bqWrite(0x04, 0x08);                   // REG04: ICHG = 8 x 64 mA = 512 mA fast-charge limit
   bqWrite(0x07, 0x8D);                   // REG07: EN_TERM=1, I2C watchdog disabled, 12 h safety timer
   bqWrite(0x09, 0x44);                   // REG09: normal BATFET / pump configuration
   bqWrite(0x0A, 0x03);                   // REG0A: boost mode voltage/current regulation
   delay(20);
   return true;
+}
+
+FLASHMEM void Board::setUsbChargeWhileOn(bool enable) {
+  _usbChargeWhileOn = enable;
+  if (_variant != VARIANT_B) return;
+  bqWrite(0x00, enable ? _bqDefaultReg00 : (uint8_t)(_bqDefaultReg00 & 0x40u));
+  bqWrite(0x03, (enable && !_cgPaused) ? 0x36 : 0x26);
+  _batPolled = false;
+  if (!enable) _batCharging = false;
+}
+
+FLASHMEM bool Board::usbVbusPresent() {
+  if (_variant != VARIANT_B) return false;
+  int r11 = bqRead(0x11);                // BQ2589x REG11[7]: VBUS_GD (1 = valid VBUS attached)
+  return r11 >= 0 && (r11 & 0x80) != 0;
 }
 
 FLASHMEM void Board::chargeGuard() {
@@ -425,7 +446,9 @@ FLASHMEM void Board::chargeGuard() {
 #endif
     }
   } else if (_cgPaused) {
-    bqWrite(0x03, 0x36);                 // Clear to resume charging
+    if (_usbChargeWhileOn) {
+      bqWrite(0x03, 0x36);               // Clear to resume charging
+    }
     _cgPaused = false;
 #if CAPSTAN_DEBUG
     Serial.printf("charge guard: charging resumed (%d mV, %d mA)\n", mv, ima);

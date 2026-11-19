@@ -3,10 +3,13 @@
 #include "pages.h"
 #include "page_audio.h"
 #include "page_midi.h"
+#include "page_song_settings.h"
 #include "page_system_settings.h"
 #include "page_instrument_edit.h"
 #include "inst_sampler.h"
+#include "inst_sf2.h"
 #include "track_edit.h"
+#include "midi_usb.h"
 #include <Arduino.h>
 #include <string.h>
 #include <math.h>
@@ -128,8 +131,15 @@ int instTypeCursor = 0;
 int fmEditRow = FM_ROW_OP1_MAIN, fmEditCol = 1, instEditScroll = 0; // default focus on Op1 Ratio
 
 FLASHMEM int instGenBaseRow() {
-  const FmPatch &p = fmSynthPatch(constrain(instListCursor, 0, NUM_INSTRUMENTS - 1));
-  return ((InstType)p.type == InstType::Sampler) ? SMP_ROW_AMP : INST_GEN_ROW_AMP;
+  const int instIdx = constrain(instListCursor, 0, NUM_INSTRUMENTS - 1);
+  const InstType iType = (InstType)fmSynthPatch(instIdx).type;
+  if (iType == InstType::Sampler) {
+    return SMP_ROW_AMP;
+  }
+  if (iType == InstType::SoundFont) {
+    return 4 + sf2PresetModRowCount(instIdx) + sf2InstModRowCount(instIdx);
+  }
+  return INST_GEN_ROW_AMP;
 }
 
 FLASHMEM int instEditRowCount() {
@@ -137,7 +147,8 @@ FLASHMEM int instEditRowCount() {
 }
 
 FLASHMEM int fmRowColCount(int row) {
-  const FmPatch &p = fmSynthPatch(constrain(instListCursor, 0, NUM_INSTRUMENTS - 1));
+  const int instIdx = constrain(instListCursor, 0, NUM_INSTRUMENTS - 1);
+  const FmPatch &p = fmSynthPatch(instIdx);
   InstType iType = (InstType)p.type;
   if (row == FM_ROW_HEADER) {
     return INST_HDR_COL_COUNT;
@@ -158,14 +169,62 @@ FLASHMEM int fmRowColCount(int row) {
   if (iType == InstType::NoiseDrone) {
     return (row == 3) ? 6 : 5;
   }
+  if (iType == InstType::SoundFont) {
+    if (row == 3) return 6;
+    if (row >= 4) {
+      const int pRows = sf2PresetModRowCount(instIdx);
+      if (row < 4 + pRows) {
+        int pCnt = sf2PresetModCount(instIdx);
+        if (pCnt <= 0) return 1;
+        return constrain(pCnt - (row - 4) * SF2_MOD_COLS_PER_ROW, 1, SF2_MOD_COLS_PER_ROW);
+      }
+      int iCnt = sf2InstModCount(instIdx);
+      if (iCnt <= 0) return 1;
+      return constrain(iCnt - (row - (4 + pRows)) * SF2_MOD_COLS_PER_ROW, 1, SF2_MOD_COLS_PER_ROW);
+    }
+    return 1;
+  }
   if (row == FM_ROW_ALGO) return 1;
   return 4;
+}
+
+FLASHMEM bool instEditRowStartsSection(int rowIdx) {
+  const int instIdx = constrain(instListCursor, 0, NUM_INSTRUMENTS - 1);
+  const InstType iType = (InstType)fmSynthPatch(instIdx).type;
+  if (iType != InstType::SoundFont) return true;
+  const int pRows = sf2PresetModRowCount(instIdx);
+  const int genBase = 4 + pRows + sf2InstModRowCount(instIdx);
+  if (rowIdx < 4 || rowIdx >= genBase) return true;
+  return (rowIdx == 4) || (rowIdx == 4 + pRows);
+}
+
+FLASHMEM int instEditVisibleBodyRowsFrom(int startBodyIdx) {
+  const int totalRows = instEditRowCount();
+  const int maxBodyIdx = totalRows - 2; // bodyIdx = rowIdx - 1 (0 .. totalRows - 2)
+  if (startBodyIdx < 0 || startBodyIdx > maxBodyIdx) return 0;
+
+  int curY = INST_EDIT_VIEWPORT_TOP_Y;
+  int count = 0;
+  for (int b = startBodyIdx; b <= maxBodyIdx && count < INST_EDIT_MAX_VIS_BODY_ROWS; b++) {
+    const int rowIdx = 1 + b;
+    const bool hasHdr = instEditRowStartsSection(rowIdx);
+    const int gapY = (count == 0) ? 0 : (hasHdr ? SY(10) : SY(4));
+    const int titleH = hasHdr ? SY(12) : 0;
+    const int nextBottom = curY + gapY + titleH + SY(34);
+    if (count > 0 && nextBottom > INST_EDIT_VIEWPORT_BOTTOM_Y) {
+      break;
+    }
+    curY = nextBottom;
+    count++;
+  }
+  return count;
 }
 
 FLASHMEM void syncInstEditScroll() {
   const int instIdx = constrain(instListCursor, 0, NUM_INSTRUMENTS - 1);
   const InstType iType = (InstType)fmSynthPatch(instIdx).type;
-  fmEditRow = constrain(fmEditRow, 0, instEditRowCount() - 1);
+  const int rowCount = instEditRowCount();
+  fmEditRow = constrain(fmEditRow, 0, rowCount - 1);
   if (iType == InstType::Sampler) {
     if (fmEditRow < SMP_ROW_AMP) {
       instEditScroll = 0;
@@ -181,17 +240,41 @@ FLASHMEM void syncInstEditScroll() {
     instEditScroll = 1 + constrain(genScroll, 0, 1);
     return;
   }
+  if (iType == InstType::Fm2Op) {
+    if (fmEditRow == FM_ROW_HEADER) {
+      instEditScroll = 0;
+      return;
+    }
+    int bodyIdx = fmEditRow - 1;
+    if (bodyIdx < instEditScroll) {
+      instEditScroll = bodyIdx;
+    } else if (bodyIdx >= instEditScroll + 3) {
+      instEditScroll = bodyIdx - 3 + 1;
+    }
+    instEditScroll = constrain(instEditScroll, 0, max(0, (rowCount - 1) - 3));
+    return;
+  }
   if (fmEditRow == FM_ROW_HEADER) {
     instEditScroll = 0;
     return;
   }
-  int bodyIdx = fmEditRow - 1;
+  const int maxBodyIdx = max(0, rowCount - 2);
+  int maxScroll = maxBodyIdx;
+  while (maxScroll > 0 && (maxScroll - 1) + instEditVisibleBodyRowsFrom(maxScroll - 1) > maxBodyIdx) {
+    maxScroll--;
+  }
+  instEditScroll = constrain(instEditScroll, 0, maxScroll);
+
+  const int bodyIdx = fmEditRow - 1;
   if (bodyIdx < instEditScroll) {
     instEditScroll = bodyIdx;
-  } else if (bodyIdx >= instEditScroll + 3) {
-    instEditScroll = bodyIdx - 3 + 1;
+  } else {
+    while (instEditScroll < maxScroll &&
+           bodyIdx >= instEditScroll + instEditVisibleBodyRowsFrom(instEditScroll)) {
+      instEditScroll++;
+    }
   }
-  instEditScroll = constrain(instEditScroll, 0, 4);
+  instEditScroll = constrain(instEditScroll, 0, maxScroll);
 }
 
 char saveKeyboardBuf[MAX_SONG_NAME_LEN + 1] = "SONG_001";
@@ -242,6 +325,7 @@ FLASHMEM void setPage(Page p) {
   instSaveToModalActive = false;
   deleteConfirmPending = false;
   closeSamplerBrowser();
+  closeSf2Browser();
   closeSamplerKeyModal();
   closeInstBrowser();
   closeSysPresetsModal();
@@ -250,6 +334,7 @@ FLASHMEM void setPage(Page p) {
   closeUsbSavePromptModal();
   closeTypePresetModal();
   closeMidiNoteEditor();
+  closeSongTuner();
   trackEditReset();
   if (p == Page::SystemSettings || p == Page::SongSettings || p == Page::Main) {
     prevRow1Page = p;
@@ -282,6 +367,7 @@ FLASHMEM static void openKeyboardModal(KeyboardTarget target, const char *initia
   deleteConfirmPending = false;
   instSaveToModalActive = false;
   closeSamplerBrowser();
+  closeSf2Browser();
   closeSamplerKeyModal();
   closeInstBrowser();
   closeSysPresetsModal();
@@ -310,6 +396,7 @@ FLASHMEM void openProjectKeyboard(bool isRename, const char *initialText, bool s
   deleteConfirmPending = false;
   instSaveToModalActive = false;
   closeSamplerBrowser();
+  closeSf2Browser();
   closeSamplerKeyModal();
   closeInstBrowser();
   closeSysPresetsModal();
@@ -372,6 +459,7 @@ FLASHMEM int instSaveToModalCursor() {
 FLASHMEM void openInstSaveToModal() {
   saveKeyboardActive = false;
   closeSamplerBrowser();
+  closeSf2Browser();
   closeSamplerKeyModal();
   closeInstBrowser();
   instSaveToModalCursorIdx = 0;
@@ -654,13 +742,15 @@ FLASHMEM void syncSongListCursor(bool snapToActive) {
 SongSettings &songSettings() { return songCfg; }
 SystemSettings &systemSettings() { return sysCfg; }
 
-// File-scope SGTL5000 hardware sync state (written from loop() only; never inside FLASHMEM static locals)
+// File-scope SGTL5000 & USB power-descriptor sync state (written from loop() only; never inside FLASHMEM static locals)
 static bool codecHwEnabled = false;
 static bool phonesStateInitialized = false;
 static bool lastKnownPhonesIn = false;
 static int8_t appliedCodecMicMode = -1;
 static int8_t appliedCodecLineIn = -1;
 static int16_t appliedCodecHpStep = -1;
+static uint32_t lastCodecHpSlewMs = 0;
+static int8_t activeUsbPowerDesc = 1; // 1 = Bus-Powered 500 mA enumerated at usb_init(), 0 = Self-Powered 0 mA
 
 FLASHMEM static void ensureSongDualMasterVolInit(SongSettings &ps) {
   uint8_t cur = (uint8_t)constrain((int)ps.masterVolume, 0, MASTER_VOLUME_MAX);
@@ -675,6 +765,10 @@ FLASHMEM static void ensureSongDualMasterVolInit(SongSettings &ps) {
 
 FLASHMEM bool appAreHeadphonesConnected() {
   return lastKnownPhonesIn;
+}
+
+FLASHMEM uint8_t appDefaultMasterVolume() {
+  return lastKnownPhonesIn ? (uint8_t)MASTER_VOLUME_HP_DEFAULT : (uint8_t)MASTER_VOLUME_SPK_DEFAULT;
 }
 
 FLASHMEM void appInitHeadphoneState(bool phonesConnected) {
@@ -736,8 +830,26 @@ FLASHMEM void appServiceCodecHardware() {
 
   const int wantHpStep = targetHeadphoneVolumeStep();
   if (wantHpStep != appliedCodecHpStep) {
-    appliedCodecHpStep = (int16_t)wantHpStep;
-    codec.volume((float)wantHpStep / 129.0f);
+    const uint32_t nowMs = millis();
+    int nextStep = appliedCodecHpStep;
+    if (appliedCodecHpStep < 0) {
+      nextStep = wantHpStep;
+      lastCodecHpSlewMs = nowMs;
+    } else {
+      const uint32_t elapsed = nowMs - lastCodecHpSlewMs;
+      if (elapsed > 0) {
+        const int maxDelta = (int)min(elapsed, (uint32_t)20u) * 6;
+        const int diff = wantHpStep - (int)appliedCodecHpStep;
+        if (diff > maxDelta) nextStep = (int)appliedCodecHpStep + maxDelta;
+        else if (diff < -maxDelta) nextStep = (int)appliedCodecHpStep - maxDelta;
+        else nextStep = wantHpStep;
+        lastCodecHpSlewMs = nowMs;
+      }
+    }
+    if (nextStep != appliedCodecHpStep) {
+      appliedCodecHpStep = (int16_t)nextStep;
+      codec.volume((nextStep <= 0) ? 0.0f : ((float)nextStep / 129.0f));
+    }
   }
 }
 
@@ -763,15 +875,27 @@ FLASHMEM void appServiceCodecHardware(bool phonesConnected) {
 FLASHMEM void applySystemSettings() {
   sysCfg.brightness = (uint8_t)constrain((int)sysCfg.brightness, (int)MIN_BRIGHTNESS, (int)MAX_BRIGHTNESS);
   sysCfg.metroVolume = (uint8_t)constrain((int)sysCfg.metroVolume, 0, (int)VOLUME_MAX);
-  if ((uint8_t)sysCfg.headphoneGain > (uint8_t)HeadphoneGain::High) {
-    sysCfg.headphoneGain = DEFAULT_HEADPHONE_GAIN;
+  if (!board.supportsUsbChargeControl()) {
+    sysCfg.usbChargeWhileOn = true;
   }
   if (!isScreenBlanked()) {
     board.setBacklight(brightnessToPwm(sysCfg.brightness));
   }
+  board.setUsbChargeWhileOn(sysCfg.usbChargeWhileOn);
+  usbSetChargeDescriptorFlag(sysCfg.usbChargeWhileOn);
   setMetronomeVolume(sysCfg.metroVolume);
-  setHeadphoneGainMode(sysCfg.headphoneGain);
   appServiceCodecHardware();
+}
+
+FLASHMEM void appSyncUsbChargeEnumeration(void (*tickFn)()) {
+  const bool wantCharge = board.supportsUsbChargeControl() ? sysCfg.usbChargeWhileOn : true;
+  const int8_t wantDesc = wantCharge ? 1 : 0;
+  usbSetChargeDescriptorFlag(wantCharge);
+  if (wantDesc == activeUsbPowerDesc) return;
+  activeUsbPowerDesc = wantDesc;
+  if (board.usbVbusPresent() || usbIsHostConnected()) {
+    usbReenumerateChargeDescriptor(wantCharge, tickFn);
+  }
 }
 
 FLASHMEM void applyMasterFxSettings() {

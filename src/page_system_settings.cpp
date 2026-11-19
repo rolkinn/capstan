@@ -86,9 +86,9 @@ static int projPlayListCursor = 0;
 static int projPlayListScroll = 0;
 static uint8_t projPlayZone = PROJ_PLAY_ZONE_CONTROLS;
 static uint8_t projPlayCtrlCol = PROJ_PLAY_CTRL_PLAY;
-static uint8_t projPlayVol = MASTER_VOLUME_DEFAULT;
-static uint8_t projPlayVolHp = MASTER_VOLUME_DEFAULT;
-static uint8_t projPlayVolSpk = MASTER_VOLUME_DEFAULT;
+static uint8_t projPlayVol = MASTER_VOLUME_SPK_DEFAULT;
+static uint8_t projPlayVolHp = MASTER_VOLUME_HP_DEFAULT;
+static uint8_t projPlayVolSpk = MASTER_VOLUME_SPK_DEFAULT;
 static int8_t projPlaySpeedQuarter = DEFAULT_SPEED_QUARTER;
 static bool projPlayLocked = false;
 static bool projPlayEditHeld = false;
@@ -1493,11 +1493,11 @@ FLASHMEM void handleSysProjectsModalInput(uint8_t pressed, uint8_t now, uint32_t
       return;
     }
 
-    // OPT + EDIT on VOL resets master volume to default
+    // OPT + EDIT on VOL resets master volume to default (50 on Headphones, 40 on Speaker)
     if (onVolCell && (((pressed & BTN_EDIT) && (now & BTN_OPT)) ||
                       ((pressed & BTN_OPT) && (now & BTN_EDIT)))) {
       projPlayEditModUsed = true;
-      projPlayVol = MASTER_VOLUME_DEFAULT;
+      projPlayVol = appDefaultMasterVolume();
       if (appAreHeadphonesConnected()) projPlayVolHp = projPlayVol;
       else projPlayVolSpk = projPlayVol;
       appSetMasterVolume(projPlayVol);
@@ -1776,7 +1776,7 @@ FLASHMEM static void drawSysMidiMapModal(bool full) {
       continue;
     }
 
-    const int targetId = firstTarget + idx;
+    const int targetId = midiMapCategoryRowTarget((MidiMapCategory)midiMapCat, idx);
     const bool rowSel = (midiMapZone == MIDI_MAP_ZONE_LIST && midiMapCursor == idx);
     const MidiCcMapEntry eff = midiMapEffective(targetId);
     const bool isLearningRow = midiMapIsLearning() && (midiMapLearningTarget() == targetId);
@@ -1884,7 +1884,7 @@ FLASHMEM void handleSysMidiMapModalInput(uint8_t pressed, uint8_t now, uint32_t 
   int firstTarget = 0, catCount = 0;
   midiMapCategoryBounds((MidiMapCategory)midiMapCat, firstTarget, catCount);
   syncMidiMapScroll(catCount);
-  int targetId = firstTarget + midiMapCursor;
+  int targetId = midiMapCategoryRowTarget((MidiMapCategory)midiMapCat, midiMapCursor);
 
   // SHIFT + DOWN: Navigate away from the page (to lastRow2Page)
   if ((pressed & BTN_DOWN) && (now & BTN_SHIFT) && !(now & (BTN_OPT | BTN_EDIT))) {
@@ -2092,19 +2092,26 @@ FLASHMEM static void sysSettingsDrawPage(bool full) {
   }
 
   sysSetRow = constrain(sysSetRow, 0, SSET_COUNT - 1);
+  if (!board.supportsUsbChargeControl() && sysSetRow == SSET_USB_CHARGE_ON) {
+    sysSetRow = SSET_MIDI_MAP;
+  }
   const SystemSettings &ss = systemSettings();
   PROGMEM static const char *const LABELS[SSET_COUNT] = {
     "SCREEN BRIGHTNESS",
     "METRONOME VOLUME",
-    "HEADPHONE GAIN",
     "INSTRUMENT PRESETS",
     "PROJECTS",
     "MIDI MAPPINGS",
+    "USB CHARGE WHILE ON",
     "USB STORAGE DRIVE"
   };
 
+  int vis = 0;
   for (int i = 0; i < SSET_COUNT; i++) {
-    int y = SY(28) + i * SY(26);
+    if (i == SSET_USB_CHARGE_ON && !board.supportsUsbChargeControl()) {
+      continue;
+    }
+    int y = SY(28) + vis * SY(26);
     bool sel = (sysSetRow == i);
 
     char val[32];
@@ -2120,25 +2127,15 @@ FLASHMEM static void sysSettingsDrawPage(bool full) {
         isOff = (ss.metroVolume == 0);
         snprintf(val, sizeof(val), "%d", (int)ss.metroVolume);
         break;
-      case SSET_HP_GAIN:
-        switch (ss.headphoneGain) {
-          case HeadphoneGain::Low:
-            snprintf(val, sizeof(val), "LOW");
-            break;
-          case HeadphoneGain::High:
-            snprintf(val, sizeof(val), "HIGH");
-            break;
-          case HeadphoneGain::Normal:
-          default:
-            snprintf(val, sizeof(val), "NORMAL");
-            break;
-        }
-        break;
       case SSET_INST_PRESETS:
       case SSET_PROJECTS:
       case SSET_MIDI_MAP:
         isPill = true;
         snprintf(val, sizeof(val), "MANAGE");
+        break;
+      case SSET_USB_CHARGE_ON:
+        isOff = !ss.usbChargeWhileOn;
+        snprintf(val, sizeof(val), ss.usbChargeWhileOn ? "ON" : "OFF");
         break;
       case SSET_USB_DRIVE:
         isPill = true;
@@ -2147,9 +2144,29 @@ FLASHMEM static void sysSettingsDrawPage(bool full) {
     }
 
     drawSettingsTableRow(y, (uint32_t)i, LABELS[i], val, sel, isOff, isPill,
-                         prevSysSettingsKey[i], full);
+                         prevSysSettingsKey[vis], full);
+    vis++;
     keepStreaming();
   }
+}
+
+FLASHMEM static void sysUsbChargeReenumTick() {
+  keepStreaming();
+  if (usbDriveTick) usbDriveTick();
+}
+
+FLASHMEM static void applyAndCommitUsbChargeSetting(bool nextEnable) {
+  if (!board.supportsUsbChargeControl()) return;
+  SystemSettings &ss = systemSettings();
+  if (ss.usbChargeWhileOn == nextEnable) return;
+  ss.usbChargeWhileOn = nextEnable;
+  applySystemSettings();
+  saveSystemSettings();
+  uiForceRedraw();
+  uiRefresh();
+  appSyncUsbChargeEnumeration(sysUsbChargeReenumTick);
+  inputClearRepeat();
+  uiForceRedraw();
 }
 
 FLASHMEM static void sysSettingsOnShiftNavigate(uint8_t dir) {
@@ -2167,12 +2184,9 @@ FLASHMEM static void sysSettingsOnOptAdjust(int dx, int dy, int delta) {
     case SSET_METRO_VOL:
       ss.metroVolume = (uint8_t)constrain((int)ss.metroVolume + step, 0, (int)VOLUME_MAX);
       break;
-    case SSET_HP_GAIN: {
-      int cur = (int)ss.headphoneGain;
-      int dir = (dx != 0) ? (dx > 0 ? 1 : -1) : (dy != 0 ? (dy > 0 ? 1 : -1) : (delta > 0 ? 1 : -1));
-      ss.headphoneGain = (HeadphoneGain)constrain(cur + dir, 0, 2);
-      break;
-    }
+    case SSET_USB_CHARGE_ON:
+      applyAndCommitUsbChargeSetting(!ss.usbChargeWhileOn);
+      return;
     case SSET_INST_PRESETS:
     case SSET_PROJECTS:
     case SSET_MIDI_MAP:
@@ -2188,8 +2202,15 @@ FLASHMEM static void sysSettingsOnCursorMove(int dx, int dy, uint8_t dir) {
   (void)dx;
   (void)dir;
   if (dy != 0) {
-    sysSetRow = constrain(sysSetRow + dy, 0, SSET_COUNT - 1);
-    uiForceRedraw();
+    int step = (dy > 0) ? 1 : -1;
+    int next = constrain(sysSetRow + step, 0, SSET_COUNT - 1);
+    if (!board.supportsUsbChargeControl() && next == SSET_USB_CHARGE_ON) {
+      next = constrain(next + step, 0, SSET_COUNT - 1);
+    }
+    if (next != sysSetRow) {
+      sysSetRow = next;
+      uiForceRedraw();
+    }
   }
 }
 
@@ -2200,7 +2221,7 @@ FLASHMEM void usbSavePromptModalConfirm() {
   prevUsbSavePromptKey = 0;
 
   // Redraw underlying System Settings page before saving / showing USB overlay
-  board.tft().fillRect(0, SY(24), SCREEN_W, SCREEN_H - SY(24), BG);
+  uiClearRegionStreaming(SY(24), SCREEN_H - SY(24), BG);
   sysSettingsInvalidateCache();
   sysSettingsDrawPage(true);
 
@@ -2216,8 +2237,10 @@ FLASHMEM void usbSavePromptModalConfirm() {
 }
 
 FLASHMEM static void sysSettingsOnEditPress(bool shiftHeld) {
-  (void)shiftHeld;
-  if (sysSetRow == SSET_USB_DRIVE) {
+  if (shiftHeld) return;
+  if (sysSetRow == SSET_USB_CHARGE_ON) {
+    applyAndCommitUsbChargeSetting(!systemSettings().usbChargeWhileOn);
+  } else if (sysSetRow == SSET_USB_DRIVE) {
     if (transport.mode == TransportMode::Stopped) {
       if (songHasUnsavedChanges()) {
         openUsbSavePromptModal();
@@ -2229,12 +2252,6 @@ FLASHMEM static void sysSettingsOnEditPress(bool shiftHeld) {
       uiShowToast("STOP TRANSPORT FIRST");
     }
     inputClearRepeat();
-    uiForceRedraw();
-  } else if (sysSetRow == SSET_HP_GAIN) {
-    SystemSettings &ss = systemSettings();
-    ss.headphoneGain = (HeadphoneGain)(((int)ss.headphoneGain + 1) % 3);
-    applySystemSettings();
-    saveSystemSettings();
     uiForceRedraw();
   } else if (sysSetRow == SSET_INST_PRESETS) {
     openSysPresetsModal();
@@ -2257,8 +2274,9 @@ FLASHMEM static void sysSettingsOnResetParam() {
     ss.brightness = DEFAULT_BRIGHTNESS;
   } else if (sysSetRow == SSET_METRO_VOL) {
     ss.metroVolume = DEFAULT_METRO_VOLUME;
-  } else if (sysSetRow == SSET_HP_GAIN) {
-    ss.headphoneGain = DEFAULT_HEADPHONE_GAIN;
+  } else if (sysSetRow == SSET_USB_CHARGE_ON) {
+    applyAndCommitUsbChargeSetting(true);
+    return;
   } else {
     return;
   }

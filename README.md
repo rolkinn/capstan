@@ -55,7 +55,7 @@ Notes:
 - **Master Page FX chain**:  `Chorus -> Delay -> Reverb -> Tape Saturator -> Compressor`.
 - **Transport control, track mixer, navigation, & per-instrument MIDI CC Mapping** with learn assignment.
 - **Composite USB Device**: **USB Audio**, **USB MIDI**, **USB Serial**, and **USB Mass Storage Drive** mode.
-  - 14-channel output: Master L/R, Tracks 1–4 L/R, Tracks 5–8 Mono
+  - 2-channel stereo output: Master L/R
   - 2-channel stereo input
 
 ## 3. Navigation & Core Controls
@@ -118,7 +118,7 @@ Capstan stores all system settings, songs, projects, and presets inside `/Capsta
 - **Teensyduino 1.62.0** board package (`teensy:avr`) installed in Arduino CLI
 
 ### Build Commands
-The unified [`build_all.py`](build_all.py) script automatically applies the composite USB (`Serial + MIDI + 14-ch UAC2 Audio + Mass Storage`) Teensy core patch from [`tools/teensy_msc/patch.py`](tools/teensy_msc/patch.py), compiles both hardware targets, and runs the automated verification suite ([`tools/recorder_sim/verify_firmware.py`](tools/recorder_sim/verify_firmware.py)):
+The unified [`build_all.py`](build_all.py) script automatically applies the composite USB (`Serial + MIDI + 2-ch Stereo UAC2 Audio + Mass Storage`) Teensy core patch from [`tools/teensy_msc/patch.py`](tools/teensy_msc/patch.py), compiles both hardware targets, and runs the automated verification suite ([`tools/recorder_sim/verify_firmware.py`](tools/recorder_sim/verify_firmware.py)):
 
 ```bash
 # Build and verify both Model:01 and Model:02 (.hex files written to build/)

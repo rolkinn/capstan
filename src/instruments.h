@@ -7,14 +7,15 @@
 
 namespace looper {
 
-constexpr int NUM_INST_TYPES = 4;  // 0: 2-Op FM, 1: Phase Dist, 2: Sampler, 3: Noise Texture Drone
+constexpr int NUM_INST_TYPES = 5;  // 0: 2-Op FM, 1: Phase Dist, 2: Sampler, 3: Noise Texture Drone, 4: SoundFont (.sf2)
 
 enum class InstType : uint8_t {
   None = 0,        // Empty / unallocated instrument slot
   Fm2Op = 1,       // 2-Operator FM Synthesizer (src/inst_fm2op.*)
   PhaseDist = 2,   // Phase Distortion Synthesizer (src/inst_phasedist.*)
   Sampler = 3,     // SD Card WAV Sampler (src/inst_sampler.*)
-  NoiseDrone = 4   // Noise Texture Drone Synthesizer (src/inst_noisedrone.*)
+  NoiseDrone = 4,  // Noise Texture Drone Synthesizer (src/inst_noisedrone.*)
+  SoundFont = 5    // SoundFont 2.x (.sf2) Sample Instrument (src/inst_sf2.*)
 };
 
 // Per-operator / per-section specific parameter block (8 bytes)
@@ -135,6 +136,22 @@ constexpr uint32_t INST_LUT_BITS = 10;
 constexpr uint32_t INST_LUT_SIZE = 1u << INST_LUT_BITS;
 constexpr uint32_t INST_LUT_MASK = INST_LUT_SIZE - 1;
 
+struct FmInstEnvRates {
+  InstEnvParams lastAmp;
+  InstEnvParams lastFlt;
+  float ampAmt;
+  float ampAtkInc;
+  float ampDecMul;
+  float ampSusLvl;
+  float ampRelMul;
+  float fltAmt;
+  float fltAtkInc;
+  float fltDecMul;
+  float fltSusLvl;
+  float fltRelMul;
+};
+
+const FmInstEnvRates &instCachedEnvRates(int instIdx);
 float instSinLutAt(uint32_t idx);
 float instNextWhiteNoise();
 uint16_t instEnvAttackMs(uint8_t param);
@@ -201,6 +218,7 @@ void fmSynthNoteOff(int instIdx, uint8_t note, uint8_t sampleOffset = 0, uint8_t
 void fmSynthPitchBend(int instIdx, uint8_t lsb, uint8_t msb, uint8_t midiTrack = 0xFF);
 void fmSynthCC(int instIdx, uint8_t cc, uint8_t val, uint8_t midiTrack = 0xFF);
 void fmSynthSilenceInst(int instIdx);
+void fmSynthReleaseDirectVoices(int instIdx);
 void fmSynthSilenceMidiTrack(int midiTrack);
 void fmSynthAllNotesOff();
 

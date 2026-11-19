@@ -3,6 +3,7 @@
 #include "midi_map.h"
 #include "instruments.h"
 #include "storage.h"
+#include "tuner.h"
 #include "ui.h"
 #include <Arduino.h>
 #include <string.h>
@@ -109,6 +110,17 @@ static inline void clearRecNoteOpenMask(int t) {
   memset(recNoteOpenMask[t], 0, sizeof(recNoteOpenMask[t]));
 }
 
+static inline int liveAuditionInstIdx(Page pg) {
+  if (pg == Page::Instruments || pg == Page::InstrumentEdit || pg == Page::InstrumentType) {
+    return constrain(instListCursor, 0, NUM_INSTRUMENTS - 1);
+  }
+  const TunerSource tSrc = tunerActiveSource;
+  if (tSrc >= TunerSource::Inst1 && tSrc <= TunerSource::Inst8) {
+    return (int)tSrc - (int)TunerSource::Inst1;
+  }
+  return -1;
+}
+
 int midiSeqFocusedTrack() {
   Page pg = currentPage();
   if (pg == Page::Midi) {
@@ -144,7 +156,7 @@ int midiSeqAudioRecTargetTrack() {
 
 // Send a channel voice message to either External MIDI (1..16) or Internal Synth (17..24 = I01..I08)
 // Returns false only when allowSdIo == false (ISR context) and an uncached Sampler key requires SD I/O.
-static bool sendMidiOut(uint8_t typeHi, uint8_t outDest, uint8_t d1, uint8_t d2,
+FLASHMEM static bool sendMidiOut(uint8_t typeHi, uint8_t outDest, uint8_t d1, uint8_t d2,
                         uint8_t portMask = MIDI_PORT_BOTH, uint8_t sampleOffset = 0,
                         bool allowSdIo = true, uint8_t midiTrack = 0xFF) {
   if (outDest == 0) return true;
@@ -391,7 +403,7 @@ FLASHMEM void midiSeqClearAll() {
   midiSeqAllNotesOff();
 }
 
-void midiSeqInputEvent(uint8_t status, uint8_t d1, uint8_t d2, uint8_t fromSource) {
+FLASHMEM void midiSeqInputEvent(uint8_t status, uint8_t d1, uint8_t d2, uint8_t fromSource) {
   uint8_t type = status & 0xF0;
   if (type >= 0x80 && type <= 0xE0) {
     midiActivityPending = true;
@@ -449,7 +461,7 @@ void midiSeqInputEvent(uint8_t status, uint8_t d1, uint8_t d2, uint8_t fromSourc
     const int audioRecMidiTrack = midiSeqAudioRecTargetTrack();
     const bool anySoloNow = anyTrackSolo();
     const Page pg = currentPage();
-    const bool onInstPage = (pg == Page::Instruments || pg == Page::InstrumentEdit || pg == Page::InstrumentType);
+    const int auditionInst = liveAuditionInstIdx(pg);
     const uint8_t thruPortMask = (fromSource == 1) ? MIDI_PORT_TRS : MIDI_PORT_BOTH;
 
     for (int t = 0; t < NUM_MIDI_TRACKS; t++) {
@@ -460,7 +472,7 @@ void midiSeqInputEvent(uint8_t status, uint8_t d1, uint8_t d2, uint8_t fromSourc
       bool isArmed = (mt.armMode != ArmMode::Off);
       bool isSelected = (t == selectedMidiTrack);
       bool isAudioRecTarget = (t == audioRecMidiTrack) && !mt.muted && (!anySoloNow || mt.solo);
-      if (onInstPage && !running) {
+      if (auditionInst >= 0 && !running) {
         isArmed = false;
         isSelected = false;
         isAudioRecTarget = false;
@@ -487,8 +499,8 @@ void midiSeqInputEvent(uint8_t status, uint8_t d1, uint8_t d2, uint8_t fromSourc
       }
     }
 
-    if (onInstPage) {
-      uint8_t instDest = (uint8_t)(17 + constrain(instListCursor, 0, NUM_INSTRUMENTS - 1));
+    if (auditionInst >= 0) {
+      uint8_t instDest = (uint8_t)(17 + auditionInst);
       uint32_t bit = 1u << (instDest - 1);
       if (!(thruSentMask & bit)) {
         if (sendMidiOut(type, instDest, d1, d2, MIDI_PORT_BOTH, sampleOffset, false)) {
@@ -930,7 +942,7 @@ FLASHMEM static void drainMidiInputRing(float curBpm, int selectedMidiTrack, boo
     uint8_t thruPortMask = (m.source == 1) ? MIDI_PORT_TRS : MIDI_PORT_BOTH;
 
     const Page pg = currentPage();
-    const bool onInstPage = (pg == Page::Instruments || pg == Page::InstrumentEdit || pg == Page::InstrumentType);
+    const int auditionInst = liveAuditionInstIdx(pg);
     const bool msgRunning = running || (m.tMode == TransportMode::Running);
     const int audioRecMidiTrack = midiSeqAudioRecTargetTrack();
     const bool anySoloNow = anyTrackSolo();
@@ -944,7 +956,7 @@ FLASHMEM static void drainMidiInputRing(float curBpm, int selectedMidiTrack, boo
       bool isArmed = (mt.armMode != ArmMode::Off);
       bool isSelected = (t == selectedMidiTrack);
       bool isAudioRecTarget = (t == audioRecMidiTrack) && !mt.muted && (!anySoloNow || mt.solo);
-      if (onInstPage && !msgRunning) {
+      if (auditionInst >= 0 && !msgRunning) {
         isArmed = false;
         isSelected = false;
         isAudioRecTarget = false;
@@ -1128,8 +1140,8 @@ FLASHMEM static void drainMidiInputRing(float curBpm, int selectedMidiTrack, boo
       }
     }
 
-    if (onInstPage) {
-      uint8_t instDest = (uint8_t)(17 + constrain(instListCursor, 0, NUM_INSTRUMENTS - 1));
+    if (auditionInst >= 0) {
+      uint8_t instDest = (uint8_t)(17 + auditionInst);
       uint32_t bit = 1u << (instDest - 1);
       if (!(thruSentMask & bit)) {
         sendMidiOut(typeHi, instDest, m.d1, m.d2, MIDI_PORT_BOTH, m.sampleOffset, true);

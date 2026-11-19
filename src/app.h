@@ -95,25 +95,26 @@ enum SongSettingItem : int {
   PSET_MONITOR      = 1,
   PSET_LINE_IN_GAIN = 2,
   PSET_DEF_THRESH   = 3,
-  PSET_CLOCK_OUT    = 4,
-  PSET_CLOCK        = 5,
-  PSET_TRANSPORT_IN = 6,
-  PSET_MIDI_THRU    = 7,
-  PSET_SAVED_INST   = 8,
-  PSET_EXPORT_MIDI  = 9,
-  PSET_EXPORT_AUDIO = 10,
-  PSET_COUNT        = 11
+  PSET_TUNER        = 4,
+  PSET_CLOCK_OUT    = 5,
+  PSET_CLOCK        = 6,
+  PSET_TRANSPORT_IN = 7,
+  PSET_MIDI_THRU    = 8,
+  PSET_SAVED_INST   = 9,
+  PSET_EXPORT_MIDI  = 10,
+  PSET_EXPORT_AUDIO = 11,
+  PSET_COUNT        = 12
 };
 
 enum SysSettingItem : int {
-  SSET_BRIGHTNESS   = 0,
-  SSET_METRO_VOL    = 1,
-  SSET_HP_GAIN      = 2,
-  SSET_INST_PRESETS = 3,
-  SSET_PROJECTS     = 4,
-  SSET_MIDI_MAP     = 5,
-  SSET_USB_DRIVE    = 6,
-  SSET_COUNT        = 7
+  SSET_BRIGHTNESS    = 0,
+  SSET_METRO_VOL     = 1,
+  SSET_INST_PRESETS  = 2,
+  SSET_PROJECTS      = 3,
+  SSET_MIDI_MAP      = 4,
+  SSET_USB_CHARGE_ON = 5,
+  SSET_USB_DRIVE     = 6,
+  SSET_COUNT         = 7
 };
 
 // Main (Songs) page interactive zones & action buttons
@@ -202,6 +203,8 @@ enum FmEditRow : int {
 int instGenBaseRow();
 int instEditRowCount();
 int fmRowColCount(int row);
+bool instEditRowStartsSection(int rowIdx);
+int instEditVisibleBodyRowsFrom(int startBodyIdx);
 void syncInstEditScroll();
 
 // Master page rows & columns
@@ -319,12 +322,14 @@ void syncSongListCursor(bool snapToActive = false);
 SongSettings &songSettings();
 SystemSettings &systemSettings();
 bool appAreHeadphonesConnected();
+uint8_t appDefaultMasterVolume();
 void appInitHeadphoneState(bool phonesConnected);
 void appSetMasterVolume(uint8_t vol);
 void appEnableCodecHardware();
 void appServiceCodecHardware();
 void appServiceCodecHardware(bool phonesConnected);
 void applySystemSettings();
+void appSyncUsbChargeEnumeration(void (*tickFn)() = nullptr);
 void applySongSettings();
 void applyMasterFxSettings();
 

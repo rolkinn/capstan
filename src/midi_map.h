@@ -60,16 +60,27 @@ enum MidiTargetId : uint8_t {
   MIDI_TGT_TEMPO_BPM    = MIDI_TGT_MASTER_BASE + 7,
   MIDI_TGT_METRO_MODE   = MIDI_TGT_MASTER_BASE + 8,
 
-  // 4. Navigation (5 targets: 84..88)
+  // 4. Navigation (7 targets: 84..90)
   MIDI_TGT_NAV_BASE     = MIDI_TGT_MASTER_BASE + 9, // 84
   MIDI_TGT_NAV_UP       = MIDI_TGT_NAV_BASE + 0,    // 84
   MIDI_TGT_NAV_DOWN     = MIDI_TGT_NAV_BASE + 1,    // 85
   MIDI_TGT_NAV_LEFT     = MIDI_TGT_NAV_BASE + 2,    // 86
   MIDI_TGT_NAV_RIGHT    = MIDI_TGT_NAV_BASE + 3,    // 87
   MIDI_TGT_NAV_EDIT     = MIDI_TGT_NAV_BASE + 4,    // 88
+  MIDI_TGT_NAV_OPT      = MIDI_TGT_NAV_BASE + 5,    // 89
+  MIDI_TGT_NAV_SHIFT    = MIDI_TGT_NAV_BASE + 6,    // 90
 
-  MIDI_TARGET_COUNT     = MIDI_TGT_NAV_BASE + 5     // 89
+  // Extended Transport Loop Locator Targets (appended to preserve stable IDs 0..90; shown in CAT: TRANSPORT)
+  MIDI_TGT_SET_LOOP_START = 91,
+  MIDI_TGT_SET_LOOP_END   = 92,
+
+  MIDI_TARGET_COUNT       = 93
 };
+
+static constexpr int MIDI_NAV_TARGET_COUNT = 7;
+
+// Base count stored before usbChargeOffEnc in SYSTEM.DAT v4/v5 (targets >= 89 trail usbChargeOffEnc in v5)
+static constexpr int LEGACY_MIDI_TARGET_COUNT_V5 = MIDI_TGT_NAV_BASE + 5; // 89
 
 enum MidiAudTrackOffset : uint8_t {
   MIDI_AUD_OFF_ARM  = 0,
@@ -115,6 +126,7 @@ void midiMapStepCc(int targetId, int delta);
 // Category & label metadata for UI
 const char *midiMapCategoryLabel(MidiMapCategory cat);
 void midiMapCategoryBounds(MidiMapCategory cat, int &outFirstTarget, int &outCount);
+int midiMapCategoryRowTarget(MidiMapCategory cat, int rowIdx);
 void midiMapFormatTargetName(int targetId, char *out, int outSz);
 bool midiMapIsTriggerTarget(int targetId);
 

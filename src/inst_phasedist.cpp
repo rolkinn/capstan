@@ -305,11 +305,21 @@ static inline float evalPdWaveFast(const PdWaveCoeffs &c, uint32_t phase) {
   }
 }
 
+static inline float pdFastExp2f(float x) {
+  int32_t k = (int32_t)x;
+  if (x < (float)k) k--;
+  float f = x - (float)k;
+  float p = 1.0f + f * (0.6931472f + f * (0.2402265f + f * (0.0558011f + 0.0108252f * f)));
+  union { uint32_t u; float flt; } scale;
+  scale.u = (uint32_t)((k + 127) << 23);
+  return p * scale.flt;
+}
+
 static void phaseDistRenderVoice(FmVoice &v, const FmPatch &p, const FmInstRuntime &rt,
                                  int32_t *outL, int32_t *outR, int numFrames) {
   uint32_t step1 = (uint32_t)((float)v.baseStep * rt.pitchBendRatio);
   float tuneSt = pdSynthTuneSemitones(p.op[1].ratioX100);
-  float ratio2 = powf(2.0f, tuneSt / 12.0f) * rt.pitchBendRatio;
+  float ratio2 = pdFastExp2f(tuneSt * (1.0f / 12.0f)) * rt.pitchBendRatio;
   uint32_t step2 = (uint32_t)((float)v.baseStep * ratio2);
 
   // Line 1 (DCO1 -> DCW1 -> DCA1)
@@ -337,9 +347,12 @@ static void phaseDistRenderVoice(FmVoice &v, const FmPatch &p, const FmInstRunti
   float modAmt = constrain((int)p.op[0].ratioX100, 0, 100) * 0.01f;
   const bool runLine2 = (l2Lvl > 0.0f || modAmt > 0.0f);
 
+  static constexpr float PD_VOICE_BASE_GAIN = 4500.0f;
   float sumLvl = l1Lvl + l2Lvl;
-  float normScale = (sumLvl > 1.0f) ? (1.0f / (0.65f + 0.35f * sumLvl)) : 1.0f;
-  float voiceGain = 10000.0f * normScale * v.velScale;
+  float normScale = (sumLvl > 1.0f) ? (1.0f / (0.45f + 0.55f * sumLvl)) : 1.0f;
+  const float l1Gain = l1Lvl * normScale;
+  const float l2Gain = l2Lvl * normScale;
+  float voiceGain = PD_VOICE_BASE_GAIN * v.velScale;
 
   PdWaveCoeffs c1a{}, c1b{}, c2a{}, c2b{};
 
@@ -410,23 +423,15 @@ static void phaseDistRenderVoice(FmVoice &v, const FmPatch &p, const FmInstRunti
     }
     v.opPhase[1] = nextPh1;
 
-    // 5. Sum DCA1 + DCA2 with per-line LVL and stereo BAL
-    float l1Out = w1 * l1Lvl;
-    float l2Out = w2 * l2Lvl;
+    // 5. Sum normalized DCA1 + DCA2 with per-line LVL and stereo BAL, then apply stereo SVF & AMP envelope
+    float l1Out = w1 * l1Gain;
+    float l2Out = w2 * l2Gain;
     float rawL = l1Out * pan1L + l2Out * pan2L;
     float rawR = l1Out * pan1R + l2Out * pan2R;
-    float mid = 0.5f * (rawL + rawR);
-    float filtMid = instApplyVoiceFilterAndAmp(v, mid, voiceGain);
-
-    if (rawL == rawR) {
-      int32_t sInt = (int32_t)filtMid;
-      outL[i] += sInt;
-      outR[i] += sInt;
-    } else {
-      float side = 0.5f * (rawL - rawR) * v.ampEnv * voiceGain;
-      outL[i] += (int32_t)(filtMid + side);
-      outR[i] += (int32_t)(filtMid - side);
-    }
+    float outSampleL = 0.0f, outSampleR = 0.0f;
+    instApplyVoiceStereoFilterAndAmp(v, rawL, rawR, voiceGain, outSampleL, outSampleR);
+    outL[i] += (int32_t)outSampleL;
+    outR[i] += (int32_t)outSampleR;
   }
 }
 

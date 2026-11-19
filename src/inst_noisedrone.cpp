@@ -368,6 +368,25 @@ static inline float ndFastExp2f(float x) {
   return p * scale.fl;
 }
 
+// Smooth C1 soft-saturation guard for resonant SVF states (linear on [-1.5, +1.5], asymptotic to +/-2.2)
+static inline float softLimitNdState(float x) {
+  if (x >= -1.5f && x <= 1.5f) return x;
+  float ax = fabsf(x);
+  constexpr float W = 0.7f;
+  float u = ax - 1.5f;
+  float y = 1.5f + (W * u) / (W + u);
+  return (x >= 0.0f) ? y : -y;
+}
+
+static inline float softLimitNdArc(float x) {
+  if (x >= -0.75f && x <= 0.75f) return x;
+  float ax = fabsf(x);
+  constexpr float W = 0.35f;
+  float u = ax - 0.75f;
+  float y = 0.75f + (W * u) / (W + u);
+  return (x >= 0.0f) ? y : -y;
+}
+
 static void noiseDroneRenderVoice(FmVoice &v, const FmPatch &p, const FmInstRuntime &rt,
                                   int32_t *outL, int32_t *outR, int numFrames) {
   const FmVoice *baseVoice = fmSynthVoiceAt(0);
@@ -404,10 +423,12 @@ static void noiseDroneRenderVoice(FmVoice &v, const FmPatch &p, const FmInstRunt
   const float panR = (bal < 0.0f) ? (1.0f + bal) : 1.0f;
   const bool runCrackle = (densNorm > 0.0f && popLvl > 0.0f);
 
-  // Normalize overall voice gain so layered Drone + Noise + Crackle maintains headroom
-  float layerSum = droneLvl + 0.65f * subLvl + noiseLvl + 0.7f * popLvl;
-  float normGain = (layerSum > 1.15f) ? (1.15f / (0.55f + 0.52f * layerSum)) : 1.0f;
-  const float voiceGain = 10000.0f * normGain * v.velScale;
+  // Normalize overall voice gain BEFORE the shared per-voice SVF so layered Drone + Noise + Crackle
+  // maintains clean polyphonic headroom without hitting filter state clamps
+  static constexpr float ND_VOICE_BASE_GAIN = 4500.0f;
+  float layerSum = droneLvl + subLvl + noiseLvl + 0.75f * popLvl;
+  float normGain = (layerSum > 1.0f) ? (1.0f / (0.40f + 0.60f * layerSum)) : 1.0f;
+  const float voiceGain = ND_VOICE_BASE_GAIN * v.velScale;
 
   // Control-rate variables updated every 8 samples (~5.5 kHz)
   uint32_t step0 = (uint32_t)baseDroneStepF;
@@ -596,10 +617,10 @@ static void noiseDroneRenderVoice(FmVoice &v, const FmPatch &p, const FmInstRunt
           break;
       }
 
-      // 2-pole Chamberlin State Variable Filter for Noise Bed FREQ & RESO
-      float hp = constrain(bedSrc - ns.bedLp - bedQ * ns.bedBp, -2.0f, 2.0f);
-      ns.bedBp = constrain(ns.bedBp + bedF * hp, -2.0f, 2.0f);
-      ns.bedLp = constrain(ns.bedLp + bedF * ns.bedBp, -2.0f, 2.0f);
+      // 2-pole Chamberlin State Variable Filter for Noise Bed FREQ & RESO (smoothly soft-limited)
+      float hp = softLimitNdState(bedSrc - ns.bedLp - bedQ * ns.bedBp);
+      ns.bedBp = softLimitNdState(ns.bedBp + bedF * hp);
+      ns.bedLp = softLimitNdState(ns.bedLp + bedF * ns.bedBp);
 
       float shapedNoise;
       if (noiseType == (uint8_t)NdNoiseType::Wind) {
@@ -668,8 +689,8 @@ static void noiseDroneRenderVoice(FmVoice &v, const FmPatch &p, const FmInstRunt
             float exc = wn * ns.crklEnv;
             float hp = exc - v.opPrev[1] - 0.35f * ns.crklBp;
             float cf = ns.popIsDeep ? 0.14f : 0.36f;
-            ns.crklBp = constrain(ns.crklBp + cf * hp, -2.0f, 2.0f);
-            v.opPrev[1] = constrain(v.opPrev[1] + cf * ns.crklBp, -2.0f, 2.0f);
+            ns.crklBp = softLimitNdState(ns.crklBp + cf * hp);
+            v.opPrev[1] = softLimitNdState(v.opPrev[1] + cf * ns.crklBp);
             imp = (0.75f * ns.crklBp + 0.45f * exc) * 1.35f;
             if (ns.burstWait == 1 && ns.burstRem > 0) {
               ns.burstWait = (uint16_t)(110u + ((ns.dropPhase >> 19) & 0x027Fu));
@@ -678,10 +699,10 @@ static void noiseDroneRenderVoice(FmVoice &v, const FmPatch &p, const FmInstRunt
           }
 
           case (uint8_t)NdCrackleType::Static: {
-            // Harsh clipped electrical arc / Geiger burst
+            // Crisp electrical arc / Geiger burst with smooth soft-saturation ceiling
             ns.crklEnv *= 0.968f;
             float arc = wn * ns.crklEnv * 2.4f;
-            imp = constrain(arc, -1.1f, 1.1f);
+            imp = softLimitNdArc(arc);
             break;
           }
 
@@ -700,8 +721,8 @@ static void noiseDroneRenderVoice(FmVoice &v, const FmPatch &p, const FmInstRunt
       }
     }
 
-    // 6. Sum Drone Osc + Noise Bed + Crackle, apply shared Voice Filter & Amp, and pan L/R
-    float rawMix = droneOut + noiseOut + crackleOut;
+    // 6. Sum normalized Drone Osc + Noise Bed + Crackle, apply shared Voice Filter & Amp, and pan L/R
+    float rawMix = (droneOut + noiseOut + crackleOut) * normGain;
     float voiced = instApplyVoiceFilterAndAmp(v, rawMix, voiceGain);
     if (bal == 0.0f) {
       int32_t sInt = (int32_t)voiced;

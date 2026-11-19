@@ -31,13 +31,115 @@ static inline float fastSin01(float u) {
   return fastSinQuadrant(q * 6.28318531f);
 }
 
-// Smooth, strictly monotonic C^1 soft saturator (rational tanh on [-3, +3]):
-// zero wavefolding and zero hard-clipping discontinuities.
+static inline float fastSqrtPos(float x) {
+#if defined(__VFP_FP__) && !defined(__SOFTFP__)
+  float r;
+  __asm__("vsqrt.f32 %0, %1" : "=t"(r) : "t"(x));
+  return r;
+#else
+  return sqrtf(x);
+#endif
+}
+
+// Smooth, strictly monotonic C^inf algebraic saturator on (-inf, +inf):
+// matches unity slope at 0 and approaches +/-1 asymptotically with zero flat-topping
+// (no dead-zone derivative wall on loud polyphonic chords).
 static inline float softTanhRational(float u) {
-  if (u >= 3.0f) return 1.0f;
-  if (u <= -3.0f) return -1.0f;
-  float u2 = u * u;
-  return u * (27.0f + u2) / (27.0f + 9.0f * u2);
+  return u / fastSqrtPos(1.0f + u * u);
+}
+
+// Rational C1-continuous soft-knee safety ceiling (exact unity below `knee`, asymptotic to `ceiling`)
+__attribute__((noinline)) float softKneeClip(float x, float knee, float ceiling) {
+  float ax = fabsf(x);
+  if (ax <= knee) return x;
+  float w = ceiling - knee;
+  float u = ax - knee;
+  float y = knee + (w * u) / (w + u);
+  return (x >= 0.0f) ? y : -y;
+}
+
+void LookaheadMonitorLimiter::reset() {
+  memset(delayL, 0, sizeof(delayL));
+  memset(delayR, 0, sizeof(delayR));
+  for (uint32_t i = 0; i < LOOKAHEAD; i++) {
+    boxBuf[i] = ONE_Q24;
+  }
+  boxSum = FULL_BOX;
+  dqHead = 0;
+  dqTail = 0;
+  sampleTick = 0;
+  pos = 0;
+  relGain = 1.0f;
+  slowGain = 1.0f;
+}
+
+__attribute__((noinline)) float LookaheadMonitorLimiter::stepGain(float pk) {
+  constexpr float REL_FAST = 0.00075f;  // ~30 ms smooth transient recovery (zero chord modulation)
+  constexpr float REL_SLOW = 0.00014f;  // ~160 ms sustain recovery
+  constexpr float SLOW_ATK = 0.00070f;  // ~32 ms sustain detector
+
+  const uint32_t t = sampleTick++;
+  const uint32_t p = pos;
+  pos = (p + 1u) & (LOOKAHEAD - 1u);
+
+  if (pk <= thresh && dqHead == dqTail && relGain >= 1.0f && boxSum == FULL_BOX) {
+    return 1.0f;
+  }
+
+  float req = (pk > thresh) ? (thresh / pk) : 1.0f;
+
+  while (dqHead != dqTail && (uint32_t)(t - dqIdx[dqHead & DQ_MASK]) >= MIN_WIN) {
+    dqHead++;
+  }
+  if (req < 1.0f || dqHead != dqTail) {
+    while (dqHead != dqTail && dqVal[(dqTail - 1u) & DQ_MASK] >= req) {
+      dqTail--;
+    }
+    dqIdx[dqTail & DQ_MASK] = t;
+    dqVal[dqTail & DQ_MASK] = req;
+    dqTail++;
+  }
+  float minG = (dqHead != dqTail) ? dqVal[dqHead & DQ_MASK] : 1.0f;
+
+  if (minG <= relGain) {
+    relGain = minG;
+    slowGain += (minG - slowGain) * SLOW_ATK;
+  } else {
+    slowGain += (1.0f - slowGain) * REL_SLOW;
+    if (slowGain > 0.9998f) slowGain = 1.0f;
+    if (relGain < slowGain) {
+      relGain += (slowGain - relGain) * REL_FAST;
+      if (relGain > slowGain) relGain = slowGain;
+    } else {
+      relGain = slowGain;
+    }
+    if (relGain > 0.9998f) relGain = 1.0f;
+  }
+
+  uint32_t q24 = (relGain >= 1.0f) ? ONE_Q24 : (uint32_t)(relGain * (float)ONE_Q24);
+  if (q24 > ONE_Q24) q24 = ONE_Q24;
+  boxSum = boxSum + q24 - boxBuf[p];
+  boxBuf[p] = q24;
+
+  return (boxSum >= FULL_BOX) ? 1.0f : ((float)boxSum * INV_BOX_Q24);
+}
+
+__attribute__((noinline)) float LookaheadMonitorLimiter::run(float inL, float inR, float &outL, float &outR) {
+  const uint32_t p = pos;
+  float dL = delayL[p];
+  float dR = delayR[p];
+  delayL[p] = inL;
+  delayR[p] = inR;
+
+  float pk = max(fabsf(inL), fabsf(inR));
+  float g = stepGain(pk);
+  if (g < 1.0f) {
+    dL *= g;
+    dR *= g;
+  }
+  outL = (fabsf(dL) <= knee) ? dL : softKneeClip(dL, knee, ceil);
+  outR = (fabsf(dR) <= knee) ? dR : softKneeClip(dR, knee, ceil);
+  return g;
 }
 
 // Asymmetric analog oxide/tube soft saturator: positive and negative halves saturate
@@ -91,6 +193,20 @@ static inline float nextFxRandMinus1To1() {
 static constexpr int CHORUS_BUF_LEN = 768; // ~17.4 ms max delay capacity at 44.1 kHz (max tap is 684 samples)
 static int16_t chorBufL[CHORUS_BUF_LEN];
 static int16_t chorBufR[CHORUS_BUF_LEN];
+
+// Smooth C^1 soft-knee ceiling for Q14 (+/-2.0) delay/allpass buffers:
+// exact linear pass-through up to +/-1.40 (+2.9 dBFS), smoothly asymptotic to +/-1.999.
+__attribute__((noinline)) static float softLimitQ14Slow(float x) {
+  float ax = fabsf(x);
+  constexpr float W = 0.599f;
+  float u = ax - 1.40f;
+  float y = 1.40f + (W * u) / (W + u);
+  return (x >= 0.0f) ? y : -y;
+}
+
+static inline float softLimitQ14(float x) {
+  return (fabsf(x) <= 1.40f) ? x : softLimitQ14Slow(x);
+}
 
 static inline int16_t floatToQ14(float x) {
   float c = constrain(x, -1.9999f, 1.9999f) * 16384.0f;
@@ -200,8 +316,8 @@ static inline void processChorusUnit(ChorusState &u, float &xL, float &xR) {
   float wetL = readChorusTapQ14(u.bufL, CHORUS_BUF_LEN, u.writeIdx, dL);
   float wetR = readChorusTapQ14(u.bufR, CHORUS_BUF_LEN, u.writeIdx, dR);
 
-  u.bufL[u.writeIdx] = floatToQ14(xL);
-  u.bufR[u.writeIdx] = floatToQ14(xR);
+  u.bufL[u.writeIdx] = floatToQ14(softLimitQ14(xL));
+  u.bufR[u.writeIdx] = floatToQ14(softLimitQ14(xR));
   if (--u.writeIdx < 0) u.writeIdx = CHORUS_BUF_LEN - 1;
 
   // Gentle warm smoothing (~10 kHz 1-pole LPF) on wet chorus tap
@@ -292,11 +408,12 @@ static inline float readDelayTapQ14(const int16_t *buf, int bufLen, int writeIdx
 static inline float warmDelaySaturate(float x, float drive, float invDrive, float asym) {
   constexpr float HEADROOM = 1.85f;
   constexpr float INV_HEADROOM = 1.0f / HEADROOM;
-  float u = constrain((x * drive) * INV_HEADROOM, -1.45f, 1.45f);
+  float rawU = (x * drive) * INV_HEADROOM;
+  float u = 1.45f * softTanhRational(rawU * (1.0f / 1.45f));
   float u2 = u * u;
   // Soft cubic tape knee scaled to Q14 (+6 dBFS) headroom with subtle even-harmonic warmth (zero DC at u = 0)
   float shaped = HEADROOM * (u - 0.14814815f * u2 * u + asym * (u2 - 0.15f * u2 * u2)) * invDrive;
-  return constrain(shaped, -1.90f, 1.90f);
+  return softLimitQ14(shaped);
 }
 
 FLASHMEM static void resetDelayUnit(DelayState &u) {
@@ -414,8 +531,8 @@ static inline void processDelayUnit(DelayState &u, float &xL, float &xR) {
   float fbL = fb * (0.86f * tapL + 0.16f * tapR);
   float fbR = fb * (0.82f * tapR + 0.14f * tapL);
 
-  u.bufL[u.writeIdx] = floatToQ14(inL + fbL);
-  u.bufR[u.writeIdx] = floatToQ14(inR + fbR);
+  u.bufL[u.writeIdx] = floatToQ14(softLimitQ14(inL + fbL));
+  u.bufR[u.writeIdx] = floatToQ14(softLimitQ14(inR + fbR));
   if (--u.writeIdx < 0) u.writeIdx = u.bufLen - 1;
 
   const float mix = u.curWetMix;
@@ -504,12 +621,12 @@ static uint8_t masterVerbPct = 0;
 static uint8_t instVerbPct = 0;
 
 // Fixed-delay Schroeder allpass (integer tap -> zero fractional interpolation loss)
-static inline float runFixedApQ14(int16_t *buf, int bufLen, int &writeIdx,
-                                  int delaySamples, float g, float x) {
+__attribute__((noinline)) static float runFixedApQ14(int16_t *buf, int bufLen, int &writeIdx,
+                                                     int delaySamples, float g, float x) {
   int r0 = writeIdx + delaySamples;
   if (r0 >= bufLen) r0 -= bufLen;
   float yDel = (float)buf[r0] * (1.0f / 16384.0f);
-  float vIn = x + g * yDel;
+  float vIn = softLimitQ14(x + g * yDel);
   buf[writeIdx] = floatToQ14(vIn);
   if (--writeIdx < 0) writeIdx = bufLen - 1;
   return yDel - g * vIn;
@@ -522,7 +639,7 @@ static inline float runFixedApTapQ14(int16_t *buf, int bufLen, int &writeIdx,
   if (r0 >= bufLen) r0 -= bufLen;
   float yDel = (float)buf[r0] * (1.0f / 16384.0f);
   outTap = yDel;
-  float vIn = x + g * yDel;
+  float vIn = softLimitQ14(x + g * yDel);
   buf[writeIdx] = floatToQ14(vIn);
   if (--writeIdx < 0) writeIdx = bufLen - 1;
   return yDel - g * vIn;
@@ -539,7 +656,7 @@ static inline float runModApTapQ14(int16_t *buf, int bufLen, int &writeIdx,
   float s1 = (float)buf[r1] * (1.0f / 16384.0f);
   float yDel = s0 + dFrac * (s1 - s0);
   outTap = yDel;
-  float vIn = x + g * yDel;
+  float vIn = softLimitQ14(x + g * yDel);
   buf[writeIdx] = floatToQ14(vIn);
   if (--writeIdx < 0) writeIdx = bufLen - 1;
   return yDel - g * vIn;
@@ -603,7 +720,7 @@ FLASHMEM static void configureReverbUnit(ReverbState &u, uint8_t pct, bool clear
   float shape = 1.0f - (1.0f - v) * (1.0f - v);
   float fb = 0.70f + 0.274f * shape;
   float damp = 0.62f - 0.14f * v;
-  float inG = 1.60f - 0.50f * shape;
+  float inG = 0.80f - 0.25f * shape; // -6 dB diffuser/tank headroom (restored by 2.50x wetG)
   float modDepth = 0.50f + 0.25f * v;
   float modExc = ((float)SAMPLE_RATE_HZ / 500.0f) * modDepth;
   float mix = 0.14f + 0.72f * fastExp2f(0.75f * fastLog2f(v));
@@ -643,7 +760,7 @@ static inline void processReverbUnit(ReverbState &u, float &xL, float &xR) {
   const float inG = u.inGain;
   const float vMix = u.curMix;
   const float dryG = 1.0f - 0.18f * vMix;
-  const float wetG = 1.25f * vMix;
+  const float wetG = 2.50f * vMix;
 
   // 1. 3-stage short input diffuser per channel (partitions ap1L[1804] & ap1R[1996])
   // Immediately smears even ultra-short (<5 ms) plucks into a dense reflection cloud
@@ -1367,11 +1484,11 @@ float processInstDriveSample(int instIdx, uint8_t drivePct, float x) {
   return (1.0f - mix) * x + mix * st.postLp2;
 }
 
-void setInstFxParams(uint8_t chorusPct, uint8_t delayPct, uint8_t delayFbPct, uint8_t reverbPct) {
-  instChorPct = (uint8_t)constrain((int)chorusPct, 0, 100);
-  instDlyPct  = (uint8_t)constrain((int)delayPct, 0, 100);
-  instDfbPct  = (uint8_t)constrain((int)delayFbPct, 0, 100);
-  instVerbPct = (uint8_t)constrain((int)reverbPct, 0, 100);
+FLASHMEM __attribute__((noinline)) static void applyInstFxParamsSlow(uint8_t chorusPct, uint8_t delayPct, uint8_t delayFbPct, uint8_t reverbPct) {
+  instChorPct = chorusPct;
+  instDlyPct  = delayPct;
+  instDfbPct  = delayFbPct;
+  instVerbPct = reverbPct;
 
   uint8_t effChor = max(masterChorPct, instChorPct);
   uint8_t effDfb  = max(masterDfbPct, instDfbPct);
@@ -1390,6 +1507,17 @@ void setInstFxParams(uint8_t chorusPct, uint8_t delayPct, uint8_t delayFbPct, ui
   if (effVerb != verb.curPct) {
     configureReverbUnit(verb, effVerb);
   }
+}
+
+void setInstFxParams(uint8_t chorusPct, uint8_t delayPct, uint8_t delayFbPct, uint8_t reverbPct) {
+  uint8_t c = (chorusPct > 100u) ? 100u : chorusPct;
+  uint8_t d = (delayPct > 100u) ? 100u : delayPct;
+  uint8_t f = (delayFbPct > 100u) ? 100u : delayFbPct;
+  uint8_t r = (reverbPct > 100u) ? 100u : reverbPct;
+  if (c == instChorPct && d == instDlyPct && f == instDfbPct && r == instVerbPct) {
+    return;
+  }
+  applyInstFxParamsSlow(c, d, f, r);
 }
 
 bool isInstFxChainEnabled() {

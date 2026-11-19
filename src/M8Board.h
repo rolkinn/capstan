@@ -108,6 +108,14 @@ public:
   // current, pausing charging if an anomaly is detected and retrying after 5 minutes (up to 3 strikes).
   void chargeGuard();
 
+  // Runtime USB battery-charging control (supported on Variant B and Model:02 with BQ2589x @ 0x6A).
+  // When disabled while powered on, battery charging is turned off (CHG_CONFIG=0) and input limit
+  // is lowered to 100 mA so battery supplements system load; powerOff() restores normal charging.
+  bool supportsUsbChargeControl() const { return _variant == VARIANT_B; }
+  bool usbChargeWhileOn() const { return _usbChargeWhileOn; }
+  void setUsbChargeWhileOn(bool enable);
+  bool usbVbusPresent();
+
   // Initializes the TRS MIDI Out UART at 31,250 baud and returns the serial instance.
   // On Variant B / Model:02, restores pin 15 as INPUT_PULLUP for the key expander INT line.
   HardwareSerial *midiOutBegin();
@@ -149,6 +157,8 @@ private:
   uint32_t _cgCheckedMs = 0, _cgPausedMs = 0;   // charge guard timers
   uint8_t _cgStrikes = 0;
   bool _cgPaused = false, _cgLatched = false;
+  uint8_t _bqDefaultReg00 = 0x48;
+  bool _usbChargeWhileOn = true;
 };
 
 } // namespace m8

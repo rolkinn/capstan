@@ -107,6 +107,7 @@ FLASHMEM static void mainDrawPage(bool full) {
   }
 
   // 2. Table Header: SAVED SONGS
+  keepStreaming();
   {
     uint64_t sk = (uint64_t)(!inSessionRow ? 2 : 1);
     if (full || sk != prevMainSectionKey) {
@@ -134,6 +135,7 @@ FLASHMEM static void mainDrawPage(bool full) {
         s.drawBox(BG, DARK);
         s.blit(SX(6), y);
       }
+      keepStreaming();
       continue;
     }
 
@@ -161,6 +163,7 @@ FLASHMEM static void mainDrawPage(bool full) {
         s.drawPill(newX, pillY, newW, pillH, "NEW", newFg, newBg, newBd);
         s.blit(SX(6), y);
       }
+      keepStreaming();
       continue;
     }
 
@@ -229,6 +232,7 @@ FLASHMEM static void mainDrawPage(bool full) {
 
       s.blit(SX(6), y);
     }
+    keepStreaming();
   }
 
   // 4. Scrollbar Indicator

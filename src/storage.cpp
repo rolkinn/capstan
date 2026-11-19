@@ -3,14 +3,18 @@
 #include "midi_map.h"
 #include "instruments.h"
 #include "inst_sampler.h"
+#include "inst_sf2.h"
 #include "app.h"
 #include "ui.h"
 #include "pages.h"
+#include "page_song_settings.h"
 #include "page_instrument_edit.h"
 #include "input.h"
 #include "usb_drive.h"
 #include "track_edit.h"
+#include "tuner.h"
 #include <Arduino.h>
+#include <stddef.h>
 #include <string.h>
 #include <strings.h>
 #include <ctype.h>
@@ -293,15 +297,18 @@ struct DiskSystemV4 {
   uint16_t version; // 4
   LegacySystemSettingsV4 ss;
   char lastSongName[MAX_SONG_NAME_LEN + 1];
-  MidiCcMapEntry globalMidiMap[MIDI_TARGET_COUNT];
+  MidiCcMapEntry globalMidiMap[LEGACY_MIDI_TARGET_COUNT_V5];
 };
 
 struct DiskSystem {
   char magic[4]; // "M8SY"
   uint16_t version; // 5
-  SystemSettings ss;
+  LegacySystemSettingsV4 ss;
+  uint8_t reservedHpGain; // Preserves SYSTEM.DAT v5 layout offset before lastSongName & globalMidiMap
   char lastSongName[MAX_SONG_NAME_LEN + 1];
-  MidiCcMapEntry globalMidiMap[MIDI_TARGET_COUNT];
+  MidiCcMapEntry globalMidiMap[LEGACY_MIDI_TARGET_COUNT_V5];
+  uint8_t usbChargeOffEnc; // 0 = USB CHARGE WHILE ON enabled (default), 1 = disabled
+  MidiCcMapEntry globalMidiMapExt[MIDI_TARGET_COUNT - LEGACY_MIDI_TARGET_COUNT_V5];
 };
 
 struct DiskAudioTrack {
@@ -324,11 +331,13 @@ struct DiskSong {
   uint32_t tapeFrame;
   uint8_t selectedAudioTrack;
   uint8_t selectedMidiTrack;
-  uint8_t reserved[2];
+  uint16_t tunerRefTenthsEnc; // 0 = DEFAULT_TUNER_REF_TENTHS (440.0 Hz), else 4000..4800
   DiskAudioTrack audio[NUM_AUDIO_TRACKS];
 };
 
 static_assert(sizeof(SongSettings) == 40, "SongSettings must remain 40 bytes for SONG.DAT v2 layout");
+static_assert(offsetof(DiskSystem, lastSongName) == 9, "DiskSystem v5 lastSongName offset must remain 9");
+static_assert(offsetof(DiskSystem, usbChargeOffEnc) == 200, "DiskSystem v5 usbChargeOffEnc offset must remain 200");
 static_assert(sizeof(DiskSystem) <= 512, "DiskSystem must fit in one 512-byte sector");
 static_assert(sizeof(DiskSong) <= sizeof(chunk), "DiskSong must fit in RAM1 chunk buffer");
 
@@ -343,16 +352,24 @@ FLASHMEM bool saveSystemSettings() {
   if (!SD.sdfs.exists(INST_PRESETS_DIR)) {
     SD.sdfs.mkdir(INST_PRESETS_DIR);
   }
+  if (!SD.sdfs.exists(SOUNDFONTS_DIR)) {
+    SD.sdfs.mkdir(SOUNDFONTS_DIR);
+  }
   char path[32];
   snprintf(path, sizeof(path), "%s/SYSTEM.DAT", ROOT_DIR);
   FsFile f = SD.sdfs.open(path, O_RDWR | O_CREAT | O_TRUNC);
   if (!f.isOpen()) return false;
+  const SystemSettings &ss = systemSettings();
   DiskSystem ds{};
   memcpy(ds.magic, "M8SY", 4);
   ds.version = 5;
-  ds.ss = systemSettings();
+  ds.ss.brightness = ss.brightness;
+  ds.ss.metroVolume = ss.metroVolume;
   snprintf(ds.lastSongName, sizeof(ds.lastSongName), "%s", lastActiveSongName);
-  memcpy(ds.globalMidiMap, midiMapGlobalTable(), sizeof(ds.globalMidiMap));
+  const MidiCcMapEntry *gSrc = midiMapGlobalTable();
+  memcpy(ds.globalMidiMap, gSrc, sizeof(ds.globalMidiMap));
+  ds.usbChargeOffEnc = ss.usbChargeWhileOn ? 0 : 1;
+  memcpy(ds.globalMidiMapExt, gSrc + LEGACY_MIDI_TARGET_COUNT_V5, sizeof(ds.globalMidiMapExt));
   memset(chunk, 0, 512);
   memcpy(chunk, &ds, sizeof(ds));
   bool ok = (f.write(chunk, sizeof(ds)) == (int)sizeof(ds));
@@ -380,24 +397,24 @@ FLASHMEM static bool loadSystemSettingsFromDisk() {
   if (memcmp(magic, "M8SY", 4) != 0) return false;
 
   SystemSettings &ss = systemSettings();
-  constexpr int MIN_V5_SIZE = 4 + 2 + (int)sizeof(SystemSettings);
+  constexpr int MIN_V5_SIZE = 4 + 2 + (int)sizeof(LegacySystemSettingsV4) + 1;
   if (ver == 5 && rd >= MIN_V5_SIZE) {
     DiskSystem ds{};
     memcpy(&ds, chunk, min((size_t)rd, sizeof(DiskSystem)));
-    ds.ss.brightness = (uint8_t)constrain((int)ds.ss.brightness, (int)MIN_BRIGHTNESS, (int)MAX_BRIGHTNESS);
-    ds.ss.metroVolume = (uint8_t)constrain((int)ds.ss.metroVolume, 0, (int)VOLUME_MAX);
-    if ((uint8_t)ds.ss.headphoneGain > (uint8_t)HeadphoneGain::High) {
-      ds.ss.headphoneGain = DEFAULT_HEADPHONE_GAIN;
-    }
-    ss = ds.ss;
+    ss.brightness = (uint8_t)constrain((int)ds.ss.brightness, (int)MIN_BRIGHTNESS, (int)MAX_BRIGHTNESS);
+    ss.metroVolume = (uint8_t)constrain((int)ds.ss.metroVolume, 0, (int)VOLUME_MAX);
+    ss.usbChargeWhileOn = board.supportsUsbChargeControl() ? (ds.usbChargeOffEnc == 0) : true;
     ds.lastSongName[MAX_SONG_NAME_LEN] = '\0';
     sanitizeSongName(ds.lastSongName, lastActiveSongName, sizeof(lastActiveSongName));
     MidiCcMapEntry *gMap = midiMapGlobalTableMut();
     for (int i = 0; i < MIDI_TARGET_COUNT; i++) {
-      uint8_t ch = ds.globalMidiMap[i].channel;
+      const MidiCcMapEntry &src = (i < LEGACY_MIDI_TARGET_COUNT_V5)
+                                      ? ds.globalMidiMap[i]
+                                      : ds.globalMidiMapExt[i - LEGACY_MIDI_TARGET_COUNT_V5];
+      uint8_t ch = src.channel;
       if (ch > MIDI_MAP_CH_ALL) ch = MIDI_MAP_CH_OFF;
       gMap[i].channel = ch;
-      gMap[i].cc = ds.globalMidiMap[i].cc & 0x7F;
+      gMap[i].cc = src.cc & 0x7F;
     }
     midiMapRebuildMask();
     applySystemSettings();
@@ -409,15 +426,20 @@ FLASHMEM static bool loadSystemSettingsFromDisk() {
     memcpy(&ds4, chunk, min((size_t)rd, sizeof(DiskSystemV4)));
     ss.brightness = (uint8_t)constrain((int)ds4.ss.brightness, (int)MIN_BRIGHTNESS, (int)MAX_BRIGHTNESS);
     ss.metroVolume = (uint8_t)constrain((int)ds4.ss.metroVolume, 0, (int)VOLUME_MAX);
-    ss.headphoneGain = DEFAULT_HEADPHONE_GAIN;
+    ss.usbChargeWhileOn = true;
     ds4.lastSongName[MAX_SONG_NAME_LEN] = '\0';
     sanitizeSongName(ds4.lastSongName, lastActiveSongName, sizeof(lastActiveSongName));
     MidiCcMapEntry *gMap = midiMapGlobalTableMut();
     for (int i = 0; i < MIDI_TARGET_COUNT; i++) {
-      uint8_t ch = ds4.globalMidiMap[i].channel;
-      if (ch > MIDI_MAP_CH_ALL) ch = MIDI_MAP_CH_OFF;
-      gMap[i].channel = ch;
-      gMap[i].cc = ds4.globalMidiMap[i].cc & 0x7F;
+      if (i < LEGACY_MIDI_TARGET_COUNT_V5) {
+        uint8_t ch = ds4.globalMidiMap[i].channel;
+        if (ch > MIDI_MAP_CH_ALL) ch = MIDI_MAP_CH_OFF;
+        gMap[i].channel = ch;
+        gMap[i].cc = ds4.globalMidiMap[i].cc & 0x7F;
+      } else {
+        gMap[i].channel = MIDI_MAP_CH_OFF;
+        gMap[i].cc = 0;
+      }
     }
     midiMapRebuildMask();
     applySystemSettings();
@@ -430,7 +452,7 @@ FLASHMEM static bool loadSystemSettingsFromDisk() {
                         : (uint8_t)constrain(((int)oldBright * 100 + 127) / 255,
                                              (int)MIN_BRIGHTNESS, (int)MAX_BRIGHTNESS);
     ss.metroVolume = DEFAULT_METRO_VOLUME;
-    ss.headphoneGain = DEFAULT_HEADPHONE_GAIN;
+    ss.usbChargeWhileOn = true;
     applySystemSettings();
     return true;
   }
@@ -852,9 +874,9 @@ FLASHMEM static void resetSongToDefaults() {
   ps.masterReverb = 0;
   ps.masterTape = 0;
   ps.masterComp = 0;
-  ps.masterVolume = MASTER_VOLUME_DEFAULT;
-  ps.masterVolHpEnc = (uint8_t)(MASTER_VOLUME_DEFAULT + 1);
-  ps.masterVolSpkEnc = (uint8_t)(MASTER_VOLUME_DEFAULT + 1);
+  ps.masterVolHpEnc = (uint8_t)(MASTER_VOLUME_HP_DEFAULT + 1);
+  ps.masterVolSpkEnc = (uint8_t)(MASTER_VOLUME_SPK_DEFAULT + 1);
+  ps.masterVolume = ::appDefaultMasterVolume();
   ps.audioInputSource = AudioInputSource::All;
   ps.inputMonitor = true;
   ps.usbInputMonitor = true;
@@ -898,6 +920,8 @@ FLASHMEM static void resetSongToDefaults() {
   midiSeqClearAll();
   fmSynthResetAll();
   trackEditReset();
+  closeSongTuner();
+  setTunerRefTenths(DEFAULT_TUNER_REF_TENTHS);
   audioRow = 0;
   audioScroll = 0;
   audioCell = AUD_CELL_WAVE;
@@ -1127,6 +1151,7 @@ FLASHMEM bool saveSongAs(const char *newName) {
     }
 
     samplerRemapSongFolder(activeSongName, targetName);
+    sf2RemapSongFolder(activeSongName, targetName);
     snprintf(activeSongName, sizeof(activeSongName), "%s", targetName);
   }
 
@@ -1177,6 +1202,7 @@ FLASHMEM bool saveSongAs(const char *newName) {
   dp.tapeFrame = transport.tapeFrame;
   dp.selectedAudioTrack = (uint8_t)constrain(audioRow, 0, PAGE_ROWS - 1);
   dp.selectedMidiTrack = (uint8_t)constrain(midiRow, 0, PAGE_ROWS - 1);
+  dp.tunerRefTenthsEnc = tunerRefTenths();
   for (int t = 0; t < NUM_AUDIO_TRACKS; t++) {
     const Track &tr = tracks[t];
     dp.audio[t].volume = tr.volume;
@@ -1280,6 +1306,7 @@ FLASHMEM bool loadSongByName(const char *name) {
     const DiskSong &dp = *dpPtr;
     loadedV2 = true;
     ps = dp.ps;
+    setTunerRefTenths(dp.tunerRefTenthsEnc);
     restoredTapeFrame = min(dp.tapeFrame, MAX_REC_FRAMES);
     audioRow = constrain((int)dp.selectedAudioTrack, 0, PAGE_ROWS - 1);
     midiRow = constrain((int)dp.selectedMidiTrack, 0, PAGE_ROWS - 1);
@@ -2710,7 +2737,19 @@ FLASHMEM void storageStopTransport() {
 static bool inKeepStreaming = false;
 static bool smpRecOpen = false;
 
-FLASHMEM void keepStreaming() {
+FLASHMEM void storageKeepTracksStreaming() {
+  if (transport.mode == TransportMode::Running) {
+    int chunks = (abs((int)transport.speedQuarter) > DEFAULT_SPEED_QUARTER) ? 2 : 1;
+    for (int t = 0; t < NUM_AUDIO_TRACKS; t++) {
+      if (tracks[t].live) fillTrackRing(t, chunks);
+    }
+  }
+  if (!smpRecOpen) {
+    samplerServiceActiveStreams();
+  }
+}
+
+FLASHMEM void keepStreaming(bool topUp) {
   if (inKeepStreaming) return;
   inKeepStreaming = true;
   midiSeqFastService();
@@ -2721,7 +2760,9 @@ FLASHMEM void keepStreaming() {
     }
   }
   if (!smpRecOpen) {
-    samplerServiceActiveStreams();
+    samplerServiceActiveStreams(topUp);
+    sf2ServiceStreams(true);
+    samplerServiceActiveStreams(topUp);
   }
   inKeepStreaming = false;
 }
@@ -2879,6 +2920,7 @@ FLASHMEM bool storageStartSamplerKeyRecord(int instIdx, int keyIdx, SamplerRecMo
   }
   fmSynthAllNotesOff();
   samplerStopAllStreams();
+  sf2StopAllStreams();
 
   const char *songName = (activeSongName[0] != '\0') ? activeSongName : "SONG_001";
   ensureSongsRootDir();
@@ -3035,6 +3077,8 @@ FLASHMEM void serviceStorage() {
   }
 
   // 2. Top up all playing audio track and sampler ring buffers
+  samplerServiceActiveStreams();
+  sf2ServiceStreams();
   samplerServiceStreams();
   if (transport.mode == TransportMode::Running) {
     int chunks = (abs((int)transport.speedQuarter) > DEFAULT_SPEED_QUARTER) ? 2 : 1;
@@ -3354,6 +3398,7 @@ FLASHMEM void flushHeaders() {
   storageStopTransport();
   trackEditReset();
   samplerStopAllStreams();
+  sf2StopAllStreams();
   lastSessionWasSaved = songSaved;
   discardUnsavedSessionChanges(nullptr);
   saveSystemSettings();
@@ -3368,6 +3413,9 @@ FLASHMEM bool storageBegin(void (*progress)(const char *)) {
   ensureSongsRootDir();
   if (!SD.sdfs.exists(INST_PRESETS_DIR)) {
     SD.sdfs.mkdir(INST_PRESETS_DIR);
+  }
+  if (!SD.sdfs.exists(SOUNDFONTS_DIR)) {
+    SD.sdfs.mkdir(SOUNDFONTS_DIR);
   }
   midiSeqInit();
   midiMapInit();

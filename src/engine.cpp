@@ -3,6 +3,7 @@
 #include "instruments.h"
 #include "app.h"
 #include "midi_in.h"
+#include "tuner.h"
 #include <math.h>
 
 namespace looper {
@@ -29,7 +30,7 @@ volatile bool samplerRecActive = false;
 volatile float inputMeterL = 0.0f, inputMeterR = 0.0f;
 volatile float outputMeterL = 0.0f, outputMeterR = 0.0f;
 
-bool (*usbAudioRead)(uint32_t *frames) = nullptr;
+int (*usbAudioRead)(uint32_t *frames) = nullptr;
 int16_t *(*usbAudioWrite)() = nullptr;
 void (*usbAudioWritten)() = nullptr;
 
@@ -75,7 +76,7 @@ uint32_t midiTicksToFrames(uint32_t ticks, float bpm) {
 }
 
 // ---- Track Volume and Panning (Balance)
-static float trackVolumeGain(int volStep) {
+FLASHMEM static float trackVolumeGain(int volStep) {
   if (volStep <= 0) return 0.0f;
   float db = (volStep - VOLUME_UNITY) * VOLUME_STEP_DB;
   return powf(10.0f, db / 20.0f);
@@ -147,67 +148,66 @@ FLASHMEM void takeOutputPeaks(float &left, float &right) {
   interrupts();
 }
 
-// ---- Master Volume, Hybrid Analog Headphone Gain & Metronome Volume
+// ---- Master Volume, Analog-First Headphone PGA (Option A) & Metronome Volume
+// SGTL5000 volumeInteger step n in 0..128:
+//   n = 0   -> CHIP_ANA_HP_CTRL = 0x7F7F + hardware MUTE_HP
+//   n >= 1  -> reg = 128 - n, analog dB = (n - 104) * 0.5 dB
+//              (n = 1 -> -51.5 dB [0x7F], n = 65 -> -19.5 dB [0x3F], n = 104 -> 0.0 dB [0x18], n = 116 -> +6.0 dB [0x0C])
+static constexpr int SGTL_HP_UNITY_VOL_INT = 104; // 0.0 dB analog unity (reg 0x18)
+static constexpr int SGTL_HP_MAX_VOL_INT   = 116; // +6.0 dB clean analog PGA ceiling (reg 0x0C)
 static int masterStep = MASTER_VOLUME_DEFAULT;
-static HeadphoneGain hpGainMode = DEFAULT_HEADPHONE_GAIN;
 static bool hpConnectedState = false;
-static int targetHpStep = 84; // SGTL5000 integer HP step: 65=-19.5dB, 84=-10.0dB, 104=0.0dB clean analog ceiling
+static int targetHpStep = 0;
 static volatile float outputGain = 0.0f;
+static volatile float outputMeterScale = 1.0f;
 static volatile float lineInDigitalTrim = 1.0f;
 static volatile float metroGain = 1.0f;
 
-FLASHMEM static int baseHpStepForMode(HeadphoneGain mode) {
-  switch (mode) {
-    case HeadphoneGain::Low:    return 65;  // -19.5 dB (sensitive IEMs)
-    case HeadphoneGain::High:   return 104; //   0.0 dB (high-impedance studio headphones)
-    case HeadphoneGain::Normal:
-    default:                    return 84;  // -10.0 dB (+13 dB over legacy 0.45f)
-  }
-}
-
 FLASHMEM static void recomputeHybridMasterGain() {
-  const int baseK = baseHpStepForMode(hpGainMode);
-  int hpK = baseK;
+  int hpVolInt = 0;
   float g = 0.0f;
+  float mScale = 1.0f;
 
-  if (masterStep > 0) {
-    if (masterStep <= MASTER_VOLUME_UNITY) {
-      g = (masterStep == MASTER_VOLUME_UNITY)
-              ? 1.0f
-              : powf(10.0f, masterStepDb(masterStep) / 20.0f);
+  if (hpConnectedState) {
+    if (masterStep > 0) {
+      // Option A Headphone Curve:
+      //   VOL 1..80  = -51.5..0.0 dB pure SGTL5000 analog PGA (+ fine <= 0 dB sub-step digital trim)
+      //   VOL 81..88 = +0.7..+5.6 dB pure SGTL5000 analog PGA (+ fine <= 0 dB sub-step digital trim)
+      //   VOL 89..100 = +6.0 dB clean analog PGA ceiling + up to +8.0 dB limiter-guarded digital makeup (+14.0 dB total)
+      const float totalDb = masterHeadphoneStepDb(masterStep);
+      const int halfDbFromUnity = (int)ceilf(totalDb * 2.0f - 1e-5f);
+      hpVolInt = constrain(SGTL_HP_UNITY_VOL_INT + halfDbFromUnity, 1, SGTL_HP_MAX_VOL_INT);
+      const float anaDb = 0.5f * (float)(hpVolInt - SGTL_HP_UNITY_VOL_INT);
+      const float remDb = totalDb - anaDb;
+      g = (fabsf(remDb) <= 0.0005f) ? 1.0f : powf(10.0f, remDb / 20.0f);
+      mScale = (anaDb == 0.0f) ? 1.0f : powf(10.0f, anaDb / 20.0f);
     } else {
-      const float boostDb = masterStepDb(masterStep);
-      if (hpConnectedState) {
-        const int availHalfDb = max(0, 104 - baseK);
-        const int wantHalfDb = max(0, (int)(boostDb * 2.0f + 0.5f));
-        const int usedHalfDb = min(availHalfDb, wantHalfDb);
-        hpK = baseK + usedHalfDb;
-        const float remDb = max(0.0f, boostDb - 0.5f * (float)usedHalfDb);
-        g = (remDb <= 0.001f) ? 1.0f : powf(10.0f, remDb / 20.0f);
+      mScale = 0.0f;
+    }
+  } else {
+    // Speaker unplugged mode: keep headphone amp muted (hpVolInt = 0) and apply digital speaker taper
+    if (masterStep > 0) {
+      if (masterStep <= MASTER_VOLUME_UNITY) {
+        g = (masterStep == MASTER_VOLUME_UNITY)
+                ? 1.0f
+                : powf(10.0f, masterStepDb(masterStep) / 20.0f);
       } else {
         g = (masterStep >= MASTER_VOLUME_MAX)
                 ? MASTER_TOP_GAIN
-                : powf(10.0f, boostDb / 20.0f);
+                : powf(10.0f, masterStepDb(masterStep) / 20.0f);
       }
     }
   }
 
   uint32_t irq = saveIrq();
-  targetHpStep = hpK;
+  targetHpStep = hpVolInt;
   outputGain = g;
+  outputMeterScale = mScale;
   restoreIrq(irq);
 }
 
 FLASHMEM void setMasterVolume(int step) {
   masterStep = constrain(step, 0, MASTER_VOLUME_MAX);
-  recomputeHybridMasterGain();
-}
-
-FLASHMEM void setHeadphoneGainMode(HeadphoneGain mode) {
-  if ((uint8_t)mode > (uint8_t)HeadphoneGain::High) {
-    mode = DEFAULT_HEADPHONE_GAIN;
-  }
-  hpGainMode = mode;
   recomputeHybridMasterGain();
 }
 
@@ -252,7 +252,7 @@ static constexpr float CLICK_DECAY_HI = __builtin_expf(-1.0f / (0.004f * AUDIO_S
 static float clickAmp = 0.0f, clickAmpHi = 0.0f;
 static uint32_t clickPhase32 = 0, clickPhaseHi32 = 0, clickStep32 = 0, clickStepHi32 = 0;
 
-static void startClick(bool bar) {
+FLASHMEM static void startClick(bool bar) {
   float hz = bar ? CLICK_BAR_HZ : CLICK_BEAT_HZ;
   constexpr float phaseScale = 4294967296.0f / AUDIO_SAMPLE_RATE_EXACT;
   clickStep32 = (uint32_t)(hz * phaseScale + 0.5f);
@@ -437,6 +437,16 @@ FLASHMEM void midiOutAttachUsb() {
   restoreIrq(irq);
 }
 
+bool midiOutHasUsbPending(uint32_t now) {
+  if (usbPktTail != usbPktHead) return true;
+  if (usbTickTail == usbTickHead) return false;
+  uint32_t irq = saveIrq();
+  const bool due = (usbTickTail != usbTickHead) &&
+                   ((int32_t)(now - usbTickDue[usbTickTail % TICK_QUEUE]) >= 0);
+  restoreIrq(irq);
+  return due;
+}
+
 int midiOutTakeUsbPackets(MidiPacket *out, int max) {
   int n = 0;
   uint32_t irq = saveIrq();
@@ -468,148 +478,19 @@ int midiOutTakeUsbTicks(uint32_t now, int max) {
 static constexpr float GLIDE = 1.0f - __builtin_expf(-1000.0f / (GAIN_GLIDE_MS * AUDIO_SAMPLE_RATE_EXACT));
 static constexpr float MASTER_GLIDE = 1.0f - __builtin_expf(-1000.0f / (MASTER_GLIDE_MS * AUDIO_SAMPLE_RATE_EXACT));
 
-// Rational C1-continuous soft-knee safety ceiling (exact unity below `knee`, asymptotic to `ceiling`)
-__attribute__((noinline)) static float softKneeClip(float x, float knee, float ceiling) {
-  float ax = fabsf(x);
-  if (ax <= knee) return x;
-  float w = ceiling - knee;
-  float u = ax - knee;
-  float y = knee + (w * u) / (w + u);
-  return (x >= 0.0f) ? y : -y;
+static inline int16_t softClipToInt16(int32_t x) {
+  if (x >= -30000 && x <= 30000) return (int16_t)x;
+  float y = softKneeClip((float)x, 30000.0f, 32766.0f);
+  return (int16_t)((y >= 0.0f) ? (y + 0.5f) : (y - 0.5f));
 }
 
-// Zero-latency dual-release + soft-knee limiter for `postFxL/R` (USB Master Out, PST Resample, Master Export)
-struct PostFxLimiter {
-  float envGain = 1.0f;
-  float slowGain = 1.0f;
-
-  __attribute__((noinline)) void run(float &l, float &r) {
-    constexpr float THRESH   = 30000.0f;
-    constexpr float KNEE     = 30400.0f;
-    constexpr float CEIL     = LIMIT_CEILING; // Fixed 32000.0f (-0.21 dBFS), independent of Master Volume
-    constexpr float ATK      = 0.063f;        // ~0.35 ms smooth fast attack
-    constexpr float REL_FAST = 0.00103f;      // ~22 ms transient recovery
-    constexpr float REL_SLOW = 0.000151f;     // ~150 ms sustain recovery
-    constexpr float SLOW_ATK = 0.00057f;      // ~40 ms sustain detector
-
-    float pk = max(fabsf(l), fabsf(r));
-    float target = (pk > THRESH) ? (THRESH / pk) : 1.0f;
-    if (target < envGain) {
-      envGain += (target - envGain) * ATK;
-      slowGain += (target - slowGain) * SLOW_ATK;
-    } else {
-      slowGain += (1.0f - slowGain) * REL_SLOW;
-      if (slowGain > 0.9998f) slowGain = 1.0f;
-      if (envGain < slowGain) {
-        envGain += (slowGain - envGain) * REL_FAST;
-        if (envGain > slowGain) envGain = slowGain;
-      } else {
-        envGain = slowGain;
-      }
-      if (envGain > 0.9998f) envGain = 1.0f;
-    }
-    if (envGain < 1.0f) {
-      l *= envGain;
-      r *= envGain;
-    }
-    l = softKneeClip(l, KNEE, CEIL);
-    r = softKneeClip(r, KNEE, CEIL);
-  }
-};
-
-// 32-sample (0.73 ms) zero-overshoot lookahead + dual-release + soft-knee limiter for Hardware Monitor Out
-struct LookaheadMonitorLimiter {
-  static constexpr uint32_t LOOKAHEAD = 32;            // 0.725 ms at 44.1 kHz
-  static constexpr uint32_t MIN_WIN   = LOOKAHEAD + 1; // 33 samples -> zero overshoot at tap 32
-  static constexpr uint32_t DQ_MASK   = 63;            // power-of-2 monotonic deque capacity
-  static constexpr uint32_t ONE_Q24   = 1u << 24;
-  static constexpr uint32_t FULL_BOX  = LOOKAHEAD * ONE_Q24; // 0x20000000u (fits in uint32_t)
-  static constexpr float INV_BOX_Q24  = 1.0f / (float)FULL_BOX;
-
-  float delayL[LOOKAHEAD] = {};
-  float delayR[LOOKAHEAD] = {};
-  uint32_t boxBuf[LOOKAHEAD] = {
-    ONE_Q24, ONE_Q24, ONE_Q24, ONE_Q24, ONE_Q24, ONE_Q24, ONE_Q24, ONE_Q24,
-    ONE_Q24, ONE_Q24, ONE_Q24, ONE_Q24, ONE_Q24, ONE_Q24, ONE_Q24, ONE_Q24,
-    ONE_Q24, ONE_Q24, ONE_Q24, ONE_Q24, ONE_Q24, ONE_Q24, ONE_Q24, ONE_Q24,
-    ONE_Q24, ONE_Q24, ONE_Q24, ONE_Q24, ONE_Q24, ONE_Q24, ONE_Q24, ONE_Q24
-  };
-  uint32_t boxSum = FULL_BOX;
-  uint32_t dqIdx[DQ_MASK + 1] = {};
-  float dqVal[DQ_MASK + 1] = {};
-  uint32_t dqHead = 0;
-  uint32_t dqTail = 0;
-  uint32_t sampleTick = 0;
-  uint32_t pos = 0;
-  float relGain = 1.0f;
-  float slowGain = 1.0f;
-
-  __attribute__((noinline)) float run(float inL, float inR, float &outL, float &outR) {
-    constexpr float THRESH   = 30500.0f;
-    constexpr float KNEE     = 29500.0f;
-    constexpr float CEIL     = 32766.0f;
-    constexpr float REL_FAST = 0.00103f;  // ~22 ms transient recovery
-    constexpr float REL_SLOW = 0.000162f; // ~140 ms sustain recovery
-    constexpr float SLOW_ATK = 0.00057f;  // ~40 ms sustain detector
-
-    const uint32_t t = sampleTick++;
-    const uint32_t p = pos;
-    pos = (p + 1u) & (LOOKAHEAD - 1u);
-
-    float dL = delayL[p];
-    float dR = delayR[p];
-    delayL[p] = inL;
-    delayR[p] = inR;
-
-    float pk = max(fabsf(inL), fabsf(inR));
-    float req = (pk > THRESH) ? (THRESH / pk) : 1.0f;
-
-    while (dqHead != dqTail && (uint32_t)(t - dqIdx[dqHead & DQ_MASK]) >= MIN_WIN) {
-      dqHead++;
-    }
-    if (req < 1.0f || dqHead != dqTail) {
-      while (dqHead != dqTail && dqVal[(dqTail - 1u) & DQ_MASK] >= req) {
-        dqTail--;
-      }
-      dqIdx[dqTail & DQ_MASK] = t;
-      dqVal[dqTail & DQ_MASK] = req;
-      dqTail++;
-    }
-    float minG = (dqHead != dqTail) ? dqVal[dqHead & DQ_MASK] : 1.0f;
-
-    if (minG <= relGain) {
-      relGain = minG;
-      slowGain += (minG - slowGain) * SLOW_ATK;
-    } else {
-      slowGain += (1.0f - slowGain) * REL_SLOW;
-      if (slowGain > 0.9998f) slowGain = 1.0f;
-      if (relGain < slowGain) {
-        relGain += (slowGain - relGain) * REL_FAST;
-        if (relGain > slowGain) relGain = slowGain;
-      } else {
-        relGain = slowGain;
-      }
-      if (relGain > 0.9998f) relGain = 1.0f;
-    }
-
-    uint32_t q24 = (relGain >= 1.0f) ? ONE_Q24 : (uint32_t)(relGain * (float)ONE_Q24);
-    if (q24 > ONE_Q24) q24 = ONE_Q24;
-    boxSum = boxSum + q24 - boxBuf[p];
-    boxBuf[p] = q24;
-
-    float g = (boxSum >= FULL_BOX)
-                  ? 1.0f
-                  : ((float)boxSum * INV_BOX_Q24);
-    dL *= g;
-    dR *= g;
-    outL = softKneeClip(dL, KNEE, CEIL);
-    outR = softKneeClip(dR, KNEE, CEIL);
-    return g;
-  }
-};
-
-static PostFxLimiter postFxLimiter;
-static LookaheadMonitorLimiter monLimiter;
+// 32-sample (0.73 ms) zero-overshoot lookahead linear limiters:
+//   - postFxLimiter: guards fixed-level 16-bit outputs (USB Out, PST Resample, Master WAV Export)
+//                    with KNEE (30,800) > THRESH (29,000) so steady-state chords are never waveshaped
+//   - monLimiter:    guards post-Master-Volume Headphones / Speaker I2S DAC output
+using PostFxLimiter = LookaheadMonitorLimiter;
+static PostFxLimiter postFxLimiter(29000.0f, 30800.0f, LIMIT_CEILING);
+static LookaheadMonitorLimiter monLimiter(30500.0f, 31600.0f, 32766.0f);
 
 void LooperEngine::onBeat() {
   int32_t beat = transport.beat;
@@ -635,7 +516,7 @@ void LooperEngine::update() {
   }
 
   static uint32_t usbFrames[AUDIO_BLOCK_SAMPLES];
-  const bool usbIn = usbAudioRead && usbAudioRead(usbFrames);
+  const bool usbIn = usbAudioRead && (usbAudioRead(usbFrames) != 0);
   int16_t *usbOutBuf = usbAudioWrite ? usbAudioWrite() : nullptr;
 
   int targetTrk = recording.track;
@@ -681,10 +562,18 @@ void LooperEngine::update() {
       }
     }
   }
+  const TunerSource tSrc = tunerActiveSource;
+  const bool tMute = (tSrc != TunerSource::Off) && tunerMuteActive && !masterExportActive;
+  const int tunerAudioTrk = (tSrc >= TunerSource::Audio1 && tSrc <= TunerSource::Audio8)
+                                ? ((int)tSrc - (int)TunerSource::Audio1)
+                                : -1;
+
   const MonitorMode lMon = lineMonitorMode;
   const MonitorMode uMon = usbMonitorMode;
-  const bool monLine  = (lMon == MonitorMode::On) || (lMon == MonitorMode::Arm && audioArmed);
-  const bool monUsb   = ((uMon == MonitorMode::On) || (uMon == MonitorMode::Arm && audioArmed)) && usbIn;
+  const bool monLine  = ((lMon == MonitorMode::On) || (lMon == MonitorMode::Arm && audioArmed)) &&
+                        !(tMute && tSrc == TunerSource::LineIn);
+  const bool monUsb   = (((uMon == MonitorMode::On) || (uMon == MonitorMode::Arm && audioArmed)) && usbIn) &&
+                        !(tMute && tSrc == TunerSource::UsbIn);
 
   const float liTrim = micMode ? 1.0f : lineInDigitalTrim;
   int16_t lineBufL[AUDIO_BLOCK_SAMPLES];
@@ -710,8 +599,8 @@ void LooperEngine::update() {
     int32_t recR = (useLine ? (int32_t)lb : 0)
                  + ((useUsb && usbIn) ? (int32_t)(int16_t)(usbFrames[i] >> 16) : 0)
                  + ((useSynth && hasFm) ? fmR[i] : 0);
-    int16_t clL = (int16_t)constrain(recL, -32768, 32767);
-    int16_t clR = (int16_t)constrain(recR, -32768, 32767);
+    int16_t clL = softClipToInt16(recL);
+    int16_t clR = softClipToInt16(recR);
     recSampleL[i] = clL;
     recSampleR[i] = clR;
     int16_t a = (int16_t)min((int32_t)32767, abs(recL));
@@ -724,6 +613,20 @@ void LooperEngine::update() {
   }
   if (inPeakL / 32768.0f > inputMeterL) inputMeterL = inPeakL / 32768.0f;
   if (inPeakR / 32768.0f > inputMeterR) inputMeterR = inPeakR / 32768.0f;
+
+  if (tSrc == TunerSource::LineIn) {
+    tunerPushStereo16(lineBufL, lineBufR, AUDIO_BLOCK_SAMPLES);
+  } else if (tSrc == TunerSource::UsbIn) {
+    if (usbIn) {
+      tunerPushPackedStereo16(usbFrames, AUDIO_BLOCK_SAMPLES);
+    } else {
+      tunerPushSilenceBlock(AUDIO_BLOCK_SAMPLES);
+    }
+  } else if (tSrc >= TunerSource::Inst1 && tSrc <= TunerSource::Inst8) {
+    if (!tunerInstPushedThisBlock) {
+      tunerPushSilenceBlock(AUDIO_BLOCK_SAMPLES);
+    }
+  }
 
   uint32_t blockMicros = micros();
   const float usPerSample = 1e6f / AUDIO_SAMPLE_RATE_EXACT;
@@ -796,27 +699,29 @@ void LooperEngine::update() {
                                    : -1;
   for (int t = 0; t < NUM_AUDIO_TRACKS; t++) {
     const Track &tr = tracks[t];
-    bool audible = (tr.state == TrackState::Playing) && (!anyAudioSolo || tr.solo);
+    bool audible = (tr.state == TrackState::Playing) && (!anyAudioSolo || tr.solo) &&
+                   !(tMute && t == tunerAudioTrk);
     float g = audible ? 1.0f : 0.0f;
     mix[t][0] = g * tr.mixLL;
     mix[t][1] = g * tr.mixLR;
     mix[t][2] = g * tr.mixRL;
     mix[t][3] = g * tr.mixRR;
-    if (tr.live || t == recTrkBlock || t == srcAudioTrkBlock ||
+    if (tr.live || t == recTrkBlock || t == srcAudioTrkBlock || t == tunerAudioTrk ||
         (mix[t][0] + mix[t][1] + mix[t][2] + mix[t][3] +
          tr.curMix[0] + tr.curMix[1] + tr.curMix[2] + tr.curMix[3]) > 1e-6f) {
       activeTracks[numActiveTracks++] = (uint8_t)t;
     }
   }
 
+  int16_t tunerAudioMono[AUDIO_BLOCK_SAMPLES];
+
   const float outGain = outputGain;
+  const float mtrScale = outputMeterScale;
   const float mGain = metroGain;
   const bool recTrackIsMono = (targetTrk >= 0 && isAudioTrackMono(targetTrk));
   const MonoInput recMonoIn = targetMonoIn;
-  if (usbOutBuf) {
-    memset(usbOutBuf, 0, AUDIO_BLOCK_SAMPLES * USB_OUT_CHANNELS * sizeof(*usbOutBuf));
-  }
   static float outGainNow = 0.0f;
+  static float meterScaleNow = 1.0f;
   float blockPeak = 0.0f;
   float outPeakL = 0.0f, outPeakR = 0.0f;
 
@@ -834,10 +739,12 @@ void LooperEngine::update() {
     bool recActiveHere = false;
     float recTrackSl = 0.0f, recTrackSr = 0.0f;
     float srcAudioL = 0.0f, srcAudioR = 0.0f;
+    int16_t tunerSampleMono = 0;
 
-    // Monitor bus for Master Out in floating-point (no pre-FX int16 hard clamp; excludes USB In to prevent DAW feedback)
-    const float monL = (float)(((monLine && !expOut) ? lineL : 0) + synL);
-    const float monR = (float)(((monLine && !expOut) ? lineR : 0) + synR);
+    // Monitor bus for Master Out in floating-point with -3.0 dB mix-bus headroom matching Audio Tracks 1..8
+    // (no pre-FX int16 hard clamp; excludes USB In to prevent DAW feedback)
+    const float monL = (float)(((monLine && !expOut) ? lineL : 0) + synL) * masterGain;
+    const float monR = (float)(((monLine && !expOut) ? lineR : 0) + synR) * masterGain;
     float mixL = 0.0f, mixR = 0.0f;
     int16_t *usbFrame = usbOutBuf ? usbOutBuf + i * USB_OUT_CHANNELS : nullptr;
 
@@ -1001,6 +908,11 @@ void LooperEngine::update() {
             }
           }
 
+          if (t == tunerAudioTrk) {
+            int32_t mSum = ((int32_t)sl + (int32_t)sr) >> 1;
+            tunerSampleMono = (int16_t)constrain(mSum, -32768, 32767);
+          }
+
           if (isRecTrackHere) {
             recTrackSl = sl;
             recTrackSr = sr;
@@ -1030,17 +942,6 @@ void LooperEngine::update() {
           orr *= masterGain;
           mixL += ol;
           mixR += orr;
-
-          if (usbFrame) {
-            int16_t *st = usbFrame + usbTrackChannel(t);
-            if (isAudioTrackMono(t)) {
-              float om = (c[0] >= c[3]) ? ol : orr;
-              st[0] = (int16_t)constrain(om, -32767.0f, 32767.0f);
-            } else {
-              st[0] = (int16_t)constrain(ol, -32767.0f, 32767.0f);
-              st[1] = (int16_t)constrain(orr, -32767.0f, 32767.0f);
-            }
-          }
         }
       }
     }
@@ -1050,9 +951,10 @@ void LooperEngine::update() {
     const float preFxL = mixL;
     const float preFxR = mixR;
     processMasterFx(mixL, mixR);
-    postFxLimiter.run(mixL, mixR);
-    const float postFxL = mixL;
-    const float postFxR = mixR;
+    const float rawPostFxL = mixL;
+    const float rawPostFxR = mixR;
+    float postFxL = 0.0f, postFxR = 0.0f;
+    postFxLimiter.run(rawPostFxL, rawPostFxR, postFxL, postFxR);
 
     if (tMode == TransportMode::WaitThreshold && transport.waitAudioThresh &&
         (targetSrc == AudioRecSrc::ResamplePre || targetSrc == AudioRecSrc::ResamplePost)) {
@@ -1124,8 +1026,8 @@ void LooperEngine::update() {
           rawSrcR = (int32_t)postFxR;
           break;
       }
-      int16_t sL = (int16_t)constrain(rawSrcL, -32768, 32767);
-      int16_t sR = (int16_t)constrain(rawSrcR, -32768, 32767);
+      int16_t sL = softClipToInt16(rawSrcL);
+      int16_t sR = softClipToInt16(rawSrcR);
       if (recTrackIsMono) {
         int16_t mIn = (recMonoIn == MonoInput::Left)  ? sL
                     : (recMonoIn == MonoInput::Right) ? sR
@@ -1140,8 +1042,8 @@ void LooperEngine::update() {
     if (recActiveHere && recording.overdub) {
       int32_t sumL = (int32_t)capL + (int32_t)recTrackSl;
       int32_t sumR = (int32_t)capR + (int32_t)recTrackSr;
-      capL = (int16_t)constrain(sumL, -32768, 32767);
-      capR = (int16_t)constrain(sumR, -32768, 32767);
+      capL = softClipToInt16(sumL);
+      capR = softClipToInt16(sumR);
     }
     inputRing[at % INPUT_FRAMES] = (uint16_t)capL | ((uint32_t)(uint16_t)capR << 16);
 
@@ -1236,6 +1138,7 @@ void LooperEngine::update() {
     }
 
     outGainNow += (outGain - outGainNow) * MASTER_GLIDE;
+    meterScaleNow += (mtrScale - meterScaleNow) * MASTER_GLIDE;
     float click = clickSample() * (outGainNow * mGain);
     blockPeak = max(blockPeak, max(fabsf(postFxL), fabsf(postFxR)));
     if (expOut) {
@@ -1249,20 +1152,28 @@ void LooperEngine::update() {
     }
     transport.now = at + 1;
 
-    float progMonL = postFxL * outGainNow;
-    float progMonR = postFxR * outGainNow;
+    float progMonL = rawPostFxL * outGainNow;
+    float progMonR = rawPostFxR * outGainNow;
     if (monUsb) {
       progMonL += (float)uL * outGainNow;
       progMonR += (float)uR * outGainNow;
     }
     float limOutL = 0.0f, limOutR = 0.0f;
     float limG = monLimiter.run(progMonL + click, progMonR + click, limOutL, limOutR);
-    float outAbsL = min(32767.0f, fabsf(progMonL) * limG);
-    float outAbsR = min(32767.0f, fabsf(progMonR) * limG);
+    float outAbsL = min(32767.0f, fabsf(progMonL) * limG * meterScaleNow);
+    float outAbsR = min(32767.0f, fabsf(progMonR) * limG * meterScaleNow);
     if (outAbsL > outPeakL) outPeakL = outAbsL;
     if (outAbsR > outPeakR) outPeakR = outAbsR;
+    if (tunerAudioTrk >= 0) {
+      tunerAudioMono[i] = tunerSampleMono;
+    }
+
     outL->data[i] = (int16_t)constrain(limOutL, -32767.0f, 32767.0f);
     outR->data[i] = (int16_t)constrain(limOutR, -32767.0f, 32767.0f);
+  }
+
+  if (tunerAudioTrk >= 0) {
+    tunerPushMono16(tunerAudioMono, AUDIO_BLOCK_SAMPLES);
   }
 
   refPeak = max(blockPeak, refPeak * REF_FALL);

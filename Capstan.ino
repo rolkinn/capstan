@@ -82,6 +82,7 @@ FLASHMEM static void handlePowerButton(bool allowProjectPlayLock = false) {
       codec.muteLineout();
       midiEnd();
       midiUsbEnd();
+      usbShutdownDetach();
 #if CAPSTAN_DEBUG
       freezeTimer.end();
 #endif
@@ -128,7 +129,7 @@ FLASHMEM static void waitForCard() {
 FLASHMEM static void reloadFromCard() {
   for (;;) {
     storageForget();
-    if (storageBegin([](const char *msg) {
+    if (storageBegin([](const char *msg) FLASHMEM {
 #if CAPSTAN_DEBUG
       Serial.println(msg);
 #else
@@ -139,6 +140,7 @@ FLASHMEM static void reloadFromCard() {
     waitForCard();
   }
   beginSession();
+  appSyncUsbChargeEnumeration(usbDriveTick);
   transport.spb = spbForBpm(bpm);
   uiForceRedraw();
 }
@@ -175,7 +177,7 @@ FLASHMEM void setup() {
   if (CrashReport) Serial.print(CrashReport);
   AudioMemory(12);
 #if defined(AUDIO_UAC2)
-  usbAudioRead = [](uint32_t *frames) { return usb_audio_rx_block(frames) != 0; };
+  usbAudioRead = usb_audio_rx_block;
   usbAudioWrite = usb_audio_tx_block;
   usbAudioWritten = usb_audio_tx_written;
 #endif
@@ -203,7 +205,7 @@ FLASHMEM void setup() {
 
   showSplash();
   splashIntro();
-  auto progress = [](const char *msg) {
+  auto progress = [](const char *msg) FLASHMEM {
 #if CAPSTAN_DEBUG
     if (msg && msg[0]) Serial.println(msg);
 #endif
@@ -218,6 +220,7 @@ FLASHMEM void setup() {
   progress("");
   splashTick();
   beginSession();
+  appSyncUsbChargeEnumeration(splashTick);
   splashTick();
   transport.spb = spbForBpm(bpm);
 
@@ -230,9 +233,8 @@ FLASHMEM void setup() {
   if (MIDI_OUT_ENABLED && MIDI_IN_ENABLED) midiInBegin(board.midiInBegin());
   if (MIDI_OUT_ENABLED && MIDI_USB_ENABLED) midiUsbBegin();
 
-  usbDriveTick = [] { loopCount++; handlePowerButton(); };
+  usbDriveTick = []() FLASHMEM { loopCount++; handlePowerButton(); };
   usbDriveReload = reloadFromCard;
-  usbDriveBegin();
 
   hideSplash();
 #if CAPSTAN_DEBUG

@@ -24,7 +24,7 @@
 | [`src/config.h`](../src/config.h) | Global constants (`CAPSTAN_VERSION = "1.0"`, `SAMPLE_RATE_HZ = 44100`, `MAX_TAPE_SECONDS = 666`, buffer sizes, mixer/pan steps, `MIDI_PPQN = 480`) |
 | [`src/colors.h`](../src/colors.h) | RGB565 color palette and per-page / per-track accent colors |
 | [`src/M8Board.h`](../src/M8Board.h), [`src/M8Board.cpp`](../src/M8Board.cpp), [`src/ili9488_spi.h`](../src/ili9488_spi.h), [`src/ili9488_spi.cpp`](../src/ili9488_spi.cpp) | Hardware abstraction for M8 Model:01 (Variants A & B) and Model:02: display, I2C keys, headphone sense, speaker amp, BQ2589x charger, STC3115 fuel gauge, TRS MIDI |
-| [`src/engine.h`](../src/engine.h), [`src/engine.cpp`](../src/engine.cpp) | 44.1 kHz Audio ISR (`LooperEngine::update()`): 8-track playback, overdub/replace/resample capture, variable speed (`-5.00x..+5.00x`), punch/loop window, threshold trigger, LUT woodblock metronome, per-track Vol/Bal/Pan/Solo, 14-ch USB Audio UAC2 I/O |
+| [`src/engine.h`](../src/engine.h), [`src/engine.cpp`](../src/engine.cpp) | 44.1 kHz Audio ISR (`LooperEngine::update()`): 8-track playback, overdub/replace/resample capture, variable speed (`-5.00x..+5.00x`), punch/loop window, threshold trigger, LUT woodblock metronome, per-track Vol/Bal/Pan/Solo, 2-ch stereo USB Audio UAC2 I/O |
 | [`src/master_fx.h`](../src/master_fx.h), [`src/master_fx.cpp`](../src/master_fx.cpp) | 5-slot Master FX chain (`Chorus -> Delay -> Reverb -> Tape -> Comp`), per-instrument `Drive` with cached filter coefficients, and shared instrument FX send bus |
 | [`src/midi_seq.h`](../src/midi_seq.h), [`src/midi_seq.cpp`](../src/midi_seq.cpp) | 8-track linear MIDI sequencer (`480 PPQN`, `2,048` events/track in `DMAMEM`), ISR playback & Live Thru, Piano Roll note editor helpers, `.mid` import/export |
 | [`src/midi_in.h`](../src/midi_in.h), [`src/midi_in.cpp`](../src/midi_in.cpp) | External MIDI Clock slave (`0xF8`, `0xFA`, `0xFB`, `0xFC`, `0xF2`), MMC SysEx parser, and incoming TRS Serial MIDI parser |
@@ -38,7 +38,7 @@
 | [`src/input.h`](../src/input.h), [`src/input.cpp`](../src/input.cpp) | Key scanner, modal on-screen keyboard, transport shortcuts, and `PageOps` input dispatcher |
 | [`src/ui.h`](../src/ui.h), [`src/ui.cpp`](../src/ui.cpp), [`src/ui_font.*`](../src/ui_font.h), [`src/ui_splash.cpp`](../src/ui_splash.cpp) | Flicker-free `Surface`-composited UI shell, O(1) `GLYPH_LUT` bitmap font renderer, multi-tier UI frame scheduler |
 | [`src/usb_drive.h`](../src/usb_drive.h), [`src/usb_drive.cpp`](../src/usb_drive.cpp), [`src/usb_names.c`](../src/usb_names.c) | USB Mass Storage Drive mode (`usbDriveMode()`) exposing the M8 SD card over USB |
-| [`tools/teensy_msc/patch.py`](../tools/teensy_msc/patch.py) | Teensyduino core patch enabling composite `Serial + MIDI + Audio (14-ch Out / 2-ch In UAC2) + Mass Storage` (`usb=serialmsc`) |
+| [`tools/teensy_msc/patch.py`](../tools/teensy_msc/patch.py) | Teensyduino core patch enabling composite `Serial + MIDI + Audio (2-ch Out / 2-ch In UAC2) + Mass Storage` (`usb=serialmsc`) |
 | [`tools/recorder_sim/verify_firmware.py`](../tools/recorder_sim/verify_firmware.py) | Automated architectural, DMA-safety, WAV sector-alignment, ELF memory region, and release cleanliness verifier |
 
 ---
@@ -49,7 +49,7 @@
    - Advances the linear tape clock (`transport.now`, `transport.tapeFrame`), evaluates count-in beats, audio/MIDI threshold triggers, and punch/loop window transitions.
    - Calls `midiSeqIsrTick()` at audio block rate to dispatch recorded sequencer notes with sub-block sample offsets (`0..127`).
    - Calls `fmSynthRenderBlock()` to render all active internal synthesizer/sampler voices with sub-block sample-accurate Note On/Off splitting and shared Chorus/Delay/Reverb send FX.
-   - Reads the 8 audio track playback rings (`tracks[t].ring`), applies smoothed per-track volume/pan/solo, mixes live input monitoring, runs the 5-slot Master FX chain (`processMasterFx()`), captures overdub/replace/resample audio into `inputRing[INPUT_FRAMES]`, streams 14-channel USB Audio UAC2 output, and finishes with the master soft limiter.
+   - Reads the 8 audio track playback rings (`tracks[t].ring`), applies smoothed per-track volume/pan/solo, mixes live input monitoring, runs the 5-slot Master FX chain (`processMasterFx()`), captures overdub/replace/resample audio into `inputRing[INPUT_FRAMES]`, streams 2-channel stereo Master L/R USB Audio UAC2 output, and finishes with the master soft limiter.
 2. **Tier 2 — Unified MIDI Poll ISR (`midi_usb.cpp`, every 250 µs = 4 kHz, priority 112)**:
    - Polls both hardware TRS Serial MIDI (`midiServiceTrsInOut()`) and USB MIDI (`usb_midi_read_message()`), stamping incoming messages with a sub-block sample offset (`0..127`) computed from `micros() - engineLastBlockMicros()`.
    - Performs immediate ISR-level Live MIDI Thru and internal synth voice triggering (`allowSdIo = false`) so external MIDI controllers play with sub-millisecond jitter even during SD card or TFT display writes.

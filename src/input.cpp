@@ -2,11 +2,13 @@
 #include "pages.h"
 #include "page_audio.h"
 #include "page_midi.h"
+#include "page_song_settings.h"
 #include "page_system_settings.h"
 #include "page_instruments.h"
 #include "page_instrument_edit.h"
 #include "track_edit.h"
 #include "inst_sampler.h"
+#include "inst_sf2.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -26,13 +28,23 @@ static bool swallowWakeKeys = false;
 static bool swallowModalKeys = false;
 static bool midiEditHeld = false;
 static bool midiEditUsedAsModifier = false;
+static uint8_t midiModifierMask = 0;
+static uint8_t midiNavDirHeldMask = 0;
+
+static inline uint8_t effectiveKeys() {
+  return board.keys() | midiModifierMask;
+}
 
 FLASHMEM bool inputOptHeld() {
-  return (board.keys() & BTN_OPT) != 0;
+  return (effectiveKeys() & BTN_OPT) != 0;
+}
+
+FLASHMEM bool inputShiftHeld() {
+  return (effectiveKeys() & BTN_SHIFT) != 0;
 }
 
 FLASHMEM bool inputEditHeld() {
-  return ((board.keys() & BTN_EDIT) != 0) || midiEditHeld;
+  return ((effectiveKeys() & BTN_EDIT) != 0) || midiEditHeld;
 }
 
 FLASHMEM void inputSwallowModalKeys() {
@@ -513,6 +525,7 @@ FLASHMEM static bool canOptScrubTimeline() {
       isSaveKeyboardOpen() ||
       isSamplerKeyModalOpen() ||
       isSamplerBrowserOpen() ||
+      isSf2BrowserOpen() ||
       isInstBrowserOpen() ||
       isInstSaveToModalOpen() ||
       isSysPresetsModalOpen() ||
@@ -523,6 +536,7 @@ FLASHMEM static bool canOptScrubTimeline() {
       isClearTrackModalOpen() ||
       isClearTrackModalRevealing() ||
       isMidiClipBrowserOpen() ||
+      isSongTunerOpen() ||
       trackEditIsModalOpen() ||
       trackEditPhase() == TrackEditPhase::DuplReveal ||
       isMidiNoteEditorOpen()) {
@@ -694,6 +708,34 @@ FLASHMEM static void confirmSamplerBrowserSelection() {
   }
 }
 
+FLASHMEM static void confirmSf2BrowserSelection() {
+  Sf2BrowserRowInfo rowInfo{};
+  bool hadRow = sf2BrowserRowAt(sf2BrowserCursor(), rowInfo);
+  Sf2BrowserMode modeBefore = sf2BrowserMode();
+  bool wasFileOrPreset = hadRow && (modeBefore == Sf2BrowserMode::PresetList || !rowInfo.isDir);
+  int slot = constrain(sf2BrowserTargetSlot(), 0, NUM_INSTRUMENTS - 1);
+  if (sf2BrowserConfirm()) {
+    swallowModalKeys = true;
+    saveSessionWhenIdle();
+    fmEditRow = constrain(fmEditRow, 0, instEditRowCount() - 1);
+    syncInstEditScroll();
+    fmEditCol = constrain(fmEditCol, 0, fmRowColCount(fmEditRow) - 1);
+    char msg[32];
+    if (modeBefore == Sf2BrowserMode::PresetList) {
+      snprintf(msg, sizeof(msg), "%03u:%03u %.18s",
+               (unsigned)min(sf2CurrentBank(slot), (uint16_t)999u),
+               (unsigned)min(sf2CurrentPresetNum(slot), (uint16_t)999u),
+               sf2CurrentPresetName(slot));
+    } else {
+      snprintf(msg, sizeof(msg), "LOADED %.18s", sf2FileDisplayName(slot));
+    }
+    uiShowToast(msg);
+  } else if (wasFileOrPreset) {
+    uiShowToast((modeBefore == Sf2BrowserMode::PresetList) ? "PRESET LOAD ERR" : "INVALID .SF2 FILE");
+  }
+  uiForceRedraw();
+}
+
 FLASHMEM static void confirmInstBrowserSelection() {
   int targetSlot = instBrowserTargetSlot();
   const InstBrowserEntry *ent = instBrowserEntryAt(instBrowserCursor());
@@ -706,9 +748,6 @@ FLASHMEM static void confirmInstBrowserSelection() {
     syncInstEditScroll();
     fmEditCol = constrain(fmEditCol, 0, fmRowColCount(fmEditRow) - 1);
     const FmPatch &p = fmSynthPatch(instListCursor);
-    if ((InstType)p.type != InstType::Sampler) {
-      fmSynthAudition(instListCursor);
-    }
     char msg[32];
     snprintf(msg, sizeof(msg), "LOADED %.16s", p.name);
     uiShowToast(msg);
@@ -780,7 +819,7 @@ FLASHMEM static void triggerSamplerKeyAuditionHold(uint32_t ms) {
 // Main Key Polling Entry Point
 // ============================================================================
 FLASHMEM void pollKeys() {
-  uint8_t now = board.keys();
+  uint8_t now = effectiveKeys();
   uint8_t pressed = now & ~prevKeys;
   uint8_t released = prevKeys & ~now;
   uint32_t ms = millis();
@@ -939,6 +978,30 @@ FLASHMEM void pollKeys() {
     return;
   }
 
+  // Modal SD Card SoundFont (.sf2) File & Preset Browser input handling
+  if (isSf2BrowserOpen()) {
+    releaseSamplerEditHold();
+    uint8_t activeDir = pollDirectionalRepeat(pressed, now, ms, 65);
+    if (activeDir) {
+      int dy = ((activeDir & BTN_DOWN) ? 1 : 0) - ((activeDir & BTN_UP) ? 1 : 0);
+      int dx = ((activeDir & BTN_RIGHT) ? 1 : 0) - ((activeDir & BTN_LEFT) ? 1 : 0);
+      sf2BrowserMove(dy, dx);
+      uiForceRedraw();
+    }
+    if (pressed & BTN_EDIT) {
+      confirmSf2BrowserSelection();
+      editUsedAsModifier = true;
+    } else if (pressed & BTN_OPT) {
+      closeSf2Browser();
+      swallowModalKeys = true;
+      optUsedAsModifier = true;
+      lastOptTapMs = 0;
+      uiForceRedraw();
+    }
+    prevKeys = now;
+    return;
+  }
+
   // Modal SD Card Instrument File Browser input handling (Instruments & Instrument Edit pages)
   if (isInstBrowserOpen()) {
     releaseSamplerEditHold();
@@ -1047,8 +1110,8 @@ FLASHMEM void pollKeys() {
   if (isSysProjectsModalOpen()) {
     uint8_t activeDir = pollDirectionalRepeat(pressed, now, ms, 65);
     uint8_t effPressed = (pressed & ~DIR_MASK) | activeDir;
-    uint8_t effNow = now | ((activeDir && midiEditHeld) ? BTN_EDIT : 0);
-    if (activeDir && midiEditHeld) midiEditUsedAsModifier = true;
+    uint8_t effNow = now | (midiEditHeld ? BTN_EDIT : 0);
+    if ((activeDir || (pressed & BTN_OPT)) && midiEditHeld) midiEditUsedAsModifier = true;
     handleSysProjectsModalInput(effPressed, effNow, ms);
     if (pressed & BTN_EDIT) editUsedAsModifier = true;
     if (pressed & BTN_OPT) {
@@ -1064,8 +1127,8 @@ FLASHMEM void pollKeys() {
   if (isSysMidiMapModalOpen()) {
     uint8_t activeDir = pollDirectionalRepeat(pressed, now, ms, 65);
     uint8_t effPressed = (pressed & ~DIR_MASK) | activeDir;
-    uint8_t effNow = now | ((activeDir && midiEditHeld) ? BTN_EDIT : 0);
-    if (activeDir && midiEditHeld) midiEditUsedAsModifier = true;
+    uint8_t effNow = now | (midiEditHeld ? BTN_EDIT : 0);
+    if ((activeDir || (pressed & BTN_OPT)) && midiEditHeld) midiEditUsedAsModifier = true;
     handleSysMidiMapModalInput(effPressed, effNow, ms);
     if (pressed & BTN_EDIT) editUsedAsModifier = true;
     if (pressed & BTN_OPT) {
@@ -1210,10 +1273,12 @@ FLASHMEM void pollKeys() {
       return;
     }
 
-    if ((((pressed & BTN_EDIT) && (now & BTN_OPT)) || ((pressed & BTN_OPT) && (now & BTN_EDIT))) &&
+    if ((((pressed & BTN_EDIT) && (now & BTN_OPT)) ||
+         ((pressed & BTN_OPT) && ((now & BTN_EDIT) || midiEditHeld))) &&
         !(now & BTN_SHIFT)) {
       optUsedAsModifier = true;
       editUsedAsModifier = true;
+      midiEditUsedAsModifier = true;
       lastOptTapMs = 0;
       midiNoteEditorResetPress();
       prevKeys = now;
@@ -1353,7 +1418,10 @@ FLASHMEM void pollKeys() {
   if (released & BTN_OPT) {
     if (!optUsedAsModifier && !(now & (BTN_SHIFT | BTN_EDIT | BTN_PLAY | DIR_MASK))) {
       TrackEditPhase tep = trackEditPhase();
-      if (tep == TrackEditPhase::SelectRegion) {
+      if (currentPage() == Page::SongSettings && isSongTunerOpen()) {
+        closeSongTuner();
+        lastOptTapMs = 0;
+      } else if (tep == TrackEditPhase::SelectRegion) {
         trackEditToggleEndpoint();
         lastOptTapMs = 0;
       } else if (tep == TrackEditPhase::PickPasteTrack || tep == TrackEditPhase::PickPastePos) {
@@ -1518,7 +1586,8 @@ FLASHMEM void pollKeys() {
       uiForceRedraw();
     } else if (waveOptScrubDir != 0) {
       uint8_t wantBit = (waveOptScrubDir > 0) ? BTN_RIGHT : BTN_LEFT;
-      if (!(now & wantBit) || (now & (BTN_UP | BTN_DOWN))) {
+      uint8_t heldDirs = now | midiNavDirHeldMask;
+      if (!(heldDirs & wantBit) || (heldDirs & (BTN_UP | BTN_DOWN))) {
         waveOptScrubDir = 0;
       } else if ((int32_t)(ms - scrubHoldStartMs) >= 200) {
         uint32_t dtMs = ms - scrubLastTickMs;
@@ -1552,11 +1621,12 @@ FLASHMEM void pollKeys() {
       curOps.onResetParam();
     }
   } else if ((((pressed & BTN_EDIT) && ((now & BTN_SHIFT) || editSawShift)) ||
-              ((pressed & BTN_SHIFT) && (now & BTN_EDIT))) &&
+              ((pressed & BTN_SHIFT) && ((now & BTN_EDIT) || midiEditHeld))) &&
              !(now & BTN_OPT)) {
     releaseSamplerEditHold();
     shiftUsedAsModifier = true;
     editUsedAsModifier = true;
+    midiEditUsedAsModifier = true;
     editSawShift = true;
     if (curOps.onEditPress) {
       curOps.onEditPress(true);
@@ -1586,7 +1656,8 @@ FLASHMEM void pollKeys() {
     appToggleTransport();
   }
 
-  serviceMidiPendingWaveMute(now, editUsedAsModifier);
+  serviceMidiPendingWaveMute(now | (midiEditHeld ? BTN_EDIT : 0),
+                             editUsedAsModifier || midiEditUsedAsModifier);
   prevKeys = now;
 }
 
@@ -1615,7 +1686,7 @@ FLASHMEM uint32_t inputCurrentRepeatIntervalMs() {
       isUsbSavePromptModalOpen() || isClearTrackModalOpen()) {
     return 85u;
   }
-  if (isSaveKeyboardOpen() || isSamplerBrowserOpen() || isInstBrowserOpen() ||
+  if (isSaveKeyboardOpen() || isSamplerBrowserOpen() || isSf2BrowserOpen() || isInstBrowserOpen() ||
       isSysPresetsModalOpen() || isSysProjectsModalOpen() || isSysMidiMapModalOpen() ||
       isTypePresetModalOpen() || isMidiClipBrowserOpen() || trackEditIsModalOpen()) {
     return 65u;
@@ -1624,7 +1695,7 @@ FLASHMEM uint32_t inputCurrentRepeatIntervalMs() {
 }
 
 FLASHMEM void inputSaveNavSnapshot() {
-  if ((board.keys() & (BTN_SHIFT | BTN_OPT | BTN_EDIT | BTN_PLAY)) != 0) {
+  if ((effectiveKeys() & (BTN_SHIFT | BTN_OPT | BTN_EDIT | BTN_PLAY)) != 0 || midiEditHeld) {
     navSnapshot.valid = false;
     return;
   }
@@ -1712,22 +1783,26 @@ FLASHMEM void inputTriggerNav(uint8_t dirBit, bool withShift) {
     return;
   }
 
-  uint8_t hwNow = board.keys();
-  uint8_t now = (hwNow & ~DIR_MASK) | dirBit | (withShift ? BTN_SHIFT : 0) | (midiEditHeld ? BTN_EDIT : 0);
+  uint8_t hwNow = effectiveKeys();
+  bool effShift = withShift || ((hwNow & BTN_SHIFT) != 0);
+  uint8_t now = (hwNow & ~DIR_MASK) | dirBit | (effShift ? BTN_SHIFT : 0) | (midiEditHeld ? BTN_EDIT : 0);
   uint8_t pressed = dirBit;
   if (midiEditHeld) {
     midiEditUsedAsModifier = true;
   }
+  if (effShift) {
+    shiftUsedAsModifier = true;
+  }
 
   if (isSaveKeyboardOpen()) {
-    if (!withShift) {
+    if (!effShift) {
       handleKeyboardDir(dirBit);
     }
     return;
   }
 
   if (isSamplerKeyModalOpen()) {
-    if (!storageIsSamplerKeyRecordingOpen() && !withShift) {
+    if (!storageIsSamplerKeyRecordingOpen() && !effShift) {
       int step = ((dirBit & (BTN_DOWN | BTN_RIGHT)) ? 1 : 0) -
                  ((dirBit & (BTN_UP | BTN_LEFT)) ? 1 : 0);
       if (step != 0) samplerKeyModalMove(step);
@@ -1736,7 +1811,7 @@ FLASHMEM void inputTriggerNav(uint8_t dirBit, bool withShift) {
   }
 
   if (isSamplerBrowserOpen()) {
-    if (!withShift) {
+    if (!effShift) {
       int dy = ((dirBit & BTN_DOWN) ? 1 : 0) - ((dirBit & BTN_UP) ? 1 : 0);
       int dx = ((dirBit & BTN_RIGHT) ? 1 : 0) - ((dirBit & BTN_LEFT) ? 1 : 0);
       samplerBrowserMove(dy, dx);
@@ -1744,8 +1819,18 @@ FLASHMEM void inputTriggerNav(uint8_t dirBit, bool withShift) {
     return;
   }
 
+  if (isSf2BrowserOpen()) {
+    if (!effShift) {
+      int dy = ((dirBit & BTN_DOWN) ? 1 : 0) - ((dirBit & BTN_UP) ? 1 : 0);
+      int dx = ((dirBit & BTN_RIGHT) ? 1 : 0) - ((dirBit & BTN_LEFT) ? 1 : 0);
+      sf2BrowserMove(dy, dx);
+      uiForceRedraw();
+    }
+    return;
+  }
+
   if (isInstBrowserOpen()) {
-    if (!withShift) {
+    if (!effShift) {
       int dy = ((dirBit & BTN_DOWN) ? 1 : 0) - ((dirBit & BTN_UP) ? 1 : 0);
       int dx = ((dirBit & BTN_RIGHT) ? 1 : 0) - ((dirBit & BTN_LEFT) ? 1 : 0);
       instBrowserMove(dy, dx);
@@ -1755,7 +1840,7 @@ FLASHMEM void inputTriggerNav(uint8_t dirBit, bool withShift) {
   }
 
   if (isInstSaveToModalOpen()) {
-    if (!withShift) {
+    if (!effShift) {
       int step = ((dirBit & (BTN_DOWN | BTN_RIGHT)) ? 1 : 0) -
                  ((dirBit & (BTN_UP | BTN_LEFT)) ? 1 : 0);
       if (step != 0) instSaveToModalMove(step);
@@ -1765,7 +1850,7 @@ FLASHMEM void inputTriggerNav(uint8_t dirBit, bool withShift) {
 
   if (isSysPresetsModalOpen()) {
     if (isSysPresetDeleteConfirmOpen()) {
-      if (!withShift) {
+      if (!effShift) {
         int step = ((dirBit & (BTN_DOWN | BTN_RIGHT)) ? 1 : 0) -
                    ((dirBit & (BTN_UP | BTN_LEFT)) ? 1 : 0);
         if (step != 0) {
@@ -1804,7 +1889,7 @@ FLASHMEM void inputTriggerNav(uint8_t dirBit, bool withShift) {
   }
 
   if (isUsbSavePromptModalOpen()) {
-    if (!withShift) {
+    if (!effShift) {
       int step = ((dirBit & (BTN_DOWN | BTN_RIGHT)) ? 1 : 0) -
                  ((dirBit & (BTN_UP | BTN_LEFT)) ? 1 : 0);
       if (step != 0) usbSavePromptModalMove(step);
@@ -1830,7 +1915,7 @@ FLASHMEM void inputTriggerNav(uint8_t dirBit, bool withShift) {
   }
 
   if (isClearTrackModalOpen() || isClearTrackModalRevealing()) {
-    if (!withShift) {
+    if (!effShift) {
       int dx = ((dirBit & BTN_RIGHT) ? 1 : 0) - ((dirBit & BTN_LEFT) ? 1 : 0);
       int dy = ((dirBit & BTN_DOWN) ? 1 : 0) - ((dirBit & BTN_UP) ? 1 : 0);
       if (dx != 0 || dy != 0) clearTrackModalMove(dx, dy);
@@ -1839,7 +1924,7 @@ FLASHMEM void inputTriggerNav(uint8_t dirBit, bool withShift) {
   }
 
   if (isMidiClipBrowserOpen()) {
-    if (!withShift) {
+    if (!effShift) {
       int dy = ((dirBit & BTN_DOWN) ? 1 : 0) - ((dirBit & BTN_UP) ? 1 : 0);
       int dx = ((dirBit & BTN_RIGHT) ? 1 : 0) - ((dirBit & BTN_LEFT) ? 1 : 0);
       midiClipBrowserMove(dy, dx);
@@ -1849,7 +1934,7 @@ FLASHMEM void inputTriggerNav(uint8_t dirBit, bool withShift) {
   }
 
   if (trackEditIsModalOpen() || trackEditPhase() == TrackEditPhase::DuplReveal) {
-    if (trackEditIsModalOpen() && !withShift) {
+    if (trackEditIsModalOpen() && !effShift) {
       trackEditModalDir(dirBit);
     }
     return;
@@ -1882,8 +1967,15 @@ FLASHMEM void inputTriggerNav(uint8_t dirBit, bool withShift) {
         int dir = (dirBit & BTN_RIGHT) ? 1 : -1;
         appStepTapeMs(dir);
         trackEditOnPlayheadAdjusted();
+        if (midiNavDirHeldMask & dirBit) {
+          waveOptScrubDir = dir;
+          scrubHoldStartMs = ms;
+          scrubLastTickMs = ms;
+          scrubFracFrames = 0.0f;
+        }
         uiForceRedraw();
       } else if (dirBit & (BTN_UP | BTN_DOWN)) {
+        waveOptScrubDir = 0;
         optHeaderHighlightCell = HDR_CELL_BEAT;
         int beatDir = ((dirBit & BTN_UP) ? 1 : 0) - ((dirBit & BTN_DOWN) ? 1 : 0);
         if (beatDir != 0) {
@@ -1910,6 +2002,50 @@ FLASHMEM void inputTriggerNav(uint8_t dirBit, bool withShift) {
   }
 }
 
+FLASHMEM void inputSetMidiModifierHeld(uint8_t keyBit, bool held) {
+  keyBit &= (BTN_OPT | BTN_SHIFT);
+  if (keyBit == 0) return;
+  uint8_t nextMask = held ? (uint8_t)(midiModifierMask | keyBit)
+                          : (uint8_t)(midiModifierMask & ~keyBit);
+  if (nextMask == midiModifierMask) return;
+  midiModifierMask = nextMask;
+  pollKeys();
+}
+
+FLASHMEM void inputClearMidiModifierHeld(uint8_t keyBit) {
+  keyBit &= (BTN_OPT | BTN_SHIFT);
+  if (keyBit == 0 || (midiModifierMask & keyBit) == 0) return;
+  midiModifierMask &= ~keyBit;
+  prevKeys &= ~keyBit;
+  if ((keyBit & BTN_OPT) && !(board.keys() & BTN_OPT)) {
+    optHeaderHighlightCell = -1;
+    waveOptScrubDir = 0;
+  }
+  uiForceRedraw();
+}
+
+FLASHMEM void inputSetMidiNavDirHeld(uint8_t dirBit) {
+  midiNavDirHeldMask = dirBit & (BTN_UP | BTN_DOWN | BTN_LEFT | BTN_RIGHT);
+}
+
+FLASHMEM bool inputIsOptWaveScrubbing() {
+  return waveOptScrubDir != 0;
+}
+
+FLASHMEM void inputMarkOptUsedAsModifier() {
+  optUsedAsModifier = true;
+  lastOptTapMs = 0;
+}
+
+FLASHMEM bool inputConsumeShiftForPlay() {
+  if ((effectiveKeys() & BTN_SHIFT) != 0) {
+    shiftUsedAsModifier = true;
+    playUsedAsModifier = true;
+    return true;
+  }
+  return false;
+}
+
 FLASHMEM void inputSetMidiEditHeld(bool held, bool usedAsMod) {
   midiEditHeld = held;
   midiEditUsedAsModifier = usedAsMod;
@@ -1924,7 +2060,7 @@ FLASHMEM bool inputFinishMidiEditHold() {
   bool wasUsed = midiEditUsedAsModifier;
   midiEditHeld = false;
   midiEditUsedAsModifier = false;
-  if (!(board.keys() & BTN_EDIT)) {
+  if (!(effectiveKeys() & BTN_EDIT)) {
     releaseSamplerEditHold();
     scrubHoldDir = 0;
   }
@@ -1935,11 +2071,11 @@ FLASHMEM bool inputFinishMidiEditHold() {
 FLASHMEM bool inputStartMidiEditHoldAction() {
   if (isScreenBlanked() || isSysProjectPlayLocked()) return false;
   uint32_t ms = millis();
-  uint8_t hwNow = board.keys();
+  uint8_t hwNow = effectiveKeys();
   if (hwNow & (BTN_SHIFT | BTN_OPT)) return false;
 
   if (!isSaveKeyboardOpen() && !isSamplerKeyModalOpen() && !isSamplerBrowserOpen() &&
-      !isInstBrowserOpen() && !isInstSaveToModalOpen() && !isSysPresetsModalOpen() &&
+      !isSf2BrowserOpen() && !isInstBrowserOpen() && !isInstSaveToModalOpen() && !isSysPresetsModalOpen() &&
       !isSysProjectsModalOpen() && !isSysMidiMapModalOpen() && !isUsbSavePromptModalOpen() &&
       !isTypePresetModalOpen() && !isClearTrackModalOpen() &&
       !isMidiClipBrowserOpen() && !trackEditIsModalOpen() &&
@@ -1980,7 +2116,7 @@ FLASHMEM void inputTriggerMidiOptEdit() {
   }
 
   if (isSaveKeyboardOpen() || isSamplerKeyModalOpen() || isSamplerBrowserOpen() ||
-      isInstBrowserOpen() || isInstSaveToModalOpen() || isSysPresetsModalOpen() ||
+      isSf2BrowserOpen() || isInstBrowserOpen() || isInstSaveToModalOpen() || isSysPresetsModalOpen() ||
       isUsbSavePromptModalOpen() || isTypePresetModalOpen() ||
       isClearTrackModalOpen() || isMidiClipBrowserOpen() || trackEditIsModalOpen() ||
       trackEditPhase() == TrackEditPhase::DuplReveal) {
@@ -2019,7 +2155,7 @@ FLASHMEM void inputTriggerMidiEditTap() {
     return;
   }
 
-  uint8_t hwNow = board.keys();
+  uint8_t hwNow = effectiveKeys();
   if ((hwNow & BTN_OPT) && !(hwNow & BTN_SHIFT)) {
     optUsedAsModifier = true;
     lastOptTapMs = 0;
@@ -2042,6 +2178,11 @@ FLASHMEM void inputTriggerMidiEditTap() {
 
   if (isSamplerBrowserOpen()) {
     confirmSamplerBrowserSelection();
+    return;
+  }
+
+  if (isSf2BrowserOpen()) {
+    confirmSf2BrowserSelection();
     return;
   }
 

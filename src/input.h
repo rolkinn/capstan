@@ -4,8 +4,15 @@
 
 void pollKeys();
 bool inputOptHeld();
+bool inputShiftHeld();
 bool inputEditHeld();
 int inputOptHeaderHighlightCell();
+void inputSetMidiModifierHeld(uint8_t keyBit, bool held);
+void inputClearMidiModifierHeld(uint8_t keyBit);
+void inputSetMidiNavDirHeld(uint8_t dirBit);
+bool inputIsOptWaveScrubbing();
+void inputMarkOptUsedAsModifier();
+bool inputConsumeShiftForPlay();
 void inputSetMidiEditHeld(bool held, bool usedAsMod);
 bool inputIsMidiEditUsedAsModifier();
 bool inputFinishMidiEditHold();

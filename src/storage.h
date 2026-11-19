@@ -34,14 +34,14 @@ struct SongSettings {
   MonitorMode usbMonitor = MonitorMode::On;
   MidiTransportIn midiTransportIn = MidiTransportIn::Auto;
   int16_t lineInGainTenths = DEFAULT_LINE_IN_GAIN_TENTHS; // -120..+120 (-12.0..+12.0 dB, default 0 = 0.0 dB)
-  uint8_t masterVolHpEnc = 0;   // 0 = unset/legacy -> masterVolume, 1..101 = 0..100 remembered Headphones VOL
-  uint8_t masterVolSpkEnc = 0;  // 0 = unset/legacy -> masterVolume, 1..101 = 0..100 remembered Speaker VOL
+  uint8_t masterVolHpEnc = (uint8_t)(MASTER_VOLUME_HP_DEFAULT + 1);   // 0 = unset/legacy -> masterVolume, 1..101 = 0..100 remembered Headphones VOL (default 50)
+  uint8_t masterVolSpkEnc = (uint8_t)(MASTER_VOLUME_SPK_DEFAULT + 1); // 0 = unset/legacy -> masterVolume, 1..101 = 0..100 remembered Speaker VOL (default 40)
 };
 
 struct SystemSettings {
   uint8_t brightness = DEFAULT_BRIGHTNESS;             // 5..100 (default 50, scaled to 0..255 PWM)
   uint8_t metroVolume = DEFAULT_METRO_VOLUME;          // 0..100 (default 80)
-  HeadphoneGain headphoneGain = DEFAULT_HEADPHONE_GAIN; // LOW, NORMAL (default), HIGH
+  bool usbChargeWhileOn = true;                        // Charge battery over USB while powered on (default ON)
 };
 
 bool storageBegin(void (*progress)(const char *));
@@ -49,7 +49,7 @@ bool cardResponds();
 bool cardRestart();
 void storageForget();
 void serviceStorage();
-void keepStreaming();
+void keepStreaming(bool topUp = false);
 
 // Named song management (/Capstan/SONGS/<NAME>) with manual save only
 void sanitizeIdentifierName(const char *in, char *out, size_t outSz, bool trimTrailingPunct = true);
@@ -127,6 +127,7 @@ bool saveSystemSettings();
 
 // Shared 16 KB RAM1 staging buffer (also reused by USB Mass Storage mode when transport is stopped)
 uint32_t *storageSharedChunkBuf();
+void storageKeepTracksStreaming();
 
 extern volatile const char *debugStage;
 

@@ -39,6 +39,7 @@ void drawTapeDeckGraphic(int x, int y, int w, int h, uint32_t ms, uint16_t logoC
 // Battery icon & screen refresh (ui.cpp)
 extern uint32_t uiGeneration;
 void drawBatteryIcon(bool all, uint16_t ink, uint16_t ground);
+void uiClearRegionStreaming(int y0, int h, uint16_t color = BG);
 void uiRefresh();
 void uiForceRedraw();
 void uiShowToast(const char *msg, uint32_t durationMs = 3000);

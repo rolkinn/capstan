@@ -127,6 +127,14 @@ static inline float evalOscWave(uint8_t wave, uint32_t phase) {
   }
 }
 
+// Convert unbounded phase-modulation offset in full cycles into 32-bit modular phase
+// without ever saturating ARM VCVT.S32.F32 at +/-0.5 cycles (+/-pi).
+static inline uint32_t cyclesToPhase32(float cycles) {
+  int32_t whole = (int32_t)(cycles + ((cycles >= 0.0f) ? 0.5f : -0.5f));
+  float frac = cycles - (float)whole;
+  return (uint32_t)((int32_t)(frac * 4294967040.0f));
+}
+
 static void fm2OpRenderVoice(FmVoice &v, const FmPatch &p, const FmInstRuntime &rt,
                              int32_t *outL, int32_t *outR, int numFrames) {
   float aRatio = fmSynthRatioFloat(p.op[0].ratioX100) * rt.pitchBendRatio;
@@ -137,11 +145,11 @@ static void fm2OpRenderVoice(FmVoice &v, const FmPatch &p, const FmInstRuntime &
   float opALvl = constrain((int)p.op[0].level, 0, 100) / 100.0f;
   float opBLvl = constrain((int)p.op[1].level, 0, 100) / 100.0f;
 
-  // Self-feedback phase scale for Operator A (op[0]) and Operator B (op[1])
+  // Self-feedback phase scale (in full 2*pi cycles) for Operator A (op[0]) and Operator B (op[1])
   float fbANorm = constrain((int)p.op[0].feedback, 0, 100) / 100.0f;
   float fbBNorm = constrain((int)p.op[1].feedback, 0, 100) / 100.0f;
-  float fbAPhaseScale = (fbANorm * fbANorm) * 0.36f * 2147483648.0f;
-  float fbBPhaseScale = (fbBNorm * fbBNorm) * 0.36f * 2147483648.0f;
+  float fbACycles = (fbANorm * fbANorm) * 0.18f;
+  float fbBCycles = (fbBNorm * fbBNorm) * 0.18f;
 
   const uint8_t algo = p.algorithm;
 
@@ -149,16 +157,17 @@ static void fm2OpRenderVoice(FmVoice &v, const FmPatch &p, const FmInstRuntime &
   // Algorithm 3 ([A] > [B]): Operator A modulates Operator B
   float modBaseLvl = (algo == (uint8_t)FmAlgo::FmAB) ? opALvl : opBLvl;
   float effModLvl = min(1.25f, modBaseLvl * v.velScale + rt.modWheelBoost * 0.35f);
-  float modPhaseScale = effModLvl * 2.2f * 2147483648.0f;
+  float modCycles = effModLvl * 1.1f;
 
   // Algorithm 1 ([A] [B]): Both Operator A and Operator B are independent carriers
+  static constexpr float FM_VOICE_BASE_GAIN = 4500.0f;
   float sumLvl = opALvl + opBLvl;
   float invSum = (sumLvl > 0.0001f) ? (1.0f / sumLvl) : 0.0f;
-  float parallelCarLvl = sumLvl / (1.0f + 0.45f * min(opALvl, opBLvl));
+  float parallelCarLvl = sumLvl / (1.0f + 0.75f * min(opALvl, opBLvl));
   float carLvl = (algo == (uint8_t)FmAlgo::Fm)   ? opALvl
                : (algo == (uint8_t)FmAlgo::FmAB) ? opBLvl
                                                  : parallelCarLvl;
-  float voiceGain = 10000.0f * carLvl * v.velScale;
+  float voiceGain = FM_VOICE_BASE_GAIN * carLvl * v.velScale;
 
   int startIdx = (v.startSampleOffset < (uint8_t)numFrames) ? (int)v.startSampleOffset : 0;
   v.startSampleOffset = 0;
@@ -171,14 +180,14 @@ static void fm2OpRenderVoice(FmVoice &v, const FmPatch &p, const FmInstRuntime &
     float rawOut = 0.0f;
     if (algo == (uint8_t)FmAlgo::FmAB) {
       // Algorithm 3 ([A] > [B]): Operator A is modulator, Operator B is carrier
-      uint32_t fbAOffset = (uint32_t)((int32_t)(v.opPrev[0] * fbAPhaseScale));
+      uint32_t fbAOffset = cyclesToPhase32(v.opPrev[0] * fbACycles);
       float opARaw = evalOscWave(p.op[0].wave, v.opPhase[0] + fbAOffset);
       v.opPrev[0] = 0.5f * (v.opPrev[0] + opARaw);
       v.opPhase[0] += aStep;
 
       float modSignal = opARaw * (v.fltAmt * v.fltEnv);
-      uint32_t pmOffset = (uint32_t)((int32_t)(modSignal * modPhaseScale));
-      uint32_t fbBOffset = (uint32_t)((int32_t)(v.opPrev[1] * fbBPhaseScale));
+      uint32_t pmOffset = cyclesToPhase32(modSignal * modCycles);
+      uint32_t fbBOffset = cyclesToPhase32(v.opPrev[1] * fbBCycles);
       float opBRaw = evalOscWave(p.op[1].wave, v.opPhase[1] + pmOffset + fbBOffset);
       v.opPrev[1] = 0.5f * (v.opPrev[1] + opBRaw);
       v.opPhase[1] += bStep;
@@ -186,7 +195,7 @@ static void fm2OpRenderVoice(FmVoice &v, const FmPatch &p, const FmInstRuntime &
       rawOut = opBRaw;
     } else {
       // Operator B (op[1]) with 1-sample averaged self-feedback
-      uint32_t fbBOffset = (uint32_t)((int32_t)(v.opPrev[1] * fbBPhaseScale));
+      uint32_t fbBOffset = cyclesToPhase32(v.opPrev[1] * fbBCycles);
       float opBRaw = evalOscWave(p.op[1].wave, v.opPhase[1] + fbBOffset);
       v.opPrev[1] = 0.5f * (v.opPrev[1] + opBRaw);
       v.opPhase[1] += bStep;
@@ -197,9 +206,9 @@ static void fm2OpRenderVoice(FmVoice &v, const FmPatch &p, const FmInstRuntime &
       uint32_t pmOffset = 0;
       if (algo == (uint8_t)FmAlgo::Fm) {
         float modSignal = opBRaw * (v.fltAmt * v.fltEnv);
-        pmOffset = (uint32_t)((int32_t)(modSignal * modPhaseScale));
+        pmOffset = cyclesToPhase32(modSignal * modCycles);
       }
-      uint32_t fbAOffset = (uint32_t)((int32_t)(v.opPrev[0] * fbAPhaseScale));
+      uint32_t fbAOffset = cyclesToPhase32(v.opPrev[0] * fbACycles);
       float opARaw = evalOscWave(p.op[0].wave, v.opPhase[0] + pmOffset + fbAOffset);
       v.opPrev[0] = 0.5f * (v.opPrev[0] + opARaw);
       v.opPhase[0] += aStep;

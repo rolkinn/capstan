@@ -3,6 +3,7 @@
 #include "app.h"
 #include "ui.h"
 #include "input.h"
+#include "page_midi.h"
 #include "master_fx.h"
 #include "midi_in.h"
 #include "track_edit.h"
@@ -11,6 +12,7 @@
 #include "inst_phasedist.h"
 #include "inst_sampler.h"
 #include "inst_noisedrone.h"
+#include "inst_sf2.h"
 #include <Arduino.h>
 #include <SdFat.h>
 #include <stdio.h>
@@ -28,6 +30,15 @@ static MidiCcMapEntry clipboardInstMap[INST_MIDI_MAP_TOTAL_SLOTS] = {};
 static uint16_t instMappedCcChMask[128] = {};
 static uint32_t instMappedCcMask[NUM_INSTRUMENTS][4] = {};
 static volatile bool instMapParamDirty = false;
+static uint32_t lastCcUiRedrawMs = 0;
+
+static inline void requestContinuousCcUiRedraw() {
+  uint32_t now = millis();
+  if (lastCcUiRedrawMs == 0 || (uint32_t)(now - lastCcUiRedrawMs) >= 33u) {
+    lastCcUiRedrawMs = now;
+    uiForceRedraw();
+  }
+}
 
 // O(1) ISR-safe lookup bitmask: bit (ch - 1) set when (ch, cc) is mapped to any target
 static uint16_t mappedCcChMask[128] = {};
@@ -71,12 +82,12 @@ static bool midiNavWasDoubleTap = false;
 static uint8_t lastNavTapDirBit = 0;
 static uint32_t lastNavTapMs = 0;
 
-// Mapped EDIT key state (single tap = EDIT, double-tap < 200 ms = OPT+EDIT, held >= 64 = held EDIT)
+// Mapped EDIT / OPT / SHIFT key states
 static bool midiEditIsDown = false;
 static uint32_t midiEditPressMs = 0;
-static bool midiEditPendingSingleTap = false;
-static uint32_t midiEditPendingTapAtMs = 0;
 static bool midiEditHoldStarted = false;
+static bool midiOptIsDown = false;
+static bool midiShiftIsDown = false;
 
 PROGMEM static const uint8_t NAV_DIR_BITS[4] = {
   m8::BTN_UP,
@@ -97,13 +108,21 @@ static inline void stopMidiScrubIfTarget(int targetId) {
   }
   if (targetId >= MIDI_TGT_NAV_UP && targetId <= MIDI_TGT_NAV_RIGHT) {
     uint8_t dirBit = NAV_DIR_BITS[targetId - MIDI_TGT_NAV_BASE];
-    if (midiNavDirBit == dirBit) midiNavDirBit = 0;
+    if (midiNavDirBit == dirBit) {
+      midiNavDirBit = 0;
+      inputSetMidiNavDirHeld(0);
+    }
     if (lastNavTapDirBit == dirBit) lastNavTapDirBit = 0;
   } else if (targetId == MIDI_TGT_NAV_EDIT) {
     midiEditIsDown = false;
-    midiEditPendingSingleTap = false;
     midiEditHoldStarted = false;
     inputFinishMidiEditHold();
+  } else if (targetId == MIDI_TGT_NAV_OPT) {
+    midiOptIsDown = false;
+    inputClearMidiModifierHeld(m8::BTN_OPT);
+  } else if (targetId == MIDI_TGT_NAV_SHIFT) {
+    midiShiftIsDown = false;
+    inputClearMidiModifierHeld(m8::BTN_SHIFT);
   }
 }
 
@@ -119,6 +138,23 @@ PROGMEM static const char *const TRANSPORT_TARGET_NAMES[11] = {
   "REWIND",
   "FAST FORWARD",
   "PLAYBACK SPEED"
+};
+
+static constexpr int TRANSPORT_CAT_ROW_COUNT = 13;
+PROGMEM static const uint8_t TRANSPORT_ROW_TARGETS[TRANSPORT_CAT_ROW_COUNT] = {
+  MIDI_TGT_PLAY_TOGGLE,
+  MIDI_TGT_PLAY,
+  MIDI_TGT_STOP,
+  MIDI_TGT_REC_ARM,
+  MIDI_TGT_DISARM_ALL,
+  MIDI_TGT_PUNCH_TOGGLE,
+  MIDI_TGT_LOOP_TOGGLE,
+  MIDI_TGT_SET_LOOP_START,
+  MIDI_TGT_SET_LOOP_END,
+  MIDI_TGT_RTZ,
+  MIDI_TGT_REW,
+  MIDI_TGT_FF,
+  MIDI_TGT_PLAY_SPEED
 };
 
 PROGMEM static const char *const AUD_OFFSET_NAMES[MIDI_TGT_AUD_PER_TRK] = {
@@ -147,12 +183,14 @@ PROGMEM static const char *const MASTER_TARGET_NAMES[9] = {
   "METRONOME MODE"
 };
 
-PROGMEM static const char *const NAV_TARGET_NAMES[5] = {
+PROGMEM static const char *const NAV_TARGET_NAMES[7] = {
   "UP",
   "DOWN",
   "LEFT",
   "RIGHT",
-  "EDIT"
+  "EDIT",
+  "OPT",
+  "SHIFT"
 };
 
 PROGMEM static const char *const CATEGORY_LABELS[MIDI_CAT_COUNT] = {
@@ -198,8 +236,11 @@ FLASHMEM void midiMapResetGlobal() {
   midiNavDirBit = 0;
   lastNavTapDirBit = 0;
   midiEditIsDown = false;
-  midiEditPendingSingleTap = false;
   midiEditHoldStarted = false;
+  midiOptIsDown = false;
+  midiShiftIsDown = false;
+  inputSetMidiNavDirHeld(0);
+  inputClearMidiModifierHeld(m8::BTN_OPT | m8::BTN_SHIFT);
   inputFinishMidiEditHold();
 }
 
@@ -211,6 +252,7 @@ FLASHMEM void midiMapInit() {
   instLearningActive = false;
   learnIgnoreActive = false;
   learnIgnoreUntilMs = 0;
+  lastCcUiRedrawMs = 0;
 }
 
 FLASHMEM const MidiCcMapEntry *midiMapGlobalTable() { return globalMap; }
@@ -249,7 +291,7 @@ FLASHMEM void midiMapClearCategory(MidiMapCategory cat) {
   int first = 0, count = 0;
   midiMapCategoryBounds(cat, first, count);
   for (int i = 0; i < count; i++) {
-    int tid = first + i;
+    int tid = midiMapCategoryRowTarget(cat, i);
     if (tid >= 0 && tid < MIDI_TARGET_COUNT) {
       globalMap[tid].channel = MIDI_MAP_CH_OFF;
       globalMap[tid].cc = 0;
@@ -310,7 +352,7 @@ FLASHMEM void midiMapCategoryBounds(MidiMapCategory cat, int &outFirstTarget, in
   switch (cat) {
     case MIDI_CAT_TRANSPORT:
       outFirstTarget = 0;
-      outCount = MIDI_TGT_AUD_BASE; // 11
+      outCount = TRANSPORT_CAT_ROW_COUNT; // 13
       break;
     case MIDI_CAT_AUDIO:
       outFirstTarget = MIDI_TGT_AUD_BASE;
@@ -327,15 +369,34 @@ FLASHMEM void midiMapCategoryBounds(MidiMapCategory cat, int &outFirstTarget, in
     case MIDI_CAT_NAVIGATION:
     default:
       outFirstTarget = MIDI_TGT_NAV_BASE;
-      outCount = MIDI_TARGET_COUNT - MIDI_TGT_NAV_BASE; // 4
+      outCount = MIDI_NAV_TARGET_COUNT; // 7
       break;
   }
+}
+
+FLASHMEM int midiMapCategoryRowTarget(MidiMapCategory cat, int rowIdx) {
+  int firstTarget = 0, catCount = 0;
+  midiMapCategoryBounds(cat, firstTarget, catCount);
+  if (catCount <= 0) return 0;
+  int idx = constrain(rowIdx, 0, catCount - 1);
+  if (cat == MIDI_CAT_TRANSPORT) {
+    return TRANSPORT_ROW_TARGETS[idx];
+  }
+  return firstTarget + idx;
 }
 
 FLASHMEM void midiMapFormatTargetName(int targetId, char *out, int outSz) {
   if (!out || outSz <= 0) return;
   if (targetId < 0 || targetId >= MIDI_TARGET_COUNT) {
     out[0] = '\0';
+    return;
+  }
+  if (targetId == MIDI_TGT_SET_LOOP_START) {
+    snprintf(out, (size_t)outSz, "SET LOOP START");
+    return;
+  }
+  if (targetId == MIDI_TGT_SET_LOOP_END) {
+    snprintf(out, (size_t)outSz, "SET LOOP END");
     return;
   }
   if (targetId < MIDI_TGT_AUD_BASE) {
@@ -415,13 +476,46 @@ bool midiMapIsCcIntercepted(uint8_t inCh1To16, uint8_t cc) {
 FLASHMEM static void executeTargetAction(int targetId, uint8_t val) {
   SongSettings &ps = songSettings();
 
+  if (targetId == MIDI_TGT_SET_LOOP_START) {
+    applyPunchInWithAutoOut(ps, transport.tapeFrame, isPunchBarBeatMode());
+    storageSyncLoopState();
+    saveSessionWhenIdle();
+    uiForceRedraw();
+    return;
+  }
+  if (targetId == MIDI_TGT_SET_LOOP_END) {
+    if (transport.tapeFrame > 0) {
+      applyPunchOutWithAutoIn(ps, transport.tapeFrame, isPunchBarBeatMode());
+      storageSyncLoopState();
+      saveSessionWhenIdle();
+    } else {
+      uiShowToast("MUST BE AFTER ZERO");
+    }
+    uiForceRedraw();
+    return;
+  }
+
   if (targetId < MIDI_TGT_AUD_BASE) {
     switch (targetId) {
       case MIDI_TGT_PLAY_TOGGLE:
-        appToggleTransport();
+        if (isMidiNoteEditorOpen()) {
+          midiNoteEditorCommitIfPlacing();
+        }
+        if (inputConsumeShiftForPlay()) {
+          appSeekTape(0);
+          appStartTransport(true);
+        } else {
+          appToggleTransport();
+        }
         break;
       case MIDI_TGT_PLAY:
-        if (transport.mode == TransportMode::Stopped) {
+        if (isMidiNoteEditorOpen()) {
+          midiNoteEditorCommitIfPlacing();
+        }
+        if (inputConsumeShiftForPlay()) {
+          appSeekTape(0);
+          appStartTransport(true);
+        } else if (transport.mode == TransportMode::Stopped) {
           appStartTransport(true);
         }
         break;
@@ -483,8 +577,12 @@ FLASHMEM static void executeTargetAction(int targetId, uint8_t val) {
         } else {
           nextSq = ((int)val * (MAX_SPEED_QUARTER - MIN_SPEED_QUARTER) + 63) / 127 + MIN_SPEED_QUARTER;
         }
+        int prevSq = (int)transport.speedQuarter;
         appSetPlaybackSpeedQuarter(nextSq);
-        break;
+        if ((int)transport.speedQuarter != prevSq) {
+          requestContinuousCcUiRedraw();
+        }
+        return;
       }
     }
     uiForceRedraw();
@@ -500,7 +598,8 @@ FLASHMEM static void executeTargetAction(int targetId, uint8_t val) {
     switch (off) {
       case MIDI_AUD_OFF_ARM:
         stepAudioTrackArm(t, 1);
-        break;
+        uiForceRedraw();
+        return;
       case MIDI_AUD_OFF_MUTE:
         if (!(recording.mode != Recording::Idle && recording.track == t && recording.autoMute)) {
           if (tr.state == TrackState::Muted) {
@@ -509,20 +608,23 @@ FLASHMEM static void executeTargetAction(int targetId, uint8_t val) {
             tr.state = TrackState::Muted;
           }
           saveSessionWhenIdle();
+          uiForceRedraw();
         }
-        break;
+        return;
       case MIDI_AUD_OFF_SOLO:
         tr.solo = !tr.solo;
         midiSeqSilenceMutedTracks();
         saveSessionWhenIdle();
-        break;
+        uiForceRedraw();
+        return;
       case MIDI_AUD_OFF_VOL: {
         int v = ((int)val * VOLUME_MAX + 63) / 127;
         if (tr.volume != (int8_t)v) {
           setTrackMix(t, v, tr.balance);
           saveSessionWhenIdle();
+          requestContinuousCcUiRedraw();
         }
-        break;
+        return;
       }
       case MIDI_AUD_OFF_PAN: {
         int bal = (val == 64) ? 0
@@ -532,11 +634,11 @@ FLASHMEM static void executeTargetAction(int targetId, uint8_t val) {
         if (tr.balance != (int8_t)bal) {
           setTrackMix(t, tr.volume, bal);
           saveSessionWhenIdle();
+          requestContinuousCcUiRedraw();
         }
-        break;
+        return;
       }
     }
-    uiForceRedraw();
     return;
   }
 
@@ -571,12 +673,14 @@ FLASHMEM static void executeTargetAction(int targetId, uint8_t val) {
 
   // Master Bus & Tempo
   uint8_t pct = (uint8_t)(((int)val * 100 + 63) / 127);
+  bool changed = false;
   switch (targetId) {
     case MIDI_TGT_MASTER_VOL: {
       uint8_t v = (uint8_t)(((int)val * MASTER_VOLUME_MAX + 63) / 127);
       if (ps.masterVolume != v) {
         appSetMasterVolume(v);
         saveSessionWhenIdle();
+        changed = true;
       }
       break;
     }
@@ -585,6 +689,7 @@ FLASHMEM static void executeTargetAction(int targetId, uint8_t val) {
         ps.masterChorus = pct;
         setMasterChorus(pct);
         saveSessionWhenIdle();
+        changed = true;
       }
       break;
     case MIDI_TGT_MASTER_DLAY:
@@ -592,6 +697,7 @@ FLASHMEM static void executeTargetAction(int targetId, uint8_t val) {
         ps.masterDelay = pct;
         setMasterDelay(pct);
         saveSessionWhenIdle();
+        changed = true;
       }
       break;
     case MIDI_TGT_MASTER_DFB:
@@ -599,6 +705,7 @@ FLASHMEM static void executeTargetAction(int targetId, uint8_t val) {
         ps.masterDelayFeedback = pct;
         setMasterDelayFeedback(pct);
         saveSessionWhenIdle();
+        changed = true;
       }
       break;
     case MIDI_TGT_MASTER_RVRB:
@@ -606,6 +713,7 @@ FLASHMEM static void executeTargetAction(int targetId, uint8_t val) {
         ps.masterReverb = pct;
         setMasterReverb(pct);
         saveSessionWhenIdle();
+        changed = true;
       }
       break;
     case MIDI_TGT_MASTER_TAPE:
@@ -613,6 +721,7 @@ FLASHMEM static void executeTargetAction(int targetId, uint8_t val) {
         ps.masterTape = pct;
         setMasterTape(pct);
         saveSessionWhenIdle();
+        changed = true;
       }
       break;
     case MIDI_TGT_MASTER_COMP:
@@ -620,12 +729,13 @@ FLASHMEM static void executeTargetAction(int targetId, uint8_t val) {
         ps.masterComp = pct;
         setMasterComp(pct);
         saveSessionWhenIdle();
+        changed = true;
       }
       break;
     case MIDI_TGT_TEMPO_BPM:
       if (!midiClockFollowing()) {
         float targetBpm = roundf(MIN_BPM + ((float)val / 127.0f) * (MAX_BPM - MIN_BPM));
-        setTempo(targetBpm);
+        changed = setTempo(targetBpm);
       }
       break;
     case MIDI_TGT_METRO_MODE: {
@@ -633,10 +743,13 @@ FLASHMEM static void executeTargetAction(int targetId, uint8_t val) {
       ps.metroMode = (MetroMode)m;
       updateMetronomeState();
       saveSessionWhenIdle();
-      break;
+      uiForceRedraw();
+      return;
     }
   }
-  uiForceRedraw();
+  if (changed) {
+    requestContinuousCcUiRedraw();
+  }
 }
 
 FLASHMEM static void instMidiMapHandleExternalCc(uint8_t inCh1To16, uint8_t cc, uint8_t val);
@@ -767,19 +880,23 @@ FLASHMEM bool midiMapHandleCc(uint8_t inCh1To16, uint8_t cc, uint8_t val) {
       if (val < 64) {
         if (midiNavDirBit == dirBit) {
           uint32_t heldMs = (uint32_t)(nowMs - midiNavStartMs);
-          if (!midiNavWasDoubleTap && !inputEditHeld() &&
+          if (!midiNavWasDoubleTap && !inputEditHeld() && !inputOptHeld() && !inputShiftHeld() &&
               heldMs < MIDI_NAV_DOUBLE_TAP_MS) {
             lastNavTapDirBit = dirBit;
             lastNavTapMs = (heldMs < MIDI_NAV_TAP_MAX_MS) ? nowMs : midiNavStartMs;
           }
           midiNavDirBit = 0;
+          inputSetMidiNavDirHeld(0);
         }
       } else {
         bool risingEdge = (prev == 0xFF || prev < 64);
         bool singleShotTrigger = (midiNavDirBit != dirBit) && (val == 127) && ((uint32_t)(nowMs - lastTrigMs[i]) >= 60u);
         if (risingEdge || singleShotTrigger) {
           lastTrigMs[i] = nowMs;
-          if (!inputEditHeld() && lastNavTapDirBit == dirBit &&
+          midiNavDirBit = dirBit;
+          inputSetMidiNavDirHeld(dirBit);
+          if (!inputEditHeld() && !inputOptHeld() && !inputShiftHeld() &&
+              lastNavTapDirBit == dirBit &&
               (uint32_t)(nowMs - lastNavTapMs) < MIDI_NAV_DOUBLE_TAP_MS) {
             lastNavTapDirBit = 0;
             midiNavWasDoubleTap = true;
@@ -788,12 +905,11 @@ FLASHMEM bool midiMapHandleCc(uint8_t inCh1To16, uint8_t cc, uint8_t val) {
           } else {
             lastNavTapDirBit = 0;
             midiNavWasDoubleTap = false;
-            if (!inputEditHeld()) {
+            if (!inputEditHeld() && !inputOptHeld() && !inputShiftHeld()) {
               inputSaveNavSnapshot();
             }
             inputTriggerNav(dirBit, false);
           }
-          midiNavDirBit = dirBit;
           midiNavStartMs = nowMs;
           midiNavNextRepeatMs = nowMs + MIDI_NAV_HOLD_START_MS;
         }
@@ -807,16 +923,7 @@ FLASHMEM bool midiMapHandleCc(uint8_t inCh1To16, uint8_t cc, uint8_t val) {
           midiEditIsDown = false;
           bool wasUsedAsMod = inputFinishMidiEditHold();
           if (!wasUsedAsMod && !midiEditHoldStarted) {
-            uint32_t heldMs = (uint32_t)(nowMs - midiEditPressMs);
-            if (heldMs < MIDI_NAV_DOUBLE_TAP_MS) {
-              midiEditPendingSingleTap = true;
-              midiEditPendingTapAtMs = (heldMs < MIDI_NAV_TAP_MAX_MS)
-                                           ? (nowMs + MIDI_NAV_DOUBLE_TAP_MS)
-                                           : (midiEditPressMs + MIDI_NAV_DOUBLE_TAP_MS);
-            } else {
-              midiEditPendingSingleTap = false;
-              inputTriggerMidiEditTap();
-            }
+            inputTriggerMidiEditTap();
           }
         }
       } else {
@@ -824,23 +931,43 @@ FLASHMEM bool midiMapHandleCc(uint8_t inCh1To16, uint8_t cc, uint8_t val) {
         bool singleShotTrigger = (!midiEditIsDown) && (val == 127) && ((uint32_t)(nowMs - lastTrigMs[i]) >= 60u);
         if (risingEdge || singleShotTrigger) {
           lastTrigMs[i] = nowMs;
-          if (midiEditPendingSingleTap &&
-              (int32_t)(nowMs - midiEditPendingTapAtMs) < 0) {
-            midiEditPendingSingleTap = false;
+          if (inputOptHeld() && !inputShiftHeld()) {
             midiEditIsDown = true;
             midiEditHoldStarted = true;
             inputSetMidiEditHeld(true, true);
+            inputMarkOptUsedAsModifier();
             inputTriggerMidiOptEdit();
+          } else if (inputShiftHeld() && !inputOptHeld()) {
+            midiEditIsDown = true;
+            midiEditHoldStarted = true;
+            inputSetMidiEditHeld(true, true);
+            inputTriggerMidiEditTap();
           } else {
-            if (midiEditPendingSingleTap) {
-              midiEditPendingSingleTap = false;
-              inputTriggerMidiEditTap();
-            }
             midiEditIsDown = true;
             midiEditPressMs = nowMs;
             midiEditHoldStarted = false;
             inputSetMidiEditHeld(true, false);
           }
+        }
+      }
+      continue;
+    }
+
+    if (i == MIDI_TGT_NAV_OPT || i == MIDI_TGT_NAV_SHIFT) {
+      bool &isDown = (i == MIDI_TGT_NAV_OPT) ? midiOptIsDown : midiShiftIsDown;
+      const uint8_t keyBit = (i == MIDI_TGT_NAV_OPT) ? m8::BTN_OPT : m8::BTN_SHIFT;
+      if (val < 64) {
+        if (isDown) {
+          isDown = false;
+          inputSetMidiModifierHeld(keyBit, false);
+        }
+      } else {
+        bool risingEdge = (prev == 0xFF || prev < 64);
+        bool singleShotTrigger = (!isDown) && (val == 127) && ((uint32_t)(nowMs - lastTrigMs[i]) >= 60u);
+        if (risingEdge || singleShotTrigger) {
+          lastTrigMs[i] = nowMs;
+          isDown = true;
+          inputSetMidiModifierHeld(keyBit, true);
         }
       }
       continue;
@@ -869,34 +996,26 @@ FLASHMEM void midiMapService() {
   if (instMapParamDirty) {
     instMapParamDirty = false;
     saveSessionWhenIdle();
-    uiForceRedraw();
+    requestContinuousCcUiRedraw();
   }
 
   if (midiMapDirty && (int32_t)(ms - midiMapDirtyAtMs) >= 500) {
     midiMapFlushSaveIfDirty();
   }
 
-  if (midiEditIsDown) {
-    if (inputIsMidiEditUsedAsModifier()) {
-      midiEditPendingSingleTap = false;
-    } else if (!midiEditHoldStarted &&
-               (int32_t)(ms - midiEditPressMs) >= (int32_t)MIDI_NAV_HOLD_START_MS) {
-      if (inputStartMidiEditHoldAction()) {
-        midiEditHoldStarted = true;
-        midiEditPendingSingleTap = false;
-      }
-    }
-  } else if (midiEditPendingSingleTap) {
-    if ((int32_t)(ms - midiEditPendingTapAtMs) >= 0) {
-      midiEditPendingSingleTap = false;
-      inputTriggerMidiEditTap();
+  if (midiEditIsDown && !inputIsMidiEditUsedAsModifier() && !midiEditHoldStarted &&
+      (int32_t)(ms - midiEditPressMs) >= (int32_t)MIDI_NAV_HOLD_START_MS) {
+    if (inputStartMidiEditHoldAction()) {
+      midiEditHoldStarted = true;
     }
   }
 
   if (midiNavDirBit != 0 && !midiNavWasDoubleTap) {
     if ((int32_t)(ms - midiNavStartMs) >= (int32_t)MIDI_NAV_HOLD_START_MS &&
         (int32_t)(ms - midiNavNextRepeatMs) >= 0) {
-      inputTriggerNav(midiNavDirBit, false);
+      if (!inputIsOptWaveScrubbing() && (!inputShiftHeld() || isMidiNoteEditorOpen())) {
+        inputTriggerNav(midiNavDirBit, false);
+      }
       midiNavNextRepeatMs = ms + inputCurrentRepeatIntervalMs();
     }
   }
@@ -985,6 +1104,16 @@ PROGMEM static const char *const INST_MAP_ND_LABELS[16] = {
   "TRIG MODE"
 };
 
+PROGMEM static const char *const INST_MAP_SF2_LABELS[7] = {
+  "SF2 PRESET",
+  "SF2 TUNE",
+  "LOOP MODE",
+  "ENV MODE",
+  "INTERP",
+  "VEL SENS",
+  "VOICE PAN"
+};
+
 PROGMEM static const char *const INST_MAP_SHARED_LABELS[INST_MIDI_MAP_SHARED_SLOTS] = {
   "AMP AMT",
   "AMP ATK",
@@ -1010,6 +1139,7 @@ static inline int instEngineParamCount(InstType type) {
     case InstType::PhaseDist:  return 15;
     case InstType::Sampler:    return 1;
     case InstType::NoiseDrone: return 16;
+    case InstType::SoundFont:  return 7;
     default:                   return 0;
   }
 }
@@ -1085,6 +1215,7 @@ FLASHMEM const char *instMidiMapRowLabel(InstType type, int rowIdx) {
       case InstType::PhaseDist:  return INST_MAP_PD_LABELS[rowIdx];
       case InstType::Sampler:    return INST_MAP_SMP_LABELS[rowIdx];
       case InstType::NoiseDrone: return INST_MAP_ND_LABELS[rowIdx];
+      case InstType::SoundFont:  return INST_MAP_SF2_LABELS[rowIdx];
       default:                   break;
     }
   }
@@ -1212,12 +1343,14 @@ static inline bool assignU16(uint16_t &dst, uint16_t v) {
 FLASHMEM static bool applyInstPatchSlotCc(FmPatch &p, InstType iType, int slot, uint8_t val) {
   val &= 0x7Fu;
   if (slot >= INST_MIDI_MAP_ENGINE_SLOTS && slot < INST_MIDI_MAP_TOTAL_SLOTS) {
-    switch (slot - INST_MIDI_MAP_ENGINE_SLOTS) {
+    bool changed = false;
+    const int genIdx = slot - INST_MIDI_MAP_ENGINE_SLOTS;
+    switch (genIdx) {
       case 0:  return assignU8(p.amp.amt,           val);
-      case 1:  return assignU8(p.amp.attack,        val);
-      case 2:  return assignU8(p.amp.decay,         val);
-      case 3:  return assignU8(p.amp.sustain,       val);
-      case 4:  return assignU8(p.amp.release,       val);
+      case 1:  changed = assignU8(p.amp.attack,     val); break;
+      case 2:  changed = assignU8(p.amp.decay,      val); break;
+      case 3:  changed = assignU8(p.amp.sustain,    val); break;
+      case 4:  changed = assignU8(p.amp.release,    val); break;
       case 5:  return assignU8(p.flt.amt,           val);
       case 6:  return assignU8(p.flt.attack,        val);
       case 7:  return assignU8(p.flt.decay,         val);
@@ -1236,6 +1369,10 @@ FLASHMEM static bool applyInstPatchSlotCc(FmPatch &p, InstType iType, int slot, 
       }
       default: return false;
     }
+    if (changed && iType == InstType::SoundFont) {
+      sf2RefreshLivePatchParams((int)(&p - &fmSynthPatch(0)));
+    }
+    return changed;
   }
 
   switch (iType) {
@@ -1307,6 +1444,27 @@ FLASHMEM static bool applyInstPatchSlotCc(FmPatch &p, InstType iType, int slot, 
       }
     }
 
+    case InstType::SoundFont: {
+      switch (slot) {
+        case 0: {
+          int instIdx = (int)(&p - &fmSynthPatch(0));
+          sf2RequestCcPreset(instIdx, val);
+          return true;
+        }
+        case 1: return assignU16(p.op[0].ratioX100, scaleCcToTune4800(val));
+        case 2: return assignU8(p.algorithm, scaleCcToEnum(val, NUM_SF2_LOOP_MODES));
+        case 3: return assignU8(p.op[0].wave, scaleCcToEnum(val, NUM_SF2_ENV_MODES));
+        case 4: return assignU8(p.op[1].wave, scaleCcToEnum(val, NUM_SF2_INTERP_MODES));
+        case 5: {
+          if (!assignU8(p.op[0].level, scaleCcTo100(val))) return false;
+          sf2RefreshLivePatchParams((int)(&p - &fmSynthPatch(0)));
+          return true;
+        }
+        case 6: return assignU8(p.op[1].reserved[2], scaleCcToBipolar100(val));
+        default: return false;
+      }
+    }
+
     default:
       return false;
   }
@@ -1362,7 +1520,7 @@ FLASHMEM static void instMidiMapApplyRoutedCcSlow(int instIdx, uint8_t cc, uint8
   }
 }
 
-void instMidiMapApplyRoutedCc(int instIdx, uint8_t cc, uint8_t val) {
+FLASHMEM void instMidiMapApplyRoutedCc(int instIdx, uint8_t cc, uint8_t val) {
   if (instIdx < 0 || instIdx >= NUM_INSTRUMENTS) return;
   if (learningActive || instLearningActive) return;
   cc &= 0x7Fu;

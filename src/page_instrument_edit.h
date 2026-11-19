@@ -2,8 +2,13 @@
 #pragma once
 #include "pages.h"
 
+constexpr int INST_EDIT_VIEWPORT_TOP_Y    = SY(54);
+constexpr int INST_EDIT_VIEWPORT_BOTTOM_Y = SCREEN_H - SY(2);
+constexpr int INST_EDIT_MAX_VIS_BODY_ROWS = 5;
+
 const PageOps &pageInstrumentEditOps();
 void drawSamplerBrowserModal(bool full);
+void drawSf2BrowserModal(bool full);
 void drawInstBrowserModal(bool full);
 void drawInstSaveToModal(bool full);
 void invalidateInstBrowserCache();

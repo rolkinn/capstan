@@ -15,6 +15,7 @@
 #include "page_master.h"
 #include "track_edit.h"
 #include "inst_sampler.h"
+#include "inst_sf2.h"
 #include <Arduino.h>
 #include <stdio.h>
 #include <string.h>
@@ -242,6 +243,7 @@ FLASHMEM static void drawHeaderBar(bool full) {
   if (full) {
     t.fillRect(0, 0, SCREEN_W, hdrH, PANEL);
     t.fillRect(0, hdrH - 1, SCREEN_W, 1, DARK);
+    keepStreaming();
     drawPageMap(SX(266), SY(3), pg);
     drawBatteryIcon(true, LIGHT, PANEL);
     prevHeaderKey = 0;
@@ -826,6 +828,7 @@ FLASHMEM void drawTransportBar(bool isSelectedRow, int selCell, bool full) {
     if (outHR > 0) ms.fillRect(outBarX1, barY + (barMaxH - outHR), barW, outHR, clipOutR ? COLOR_REC : pageAccent);
     ms.blit(meterStripX, SY(195));
   }
+  keepStreaming();
 
   // 2. Six Transport Buttons: [ REC/PUNCH ] [ LOOP ] [ |< ] [ << ] [ PLAY ] [ >> ]
   bool armedRec = false;
@@ -1045,6 +1048,7 @@ FLASHMEM void drawSaveKeyboardModal(bool full) {
       s.blit(SX(6), SY(28));
     }
   }
+  keepStreaming();
 
   // 2. 10x4 Character Grid
   for (int r = 0; r < KB_GRID_ROWS; r++) {
@@ -1071,6 +1075,7 @@ FLASHMEM void drawSaveKeyboardModal(bool full) {
         s.blit(x, y);
       }
     }
+    keepStreaming();
   }
 
   // 3. Bottom Action Row: [ SAVE SONG / SAVE NAME / SAVE ] and [ CANCEL ]
@@ -1221,6 +1226,18 @@ FLASHMEM static void drawClearTrackModal(bool full) {
   }
 }
 
+FLASHMEM void uiClearRegionStreaming(int y0, int h, uint16_t color) {
+  if (h <= 0) return;
+  keepStreaming();
+  auto &t = board.tft();
+  const int stepH = SY(24);
+  for (int y = y0; y < y0 + h; y += stepH) {
+    int bandH = min(stepH, (y0 + h) - y);
+    t.fillRect(0, y, SCREEN_W, bandH, color);
+    keepStreaming();
+  }
+}
+
 FLASHMEM void uiRefresh() {
   static uint32_t lastRefreshMs = 0;
   sysProjectPlayService();
@@ -1247,6 +1264,7 @@ FLASHMEM void uiRefresh() {
   static bool lastClearModalOpen = false;
   static bool lastNoteEdOpen = false;
   static bool lastSmpBrowserOpen = false;
+  static uint8_t lastSf2BrowserState = 0;
   static uint8_t lastSmpKeyModalState = 0;
   static bool lastInstBrowserOpen = false;
   static bool lastInstSaveToOpen = false;
@@ -1258,6 +1276,7 @@ FLASHMEM void uiRefresh() {
   static bool lastSysMidiMapOpen = false;
   static bool lastTypePresetOpen = false;
   static bool lastMidiBrowserOpen = false;
+  static bool lastSongTunerOpen = false;
   bool kbOpen = isSaveKeyboardOpen() &&
                 (pg == Page::Main || pg == Page::Instruments || pg == Page::InstrumentEdit ||
                  pg == Page::SystemSettings);
@@ -1265,6 +1284,7 @@ FLASHMEM void uiRefresh() {
   bool clearModalOpen = isClearTrackModalOpen() && (pg == Page::Audio || pg == Page::Midi);
   bool noteEdOpen = isMidiNoteEditorOpen() && (pg == Page::Midi);
   bool smpBrowserOpen = isSamplerBrowserOpen() && (pg == Page::InstrumentEdit);
+  uint8_t sf2BrowserSt = (pg == Page::InstrumentEdit) ? (uint8_t)sf2BrowserMode() : 0;
   uint8_t smpKeyModalSt = (pg == Page::InstrumentEdit) ? samplerKeyModalState() : 0;
   bool instBrowserOpen = isInstBrowserOpen() &&
                          (pg == Page::Instruments || pg == Page::InstrumentEdit);
@@ -1280,18 +1300,21 @@ FLASHMEM void uiRefresh() {
   bool sysMidiMapOpen = isSysMidiMapModalOpen() && (pg == Page::SystemSettings);
   bool typePresetOpen = isTypePresetModalOpen() && (pg == Page::InstrumentType);
   bool midiBrowserOpen = isMidiClipBrowserOpen() && (pg == Page::Midi || pg == Page::Audio);
+  bool songTunerOpen = isSongTunerOpen() && (pg == Page::SongSettings);
   bool pageOrScreenChanged = (lastDrawnGen != uiGeneration) || (lastDrawnPage != pg);
   bool modalChanged = (!pageOrScreenChanged) &&
                       ((kbOpen != lastKeyboardOpen) || (teModalOpen != lastTeModalOpen) ||
                        (clearModalOpen != lastClearModalOpen) ||
                        (noteEdOpen != lastNoteEdOpen) || (smpBrowserOpen != lastSmpBrowserOpen) ||
+                       (sf2BrowserSt != lastSf2BrowserState) ||
                        (smpKeyModalSt != lastSmpKeyModalState) ||
                        (instBrowserOpen != lastInstBrowserOpen) || (instSaveToOpen != lastInstSaveToOpen) ||
                        (instMidiMapOpen != lastInstMidiMapOpen) ||
                        (sysPresetsOpen != lastSysPresetsOpen) || (sysPresetDelOpen != lastSysPresetDelOpen) ||
                        (usbSavePromptOpen != lastUsbSavePromptOpen) || (sysProjState != lastSysProjState) ||
                        (sysMidiMapOpen != lastSysMidiMapOpen) ||
-                       (typePresetOpen != lastTypePresetOpen) || (midiBrowserOpen != lastMidiBrowserOpen));
+                       (typePresetOpen != lastTypePresetOpen) || (midiBrowserOpen != lastMidiBrowserOpen) ||
+                       (songTunerOpen != lastSongTunerOpen));
 
   if (!pageOrScreenChanged && !modalChanged && !uiImmediate && (now - lastRefreshMs < 33)) return;
   lastRefreshMs = now;
@@ -1302,7 +1325,9 @@ FLASHMEM void uiRefresh() {
   }
 
   const bool projPlayChanged = ((sysProjState == 4) != (lastSysProjState == 4));
+  bool headerDrawnFull = false;
   if (pageOrScreenChanged) {
+    keepStreaming(true);
     lastDrawnGen = uiGeneration;
     lastDrawnPage = pg;
     lastKeyboardOpen = kbOpen;
@@ -1310,6 +1335,7 @@ FLASHMEM void uiRefresh() {
     lastClearModalOpen = clearModalOpen;
     lastNoteEdOpen = noteEdOpen;
     lastSmpBrowserOpen = smpBrowserOpen;
+    lastSf2BrowserState = sf2BrowserSt;
     lastSmpKeyModalState = smpKeyModalSt;
     lastInstBrowserOpen = instBrowserOpen;
     lastInstSaveToOpen = instSaveToOpen;
@@ -1321,14 +1347,23 @@ FLASHMEM void uiRefresh() {
     lastSysMidiMapOpen = sysMidiMapOpen;
     lastTypePresetOpen = typePresetOpen;
     lastMidiBrowserOpen = midiBrowserOpen;
+    lastSongTunerOpen = songTunerOpen;
     invalidateUiCache();
-    board.tft().fillScreen(BG);
+    if (sysProjState != 4) {
+      drawHeaderBar(true);
+      headerDrawnFull = true;
+      uiClearRegionStreaming(SY(24), SCREEN_H - SY(24), BG);
+    } else {
+      uiClearRegionStreaming(0, SCREEN_H, BG);
+    }
   } else if (modalChanged) {
+    keepStreaming(true);
     lastKeyboardOpen = kbOpen;
     lastTeModalOpen = teModalOpen;
     lastClearModalOpen = clearModalOpen;
     lastNoteEdOpen = noteEdOpen;
     lastSmpBrowserOpen = smpBrowserOpen;
+    lastSf2BrowserState = sf2BrowserSt;
     lastSmpKeyModalState = smpKeyModalSt;
     lastInstBrowserOpen = instBrowserOpen;
     lastInstSaveToOpen = instSaveToOpen;
@@ -1340,16 +1375,23 @@ FLASHMEM void uiRefresh() {
     lastSysMidiMapOpen = sysMidiMapOpen;
     lastTypePresetOpen = typePresetOpen;
     lastMidiBrowserOpen = midiBrowserOpen;
+    lastSongTunerOpen = songTunerOpen;
     invalidateUiCache();
     if (projPlayChanged) {
-      board.tft().fillScreen(BG);
+      if (sysProjState != 4) {
+        drawHeaderBar(true);
+        headerDrawnFull = true;
+        uiClearRegionStreaming(SY(24), SCREEN_H - SY(24), BG);
+      } else {
+        uiClearRegionStreaming(0, SCREEN_H, BG);
+      }
     } else {
-      board.tft().fillRect(0, SY(24), SCREEN_W, SCREEN_H - SY(24), BG);
+      uiClearRegionStreaming(SY(24), SCREEN_H - SY(24), BG);
     }
   }
 
-  if (sysProjState != 4) {
-    drawHeaderBar(pageOrScreenChanged || projPlayChanged);
+  if (sysProjState != 4 && !headerDrawnFull) {
+    drawHeaderBar(false);
   }
   keepStreaming();
 

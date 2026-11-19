@@ -22,6 +22,7 @@ constexpr const char *ROOT_DIR = "/Capstan";
 constexpr const char *SONGS_DIR = "/Capstan/SONGS";
 constexpr const char *PROJECTS_DIR = "/Capstan/PROJECTS";
 constexpr const char *INST_PRESETS_DIR = "/Capstan/INSTRUMENT_PRESETS";
+constexpr const char *SOUNDFONTS_DIR = "/Capstan/SOUNDFONTS";
 constexpr int MAX_SONGS = 64;                      // Max named song folders listed from SD card
 constexpr int MAX_SONG_NAME_LEN = 12;              // Max characters in a song folder name
 constexpr int MAX_PROJECTS = 64;                   // Max .proj files listed from /Capstan/PROJECTS
@@ -98,20 +99,37 @@ constexpr int VOLUME_MAX = 100, VOLUME_UNITY = 80;
 constexpr float VOLUME_STEP_DB = 0.3f;
 constexpr int PAN_MAX = 100;                       // -100 (full Left) .. 0 (Center) .. +100 (full Right)
 
-// Master volume
-constexpr int MASTER_VOLUME_MAX = 100, MASTER_VOLUME_UNITY = 80, MASTER_VOLUME_DEFAULT = 40;
+// Master volume:
+//   Speaker (unplugged): 0 = Off, 1..80 = -23.7..0.0 dB (0.3 dB/step, -12.0 dB at default 40), 81..100 = +0.6..+12.04 dB
+//   Headphones (Option A): 0 = Off (MUTE_HP), 1..80 = -51.5..0.0 dB analog (~0.652 dB/step, -19.6 dB at default 50),
+//                          81..100 = +0.7..+14.0 dB (+6.0 dB clean SGTL5000 analog ceiling + up to +8.0 dB limiter-guarded digital)
+constexpr int MASTER_VOLUME_MAX = 100, MASTER_VOLUME_UNITY = 80;
+constexpr int MASTER_VOLUME_SPK_DEFAULT = 40;
+constexpr int MASTER_VOLUME_HP_DEFAULT = 50;
+constexpr int MASTER_VOLUME_DEFAULT = MASTER_VOLUME_SPK_DEFAULT;
 constexpr float MASTER_TOP_GAIN = 4.0f;
+constexpr float MASTER_ATTEN_STEP_DB = 0.3f;
 constexpr float MASTER_STEP_DB = 12.0412f / (MASTER_VOLUME_MAX - MASTER_VOLUME_UNITY);
-inline float masterStepDb(int step) { return (step - MASTER_VOLUME_UNITY) * MASTER_STEP_DB; }
+constexpr float MASTER_HP_MIN_DB = -51.5f;
+constexpr float MASTER_HP_MAX_ANA_DB = 6.0f;
+constexpr float MASTER_HP_MAX_TOTAL_DB = 14.0f;
+constexpr float MASTER_HP_ATTEN_STEP_DB = (-MASTER_HP_MIN_DB) / (float)(MASTER_VOLUME_UNITY - 1);
+constexpr float MASTER_HP_BOOST_STEP_DB = MASTER_HP_MAX_TOTAL_DB / (float)(MASTER_VOLUME_MAX - MASTER_VOLUME_UNITY);
+
+inline float masterStepDb(int step) {
+  return (step <= MASTER_VOLUME_UNITY)
+             ? (step - MASTER_VOLUME_UNITY) * MASTER_ATTEN_STEP_DB
+             : (step - MASTER_VOLUME_UNITY) * MASTER_STEP_DB;
+}
+
+inline float masterHeadphoneStepDb(int step) {
+  return (step <= MASTER_VOLUME_UNITY)
+             ? (step - MASTER_VOLUME_UNITY) * MASTER_HP_ATTEN_STEP_DB
+             : (step - MASTER_VOLUME_UNITY) * MASTER_HP_BOOST_STEP_DB;
+}
 
 // Screen brightness (5..100, scaled to 0..255 PWM), Metronome volume (0..100, default 80),
-// Analog Headphone Gain preset (LOW, NORMAL, HIGH; default NORMAL), & Line-In Gain (-12.0..+12.0 dB, default 0.0 dB)
-enum class HeadphoneGain : uint8_t {
-  Low    = 0,  // -19.5 dB analog base
-  Normal = 1,  // -10.0 dB analog base (+13 dB over legacy, default)
-  High   = 2   //   0.0 dB clean analog unity ceiling
-};
-constexpr HeadphoneGain DEFAULT_HEADPHONE_GAIN = HeadphoneGain::Normal;
+// & Line-In Gain (-12.0..+12.0 dB, default 0.0 dB)
 constexpr int16_t MIN_LINE_IN_GAIN_TENTHS = -120;      // -12.0 dB
 constexpr int16_t MAX_LINE_IN_GAIN_TENTHS = 120;       // +12.0 dB
 constexpr int16_t DEFAULT_LINE_IN_GAIN_TENTHS = 0;     //   0.0 dB

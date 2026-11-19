@@ -192,13 +192,8 @@ extern uint32_t inputRing[INPUT_FRAMES];
 // Input/Output levels & USB audio
 extern volatile float inputMeterL, inputMeterR;
 extern volatile float outputMeterL, outputMeterR;
-constexpr int USB_OUT_CHANNELS = 2 + 2 * NUM_STEREO_AUDIO_TRACKS + NUM_MONO_AUDIO_TRACKS;
-constexpr int usbTrackChannel(int t) {
-  return (t < NUM_STEREO_AUDIO_TRACKS)
-             ? (2 + 2 * t)
-             : (2 + 2 * NUM_STEREO_AUDIO_TRACKS + (t - NUM_STEREO_AUDIO_TRACKS));
-}
-extern bool (*usbAudioRead)(uint32_t *frames);
+constexpr int USB_OUT_CHANNELS = 2;
+extern int (*usbAudioRead)(uint32_t *frames);
 extern int16_t *(*usbAudioWrite)();
 extern void (*usbAudioWritten)();
 
@@ -215,7 +210,6 @@ void takeTrackPeaks(int t, float &left, float &right);
 void takeInputPeaks(float &left, float &right);
 void takeOutputPeaks(float &left, float &right);
 void setMasterVolume(int step);
-void setHeadphoneGainMode(HeadphoneGain mode);
 void setHeadphonesConnectedState(bool connected);
 int targetHeadphoneVolumeStep();
 void setLineInDigitalTrim(float gain);
@@ -264,6 +258,7 @@ void midiSendNow(uint8_t status, uint8_t portMask = MIDI_PORT_BOTH);
 void midiSendClockNow(uint8_t status);
 void midiSendMsg(uint8_t status, uint8_t d1, uint8_t d2, int len, uint8_t portMask = MIDI_PORT_BOTH);
 void midiOutAttachUsb();
+bool midiOutHasUsbPending(uint32_t now);
 int midiOutTakeUsbPackets(MidiPacket *out, int max);
 int midiOutTakeUsbTicks(uint32_t now, int max);
 

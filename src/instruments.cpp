@@ -4,10 +4,12 @@
 #include "inst_phasedist.h"
 #include "inst_sampler.h"
 #include "inst_noisedrone.h"
+#include "inst_sf2.h"
 #include "midi_seq.h"
 #include "midi_map.h"
 #include "master_fx.h"
 #include "storage.h"
+#include "tuner.h"
 #include <Arduino.h>
 #include <math.h>
 #include <string.h>
@@ -67,7 +69,7 @@ struct SynthEvent {
   uint8_t d1;           // note / cc / pb_lsb
   uint8_t d2;           // velocity / cc_val / pb_msb
   uint8_t sampleOffset; // 0..127 sub-block sample offset within the 128-sample block
-  uint8_t streamIdx;    // 0..3 Sampler stream slot (or 0xFF)
+  uint8_t streamIdx;    // 0..7 Sampler stream slot (or 0xFF)
   uint16_t streamGen;   // Sampler stream generation (1..65535)
 };
 static_assert(sizeof(SynthEvent) == 8, "SynthEvent must be 8 bytes");
@@ -86,33 +88,23 @@ DMAMEM static FmPatch clipboardPatch;
 static bool clipboardValid = false;
 
 // Per-instrument runtime state (pitch bend, CC, telemetry) and cached envelope rates
-struct FmInstEnvRates {
-  InstEnvParams lastAmp;
-  InstEnvParams lastFlt;
-  float ampAmt;
-  float ampAtkInc;
-  float ampDecMul;
-  float ampSusLvl;
-  float ampRelMul;
-  float fltAmt;
-  float fltAtkInc;
-  float fltDecMul;
-  float fltSusLvl;
-  float fltRelMul;
-};
-
 static FmInstRuntime instRt[NUM_INSTRUMENTS];
 static float instCurLevel[NUM_INSTRUMENTS];
 DMAMEM static FmInstEnvRates instEnvRates[NUM_INSTRUMENTS];
 
-// 64-voice polyphonic pool: 8 dedicated voices per instrument slot (I01..I08)
+// 32-voice polyphonic pool: 8 voices max per instrument slot (I01..I08)
 static FmVoice voices[NUM_FM_VOICES];
 static uint32_t voiceCounter = 0;
 static uint32_t noiseRng = 0x9E3779B9u;
 static int32_t instFxTailFrames = 0;
 static int32_t instFxSilentBlocks = 0;
+static int32_t instLimTailFrames = 0;
 static int8_t lastFxInst = -1;
 static int8_t lastFxMidiTrack = -1;
+static bool lastInstWantCap = false;
+static LookaheadMonitorLimiter instBusLimiter(28500.0f, 30800.0f, 32200.0f);
+DMAMEM static float instCapDelayL[LookaheadMonitorLimiter::LOOKAHEAD];
+DMAMEM static float instCapDelayR[LookaheadMonitorLimiter::LOOKAHEAD];
 
 // Audition auto-note-off & Noise Drone Latch/Auto state
 static int auditionInst = -1;
@@ -142,11 +134,11 @@ static bool typePresetModalOpen = false;
 static bool typePresetIsGlobal = false;
 static char instBrowserDir[INST_BROWSER_DIR_MAX] = "";
 
-void *sharedBrowserPoolBuf() {
+FLASHMEM void *sharedBrowserPoolBuf() {
   return sharedBrowserPool;
 }
 
-char *sharedBrowserDirBuf() {
+FLASHMEM char *sharedBrowserDirBuf() {
   return instBrowserDir;
 }
 
@@ -167,6 +159,8 @@ const InstEngineOps *instEngineAt(int typeIdx) {
       return &instSamplerEngine();
     case 3:
       return &instNoiseDroneEngine();
+    case 4:
+      return &instSoundFontEngine();
   }
 }
 
@@ -193,6 +187,10 @@ FLASHMEM const char *instTypeName(InstType type) {
 // ============================================================================
 // Shared DSP Utilities for Instrument Engines
 // ============================================================================
+const FmInstEnvRates &instCachedEnvRates(int instIdx) {
+  return instEnvRates[constrain(instIdx, 0, NUM_INSTRUMENTS - 1)];
+}
+
 float instSinLutAt(uint32_t idx) {
   return sinLut[idx & INST_LUT_MASK];
 }
@@ -268,6 +266,16 @@ static inline void updateVoiceSvfCoeffs(FmVoice &v, const FmInstEnvRates &er) {
   }
 }
 
+// Smooth C1 soft-knee guard for per-voice SVF input (exact unity on [-1.8, +1.8], asymptotic to +/-2.5)
+static inline float softLimitVoiceSvf(float x) {
+  if (x >= -1.8f && x <= 1.8f) return x;
+  float ax = fabsf(x);
+  constexpr float W = 0.7f;
+  float u = ax - 1.8f;
+  float y = 1.8f + (W * u) / (W + u);
+  return (x >= 0.0f) ? y : -y;
+}
+
 float instApplyVoiceFilterAndAmp(FmVoice &v, float rawSample, float voiceGain) {
   const FmInstEnvRates &er = instEnvRates[constrain((int)v.instIdx, 0, NUM_INSTRUMENTS - 1)];
   // General Filter Envelope (FLT: AMT, Attack, Decay, Sustain, Release in 0..127)
@@ -277,7 +285,7 @@ float instApplyVoiceFilterAndAmp(FmVoice &v, float rawSample, float voiceGain) {
   if (v.svfAlpha < 0.999f) {
     const float alpha = v.svfAlpha;
     float fb = v.svfFbG * (v.fltLp1 - v.fltLp2);
-    float in = constrain(rawSample + fb, -1.5f, 1.5f);
+    float in = softLimitVoiceSvf(rawSample + fb);
     v.fltLp1 += alpha * (in - v.fltLp1);
     v.fltLp2 += alpha * (v.fltLp1 - v.fltLp2);
     filtered = v.fltLp2;
@@ -301,7 +309,7 @@ void instApplyVoiceStereoFilterAndAmp(FmVoice &v, float rawL, float rawR, float 
     const float fbG = v.svfFbG;
 
     float fbL = fbG * (v.fltLp1 - v.fltLp2);
-    float inL = constrain(rawL + fbL, -1.5f, 1.5f);
+    float inL = softLimitVoiceSvf(rawL + fbL);
     v.fltLp1 += alpha * (inL - v.fltLp1);
     v.fltLp2 += alpha * (v.fltLp1 - v.fltLp2);
     filtL = v.fltLp2;
@@ -312,7 +320,7 @@ void instApplyVoiceStereoFilterAndAmp(FmVoice &v, float rawL, float rawR, float 
       filtR = filtL;
     } else {
       float fbR = fbG * (v.opPrev[0] - v.opPrev[1]);
-      float inR = constrain(rawR + fbR, -1.5f, 1.5f);
+      float inR = softLimitVoiceSvf(rawR + fbR);
       v.opPrev[0] += alpha * (inR - v.opPrev[0]);
       v.opPrev[1] += alpha * (v.opPrev[0] - v.opPrev[1]);
       filtR = v.opPrev[1];
@@ -370,10 +378,13 @@ FLASHMEM bool fmSynthIsSlotEmpty(int instIdx) {
   return instEngineForType((InstType)patches[instIdx].type) == nullptr;
 }
 
+static void refreshInstEnvelopeRates(int instIdx, const FmPatch &p);
+
 static inline void syncInstCurLevel(int instIdx) {
   if (instIdx < 0 || instIdx >= NUM_INSTRUMENTS) return;
   int lvl = constrain(instPatchLevel(patches[instIdx]), 0, (int)VOLUME_MAX);
   instCurLevel[instIdx] = INST_LEVEL_LUT[lvl];
+  refreshInstEnvelopeRates(instIdx, patches[instIdx]);
 }
 
 FLASHMEM void fmSynthResetToDefault(int instIdx, bool keepName) {
@@ -400,6 +411,9 @@ FLASHMEM void fmSynthResetToDefault(int instIdx, bool keepName) {
   if (curType == InstType::Sampler) {
     samplerClearSlot(instIdx);
   }
+  if (curType == InstType::SoundFont) {
+    sf2UnloadFile(instIdx);
+  }
   resetInstDriveState(instIdx);
   syncInstCurLevel(instIdx);
 }
@@ -409,6 +423,7 @@ FLASHMEM void fmSynthCreateInSlot(int instIdx, InstType type) {
   fmSynthSilenceInst(instIdx);
   resetInstDriveState(instIdx);
   samplerClearSlot(instIdx);
+  sf2ClearSlot(instIdx);
   instMidiMapClearInst(instIdx);
   const InstEngineOps *ops = instEngineForType(type);
   if (ops) {
@@ -428,6 +443,7 @@ FLASHMEM void fmSynthDeleteSlot(int instIdx) {
   fmSynthSilenceInst(instIdx);
   resetInstDriveState(instIdx);
   samplerClearSlot(instIdx);
+  sf2ClearSlot(instIdx);
   instMidiMapClearInst(instIdx);
   memset(&patches[instIdx], 0, sizeof(FmPatch));
   patches[instIdx].type = (uint8_t)InstType::None;
@@ -439,6 +455,7 @@ FLASHMEM bool fmSynthCopySlot(int instIdx) {
   if (fmSynthIsSlotEmpty(instIdx)) return false;
   clipboardPatch = patches[instIdx];
   samplerCopySlot(instIdx);
+  sf2CopySlot(instIdx);
   instMidiMapCopyInst(instIdx);
   clipboardValid = true;
   return true;
@@ -451,6 +468,7 @@ FLASHMEM bool fmSynthPasteSlot(int instIdx) {
   patches[instIdx] = clipboardPatch;
   syncInstCurLevel(instIdx);
   samplerPasteSlot(instIdx);
+  sf2PasteSlot(instIdx);
   instMidiMapPasteInst(instIdx);
   memset(&clipboardPatch, 0, sizeof(clipboardPatch));
   clipboardValid = false;
@@ -468,13 +486,19 @@ FLASHMEM void fmSynthResetAll() {
   typePresetModalOpen = false;
   fmSynthAllNotesOff();
   samplerResetAll();
+  sf2ResetAll();
   instMidiMapResetAll();
   ndSynthResetAllVoices();
   resetInstFxState();
   instFxTailFrames = 0;
   instFxSilentBlocks = 0;
+  instLimTailFrames = 0;
   lastFxInst = -1;
   lastFxMidiTrack = -1;
+  lastInstWantCap = false;
+  instBusLimiter.reset();
+  memset(instCapDelayL, 0, sizeof(instCapDelayL));
+  memset(instCapDelayR, 0, sizeof(instCapDelayR));
   latchedDroneMask = 0;
   autoDroneMask = 0;
   for (int i = 0; i < NUM_INSTRUMENTS; i++) {
@@ -493,6 +517,7 @@ FLASHMEM void fmSynthInit() {
   for (uint32_t i = 0; i < INST_LUT_SIZE; i++) {
     sinLut[i] = sinf(2.0f * (float)M_PI * (float)i / (float)INST_LUT_SIZE);
   }
+  sf2Init();
   fmSynthResetAll();
 }
 
@@ -603,7 +628,7 @@ static inline bool enqueueSynthEvent(SynthEvType type, uint8_t packedInstTrack, 
   return true;
 }
 
-static void applySilenceInstInIsr(int instIdx) {
+FLASHMEM static void applySilenceInstInIsr(int instIdx) {
   if (instIdx < 0 || instIdx >= NUM_INSTRUMENTS) return;
   latchedDroneMask &= ~(uint8_t)(1u << instIdx);
   autoDroneMask &= ~(uint8_t)(1u << instIdx);
@@ -618,9 +643,13 @@ static void applySilenceInstInIsr(int instIdx) {
     }
   }
   samplerSilenceInst(instIdx);
+  if ((InstType)patches[instIdx].type == InstType::SoundFont) {
+    sf2ResetPerformanceControllersInIsr(instIdx);
+  }
+  sf2SilenceInst(instIdx);
 }
 
-static void applySilenceMidiTrackInIsr(int midiTrack) {
+FLASHMEM static void applySilenceMidiTrackInIsr(int midiTrack) {
   if (midiTrack < 0 || midiTrack >= NUM_MIDI_TRACKS) return;
   for (int i = 0; i < NUM_FM_VOICES; i++) {
     if (voices[i].active && voices[i].midiTrack == (uint8_t)midiTrack) {
@@ -632,9 +661,9 @@ static void applySilenceMidiTrackInIsr(int midiTrack) {
   }
 }
 
-static void applyNoteOnInIsr(int instIdx, uint8_t note, uint8_t velocity,
-                             uint8_t sampleOffset, uint32_t samplerStreamIdx, uint32_t samplerStreamGen,
-                             uint8_t midiTrack = 0xFFu) {
+FLASHMEM static void applyNoteOnInIsr(int instIdx, uint8_t note, uint8_t velocity,
+                                      uint8_t sampleOffset, uint32_t samplerStreamIdx, uint32_t samplerStreamGen,
+                                      uint8_t midiTrack = 0xFFu) {
   if (instIdx < 0 || instIdx >= NUM_INSTRUMENTS) return;
   const FmPatch &p = patches[instIdx];
   const InstType iType = (InstType)p.type;
@@ -693,6 +722,7 @@ static void applyNoteOnInIsr(int instIdx, uint8_t note, uint8_t velocity,
     if (voices[i].active && voices[i].instIdx == (uint8_t)instIdx) {
       instActiveCount++;
       if (chosen < 0 && voices[i].note == note &&
+          (iType != InstType::SoundFont || sf2VoiceMatchesZone(i, (uint8_t)samplerStreamIdx)) &&
           (midiTrack >= NUM_MIDI_TRACKS || voices[i].midiTrack == midiTrack || voices[i].midiTrack >= NUM_MIDI_TRACKS)) {
         chosen = i;
       }
@@ -709,12 +739,28 @@ static void applyNoteOnInIsr(int instIdx, uint8_t note, uint8_t velocity,
     }
   }
 
-  // 3. If this instrument already has 8 active voices, steal the quietest / releasing voice on THIS instrument
+  auto voiceStealScore = [&](const FmVoice &cand) FLASHMEM -> float {
+    if (!cand.gate && !cand.sustained) {
+      return cand.ampEnv; // 0.0..1.0: quietest releasing tail first
+    }
+    if (!cand.gate && cand.sustained) {
+      return 2.0f + cand.ampEnv; // 2.0..3.0: pedal-sustained tail next
+    }
+    uint32_t ageTicks = voiceCounter - cand.age;
+    if (ageTicks <= 1u) {
+      // Protect voices triggered on this exact multi-zone Note-On or immediate microsecond
+      return 1000.0f;
+    }
+    // Among gated voices, steal the OLDEST voice (largest ageTicks -> smallest score)
+    return 10.0f - min(5.0f, (float)ageTicks * 0.01f);
+  };
+
+  // 3. If this instrument already has 8 active voices, steal the best candidate on THIS instrument
   if (chosen < 0 && instActiveCount >= VOICES_PER_INSTRUMENT) {
     float bestScore = 1e9f;
     for (int i = 0; i < NUM_FM_VOICES; i++) {
       if (voices[i].active && voices[i].instIdx == (uint8_t)instIdx) {
-        float score = voices[i].ampEnv + (voices[i].gate ? 2.0f : 0.0f);
+        float score = voiceStealScore(voices[i]);
         if (score < bestScore) {
           bestScore = score;
           chosen = i;
@@ -723,12 +769,12 @@ static void applyNoteOnInIsr(int instIdx, uint8_t note, uint8_t velocity,
     }
   }
 
-  // 4. Otherwise all 32 global voices are busy; steal the quietest / releasing voice across the pool
+  // 4. Otherwise all 32 global voices are busy; steal the best candidate across the pool
   if (chosen < 0) {
     float bestScore = 1e9f;
     chosen = 0;
     for (int i = 0; i < NUM_FM_VOICES; i++) {
-      float score = voices[i].ampEnv + (voices[i].gate ? 2.0f : 0.0f);
+      float score = voiceStealScore(voices[i]);
       if (score < bestScore) {
         bestScore = score;
         chosen = i;
@@ -737,8 +783,21 @@ static void applyNoteOnInIsr(int instIdx, uint8_t note, uint8_t velocity,
   }
 
   FmVoice &v = voices[chosen];
-  const bool wasQuiet = (!v.active || v.ampEnv < 0.02f);
-  const bool changedInst = (v.active && v.instIdx != (uint8_t)instIdx);
+  const bool wasActive = v.active;
+  const InstType prevVoiceType = wasActive ? (InstType)patches[v.instIdx].type : InstType::None;
+  const bool wasActiveSf2 = wasActive && (prevVoiceType == InstType::SoundFont);
+  // Release any active shared stream owned by a stolen Sampler voice before repurposing
+  if (wasActive && prevVoiceType == InstType::Sampler && v.opPhase[0] < SHARED_NUM_STREAMS) {
+    SamplerStream *oldSt = samplerStreamSlot(v.opPhase[0]);
+    if (oldSt && oldSt->generation == v.opPhase[1]) {
+      oldSt->active = false;
+      oldSt->pendingVoice = false;
+      oldSt->loopLockedInRing = false;
+    }
+  }
+  const bool wasQuiet = (!wasActive || v.ampEnv < 0.02f);
+  const bool changedInst = (wasActive && v.instIdx != (uint8_t)instIdx);
+  const bool sameNoteRetrig = (wasActive && !changedInst && v.note == note);
   v.active = true;
   v.instIdx = (uint8_t)instIdx;
   v.midiTrack = (midiTrack < NUM_MIDI_TRACKS) ? midiTrack : 0xFFu;
@@ -746,7 +805,7 @@ static void applyNoteOnInIsr(int instIdx, uint8_t note, uint8_t velocity,
   v.velocity = velocity;
   v.gate = true;
   v.sustained = false;
-  v.startSampleOffset = (wasQuiet || changedInst || iType == InstType::Sampler)
+  v.startSampleOffset = (wasQuiet || changedInst || iType == InstType::Sampler || iType == InstType::SoundFont)
                             ? ((sampleOffset < AUDIO_BLOCK_SAMPLES) ? sampleOffset : 0)
                             : 0;
   v.age = ++voiceCounter;
@@ -758,6 +817,8 @@ static void applyNoteOnInIsr(int instIdx, uint8_t note, uint8_t velocity,
   v.ampStage = EnvStage::Attack;
   v.fltStage = EnvStage::Attack;
   if (iType == InstType::Sampler) {
+    v.ampEnv = 0.0f;
+    v.fltEnv = 0.0f;
     v.opPhase[0] = samplerStreamIdx;
     v.opPhase[1] = samplerStreamGen;
     v.pdCycleParity = 0;
@@ -766,7 +827,18 @@ static void applyNoteOnInIsr(int instIdx, uint8_t note, uint8_t velocity,
     v.fltLp1 = 0.0f;
     v.fltLp2 = 0.0f;
     samplerActivateStream(samplerStreamIdx, samplerStreamGen, chosen);
+  } else if (iType == InstType::SoundFont) {
+    v.ampEnv = 0.0f;
+    v.fltEnv = 0.0f;
+    v.pdCycleParity = 0;
+    v.opPrev[0] = 0.0f;
+    v.opPrev[1] = 0.0f;
+    v.fltLp1 = 0.0f;
+    v.fltLp2 = 0.0f;
+    sf2InitVoiceInIsr(chosen, v, p, (uint8_t)samplerStreamIdx, (uint16_t)samplerStreamGen, wasActiveSf2);
   } else if (wasQuiet || changedInst) {
+    v.ampEnv = 0.0f;
+    v.fltEnv = 0.0f;
     v.opPhase[0] = 0;
     v.opPhase[1] = 0;
     v.pdCycleParity = 0;
@@ -777,10 +849,14 @@ static void applyNoteOnInIsr(int instIdx, uint8_t note, uint8_t velocity,
     if (isNoiseDrone) {
       ndSynthResetVoice(chosen);
     }
+  } else {
+    (void)sameNoteRetrig;
+    // Same-instrument polyphonic voice steal / retrigger: keep oscillator phase,
+    // SVF state, and instantaneous ampEnv continuous (zero step click).
   }
 }
 
-static void applyNoteOffInIsr(int instIdx, uint8_t note, uint8_t midiTrack = 0xFFu) {
+FLASHMEM static void applyNoteOffInIsr(int instIdx, uint8_t note, uint8_t midiTrack = 0xFFu) {
   if (instIdx < 0 || instIdx >= NUM_INSTRUMENTS) return;
   const FmPatch &p = patches[instIdx];
   const InstType iType = (InstType)p.type;
@@ -799,9 +875,11 @@ static void applyNoteOffInIsr(int instIdx, uint8_t note, uint8_t midiTrack = 0xF
     if (v.active && v.instIdx == (uint8_t)instIdx && v.note == note && v.gate &&
         (midiTrack >= NUM_MIDI_TRACKS || v.midiTrack == midiTrack || v.midiTrack >= NUM_MIDI_TRACKS)) {
       v.gate = false;
+      const bool playToEnd = playToEndOnRelease ||
+                             (iType == InstType::SoundFont && sf2PlayToEndOnRelease(instIdx, i, p));
       if (pedal) {
         v.sustained = true;
-      } else if (!playToEndOnRelease) {
+      } else if (!playToEnd) {
         v.ampStage = EnvStage::Release;
         v.fltStage = EnvStage::Release;
       }
@@ -809,7 +887,7 @@ static void applyNoteOffInIsr(int instIdx, uint8_t note, uint8_t midiTrack = 0xF
   }
 }
 
-static void applyCcInIsr(int instIdx, uint8_t cc, uint8_t val) {
+FLASHMEM static void applyCcInIsr(int instIdx, uint8_t cc, uint8_t val) {
   if (instIdx < 0 || instIdx >= NUM_INSTRUMENTS) return;
   val &= 0x7F;
   if (cc == 1) {
@@ -817,7 +895,8 @@ static void applyCcInIsr(int instIdx, uint8_t cc, uint8_t val) {
   } else if (cc == 64) {
     bool down = (val >= 64);
     const FmPatch &p = patches[instIdx];
-    const bool isSampler = ((InstType)p.type == InstType::Sampler);
+    const InstType iType = (InstType)p.type;
+    const bool isSampler = (iType == InstType::Sampler);
     const bool playToEndOnRelease = isSampler &&
         (p.algorithm == (uint8_t)SamplerPressMode::Once ||
          p.algorithm == (uint8_t)SamplerPressMode::RepThru);
@@ -827,7 +906,9 @@ static void applyCcInIsr(int instIdx, uint8_t cc, uint8_t val) {
         FmVoice &v = voices[i];
         if (v.active && v.instIdx == (uint8_t)instIdx && v.sustained) {
           v.sustained = false;
-          if (!v.gate && !playToEndOnRelease) {
+          const bool playToEnd = playToEndOnRelease ||
+                                 (iType == InstType::SoundFont && sf2PlayToEndOnRelease(instIdx, i, p));
+          if (!v.gate && !playToEnd) {
             v.ampStage = EnvStage::Release;
             v.fltStage = EnvStage::Release;
           }
@@ -837,16 +918,22 @@ static void applyCcInIsr(int instIdx, uint8_t cc, uint8_t val) {
   } else if (cc == 120 || cc == 123) {
     applySilenceInstInIsr(instIdx);
   }
+  if ((InstType)patches[instIdx].type == InstType::SoundFont && cc != 120 && cc != 123) {
+    sf2HandleCcInIsr(instIdx, cc, val);
+  }
 }
 
-static void applyPitchBendInIsr(int instIdx, uint8_t lsb, uint8_t msb) {
+FLASHMEM static void applyPitchBendInIsr(int instIdx, uint8_t lsb, uint8_t msb) {
   if (instIdx < 0 || instIdx >= NUM_INSTRUMENTS) return;
   int bend = ((int)(msb & 0x7F) << 7) | (int)(lsb & 0x7F);
   float norm = (float)(bend - 8192) * (1.0f / 8192.0f); // -1.0 .. +1.0 (+/- 2 semitones)
   instRt[instIdx].pitchBendRatio = fastExp2Small(norm * (2.0f / 12.0f));
+  if ((InstType)patches[instIdx].type == InstType::SoundFont) {
+    sf2HandlePitchBendInIsr(instIdx, lsb, msb);
+  }
 }
 
-static void fmSynthProcessQueuedEvents() {
+FLASHMEM static void fmSynthProcessQueuedEvents() {
   while (synthEvTail != synthEvHead) {
     uint32_t t = synthEvTail;
     SynthEvent ev = synthEvRing[t & SYNTH_EV_RING_MASK];
@@ -872,8 +959,8 @@ static void fmSynthProcessQueuedEvents() {
   }
 }
 
-bool fmSynthNoteOn(int instIdx, uint8_t note, uint8_t velocity, uint8_t sampleOffset,
-                   bool allowSdIo, uint8_t midiTrack) {
+FLASHMEM bool fmSynthNoteOn(int instIdx, uint8_t note, uint8_t velocity, uint8_t sampleOffset,
+                            bool allowSdIo, uint8_t midiTrack) {
   if (instIdx < 0 || instIdx >= NUM_INSTRUMENTS) return true;
   const FmPatch &p = patches[instIdx];
   const InstType iType = (InstType)p.type;
@@ -883,6 +970,39 @@ bool fmSynthNoteOn(int instIdx, uint8_t note, uint8_t velocity, uint8_t sampleOf
     return true;
   }
   if (synthEvHead - synthEvTail >= SYNTH_EV_RING_SIZE - 16) {
+    return true;
+  }
+
+  if (iType == InstType::SoundFont) {
+    uint8_t zoneIds[2] = {};
+    int nZones = sf2MatchNoteZones(instIdx, note & 0x7Fu, velocity & 0x7Fu, zoneIds);
+    if (nZones <= 0) {
+      return true;
+    }
+    uint8_t evTags[2] = {};
+    uint16_t evGens[2] = {};
+    int readyCount = 0;
+    for (int k = 0; k < nZones; k++) {
+      if (!sf2PrepareZoneVoiceOn(instIdx, zoneIds[k], allowSdIo, evTags[readyCount], evGens[readyCount])) {
+        if (!allowSdIo) {
+          return false; // ISR uncached 41st+ drum zone: defer cleanly to loop()
+        }
+        continue;
+      }
+      readyCount++;
+    }
+    if (readyCount <= 0) {
+      return true;
+    }
+    if (allowSdIo) {
+      refreshInstEnvelopeRates(instIdx, p);
+    }
+    const uint8_t packedDest = packSynthInstTrack(instIdx, midiTrack);
+    for (int k = 0; k < readyCount; k++) {
+      enqueueSynthEvent(SynthEvType::NoteOn, packedDest,
+                        note & 0x7Fu, velocity & 0x7Fu,
+                        sampleOffset, evTags[k], evGens[k]);
+    }
     return true;
   }
 
@@ -907,7 +1027,7 @@ bool fmSynthNoteOn(int instIdx, uint8_t note, uint8_t velocity, uint8_t sampleOf
   return true;
 }
 
-void fmSynthNoteOff(int instIdx, uint8_t note, uint8_t sampleOffset, uint8_t midiTrack) {
+FLASHMEM void fmSynthNoteOff(int instIdx, uint8_t note, uint8_t sampleOffset, uint8_t midiTrack) {
   if (instIdx < 0 || instIdx >= NUM_INSTRUMENTS) return;
   const FmPatch &p = patches[instIdx];
   const InstType iType = (InstType)p.type;
@@ -924,12 +1044,12 @@ void fmSynthNoteOff(int instIdx, uint8_t note, uint8_t sampleOffset, uint8_t mid
   }
 }
 
-void fmSynthPitchBend(int instIdx, uint8_t lsb, uint8_t msb, uint8_t midiTrack) {
+FLASHMEM void fmSynthPitchBend(int instIdx, uint8_t lsb, uint8_t msb, uint8_t midiTrack) {
   if (instIdx < 0 || instIdx >= NUM_INSTRUMENTS) return;
   enqueueSynthEvent(SynthEvType::PitchBend, packSynthInstTrack(instIdx, midiTrack), lsb & 0x7Fu, msb & 0x7Fu);
 }
 
-void fmSynthCC(int instIdx, uint8_t cc, uint8_t val, uint8_t midiTrack) {
+FLASHMEM void fmSynthCC(int instIdx, uint8_t cc, uint8_t val, uint8_t midiTrack) {
   if (instIdx < 0 || instIdx >= NUM_INSTRUMENTS) return;
   instMidiMapApplyRoutedCc(instIdx, cc & 0x7Fu, val & 0x7Fu);
   enqueueSynthEvent(SynthEvType::ControlChange, packSynthInstTrack(instIdx, midiTrack), cc & 0x7Fu, val & 0x7Fu);
@@ -940,6 +1060,28 @@ FLASHMEM void fmSynthSilenceInst(int instIdx) {
   noInterrupts();
   fmSynthProcessQueuedEvents();
   applySilenceInstInIsr(instIdx);
+  interrupts();
+}
+
+FLASHMEM void fmSynthReleaseDirectVoices(int instIdx) {
+  if (instIdx < 0 || instIdx >= NUM_INSTRUMENTS) return;
+  if (transport.mode != TransportMode::Running) {
+    fmSynthSilenceInst(instIdx);
+    return;
+  }
+  noInterrupts();
+  fmSynthProcessQueuedEvents();
+  latchedDroneMask &= ~(uint8_t)(1u << instIdx);
+  instRt[instIdx].sustainPedal = false;
+  instRt[instIdx].pitchBendRatio = 1.0f;
+  for (int i = 0; i < NUM_FM_VOICES; i++) {
+    if (voices[i].active && voices[i].instIdx == (uint8_t)instIdx && voices[i].midiTrack >= NUM_MIDI_TRACKS) {
+      voices[i].gate = false;
+      voices[i].sustained = false;
+      voices[i].ampStage = EnvStage::Release;
+      voices[i].fltStage = EnvStage::Release;
+    }
+  }
   interrupts();
 }
 
@@ -963,6 +1105,9 @@ FLASHMEM void fmSynthAllNotesOff() {
     instRt[inst].sustainPedal = false;
     instRt[inst].pitchBendRatio = 1.0f;
     instRt[inst].modWheelBoost = 0.0f;
+    if ((InstType)patches[inst].type == InstType::SoundFont) {
+      sf2ResetPerformanceControllersInIsr(inst);
+    }
   }
   for (int i = 0; i < NUM_FM_VOICES; i++) {
     uint8_t inst = voices[i].instIdx;
@@ -975,6 +1120,7 @@ FLASHMEM void fmSynthAllNotesOff() {
     voices[i].fltStage = EnvStage::Release;
   }
   samplerStopAllStreams();
+  sf2StopAllStreams();
   interrupts();
   auditionInst = -1;
 }
@@ -1040,7 +1186,7 @@ FLASHMEM bool fmSynthHasActiveOutput() {
   for (int i = 0; i < NUM_FM_VOICES; i++) {
     if (voices[i].active) return true;
   }
-  return instFxTailFrames > 0;
+  return instFxTailFrames > 0 || instLimTailFrames > 0;
 }
 
 FLASHMEM void fmSynthService() {
@@ -1108,6 +1254,8 @@ FLASHMEM void fmSynthService() {
     }
   }
 
+  samplerServiceActiveStreams();
+  sf2ServiceStreams();
   samplerServiceStreams();
 }
 
@@ -1143,7 +1291,15 @@ __attribute__((noinline)) static void scaleInstLevelBlock(int32_t *bufL, int32_t
 
 bool fmSynthRenderBlock(int32_t *outL, int32_t *outR, int numFrames,
                         int captureMidiTrack, int32_t *capOutL, int32_t *capOutR) {
-  fmSynthProcessQueuedEvents();
+  if (synthEvTail != synthEvHead) {
+    fmSynthProcessQueuedEvents();
+  }
+  tunerInstPushedThisBlock = false;
+  const TunerSource tSrc = tunerActiveSource;
+  const int tunerInst = (tSrc >= TunerSource::Inst1 && tSrc <= TunerSource::Inst8)
+                            ? ((int)tSrc - (int)TunerSource::Inst1)
+                            : -1;
+  const bool tunerMuteInst = (tunerInst >= 0) && tunerMuteActive;
 
   const bool wantCap = (captureMidiTrack >= 0 && captureMidiTrack < NUM_MIDI_TRACKS &&
                         capOutL != nullptr && capOutR != nullptr);
@@ -1159,7 +1315,15 @@ bool fmSynthRenderBlock(int32_t *outL, int32_t *outR, int numFrames,
       break;
     }
   }
-  if (!anyActive && instFxTailFrames <= 0) return false;
+  if (!anyActive && instFxTailFrames <= 0 && instLimTailFrames <= 0) {
+    lastInstWantCap = false;
+    return false;
+  }
+
+  if (wantCap && !lastInstWantCap) {
+    memset(instCapDelayL, 0, sizeof(instCapDelayL));
+    memset(instCapDelayR, 0, sizeof(instCapDelayR));
+  }
 
   memset(outL, 0, numFrames * sizeof(int32_t));
   memset(outR, 0, numFrames * sizeof(int32_t));
@@ -1208,7 +1372,7 @@ bool fmSynthRenderBlock(int32_t *outL, int32_t *outR, int numFrames,
       const bool hasLevelScale = rampingLvl || (instLvl != (int)VOLUME_UNITY);
       const FmInstRuntime &rt = instRt[inst];
 
-      if (!hasCapVoice && !hasDrive && !hasBusFx && !hasLevelScale) {
+      if (inst != tunerInst && !hasCapVoice && !hasDrive && !hasBusFx && !hasLevelScale) {
         for (int vIdx = 0; vIdx < NUM_FM_VOICES; vIdx++) {
           FmVoice &v = voices[vIdx];
           if (v.active && v.instIdx == (uint8_t)inst) {
@@ -1258,6 +1422,12 @@ bool fmSynthRenderBlock(int32_t *outL, int32_t *outR, int numFrames,
         }
       }
 
+      // Tap internal instrument pre-Drive (and pre-Level / pre-FX) for the Chromatic Tuner
+      if (inst == tunerInst) {
+        tunerPushStereo32(instL, instR, numFrames);
+        tunerInstPushedThisBlock = true;
+      }
+
       if (hasDrive) {
         applyInstDriveBlock(inst, p.fx.drive, instL, instR, numFrames);
       }
@@ -1266,6 +1436,16 @@ bool fmSynthRenderBlock(int32_t *outL, int32_t *outR, int numFrames,
         const float gStep = rampingLvl ? ((targetLvl - startLvl) / (float)max(1, numFrames)) : 0.0f;
         scaleInstLevelBlock(instL, instR, numFrames, startLvl, gStep);
         instCurLevel[inst] = targetLvl;
+      }
+
+      if (inst == tunerInst && tunerMuteInst) {
+        if (hasCapVoice && !hasOtherVoice) {
+          for (int i = 0; i < numFrames; i++) {
+            capOutL[i] += instL[i];
+            capOutR[i] += instR[i];
+          }
+        }
+        continue;
       }
 
       const bool silentInst = (!rampingLvl && instLvl <= 0);
@@ -1330,7 +1510,8 @@ bool fmSynthRenderBlock(int32_t *outL, int32_t *outR, int numFrames,
                                (!anyFxSend && lastFxMidiTrack == (int8_t)captureMidiTrack));
     const bool routeDryFxToCap = wantCap && capUsedFxSend && otherUsedFxSend;
 
-    if (lastFxInst >= 0 && lastFxInst < NUM_INSTRUMENTS && !fmSynthIsSlotEmpty(lastFxInst)) {
+    if (lastFxInst >= 0 && lastFxInst < NUM_INSTRUMENTS &&
+        patches[lastFxInst].type != (uint8_t)InstType::None) {
       const InstFxParams &tfx = patches[lastFxInst].fx;
       if (tfx.chorus > maxChor) maxChor = tfx.chorus;
       if (tfx.delay > maxDly) maxDly = tfx.delay;
@@ -1391,6 +1572,63 @@ bool fmSynthRenderBlock(int32_t *outL, int32_t *outR, int numFrames,
         setInstFxParams(0, 0, 0, 0);
       }
     }
+  }
+
+  // Zero-overshoot 32-sample (0.73 ms) lookahead linear peak guard on the summed
+  // internal instrument bus (and M01..M08 capture bus) so dense polyphonic chords
+  // never flat-top or hit downstream waveshapers even at LEVEL = 100 or across 32 voices.
+  if (anyActive || anyFxSend || instFxTailFrames > 0) {
+    instLimTailFrames = (int32_t)LookaheadMonitorLimiter::LOOKAHEAD;
+  } else {
+    instLimTailFrames = max((int32_t)0, instLimTailFrames - (int32_t)numFrames);
+  }
+
+  for (int i = 0; i < numFrames; i++) {
+    const uint32_t p = instBusLimiter.pos;
+    const float inL = (float)outL[i];
+    const float inR = (float)outR[i];
+    float dL = instBusLimiter.delayL[p];
+    float dR = instBusLimiter.delayR[p];
+    instBusLimiter.delayL[p] = inL;
+    instBusLimiter.delayR[p] = inR;
+
+    float pk = max(fabsf(inL), fabsf(inR));
+    float dCapL = 0.0f, dCapR = 0.0f;
+    if (wantCap) {
+      const float cInL = (float)capOutL[i];
+      const float cInR = (float)capOutR[i];
+      dCapL = instCapDelayL[p];
+      dCapR = instCapDelayR[p];
+      instCapDelayL[p] = cInL;
+      instCapDelayR[p] = cInR;
+      pk = max(pk, max(fabsf(cInL), fabsf(cInR)));
+    }
+
+    const float g = instBusLimiter.stepGain(pk);
+    if (g < 1.0f) {
+      dL *= g;
+      dR *= g;
+    }
+    if (fabsf(dL) > instBusLimiter.knee) dL = softKneeClip(dL, instBusLimiter.knee, instBusLimiter.ceil);
+    if (fabsf(dR) > instBusLimiter.knee) dR = softKneeClip(dR, instBusLimiter.knee, instBusLimiter.ceil);
+    outL[i] = (int32_t)dL;
+    outR[i] = (int32_t)dR;
+
+    if (wantCap) {
+      if (g < 1.0f) {
+        dCapL *= g;
+        dCapR *= g;
+      }
+      if (fabsf(dCapL) > instBusLimiter.knee) dCapL = softKneeClip(dCapL, instBusLimiter.knee, instBusLimiter.ceil);
+      if (fabsf(dCapR) > instBusLimiter.knee) dCapR = softKneeClip(dCapR, instBusLimiter.knee, instBusLimiter.ceil);
+      capOutL[i] = (int32_t)dCapL;
+      capOutR[i] = (int32_t)dCapR;
+    }
+  }
+  lastInstWantCap = wantCap;
+  if (!anyActive && instFxTailFrames <= 0 && instLimTailFrames <= 0) {
+    instBusLimiter.reset();
+    lastInstWantCap = false;
   }
 
   return true;
@@ -1490,6 +1728,7 @@ FLASHMEM bool fmSynthSaveSong(FsFile &f) {
   if (f.write(&df, sizeof(df)) != (int)sizeof(df)) return false;
   if (!samplerSaveSongData(f)) return false;
   if (!instMidiMapSaveSongData(f)) return false;
+  if (!sf2SaveSongData(f)) return false;
   f.truncate();
   f.sync();
   return true;
@@ -1512,6 +1751,7 @@ FLASHMEM bool fmSynthLoadSong(FsFile &f) {
     }
     samplerLoadSongData(f);
     instMidiMapLoadSongData(f);
+    sf2LoadSongData(f);
     return true;
   }
   if (df.version == 2) {
@@ -1594,6 +1834,9 @@ FLASHMEM static bool saveInstrumentFileToDir(int instIdx, const char *dirPath) {
   if (ok) {
     ok = instMidiMapSaveSingleInstData(f, instIdx);
   }
+  if (ok) {
+    ok = sf2SaveSingleInstData(f, instIdx);
+  }
   f.truncate();
   f.sync();
   f.close();
@@ -1654,6 +1897,11 @@ FLASHMEM bool fmSynthLoadInstrumentFile(int instIdx, const char *fullPath) {
     samplerClearSlot(instIdx);
   }
   instMidiMapLoadSingleInstData(f, instIdx);
+  if ((InstType)patches[instIdx].type == InstType::SoundFont) {
+    sf2LoadSingleInstData(f, instIdx);
+  } else {
+    sf2ClearSlot(instIdx);
+  }
   f.close();
   return true;
 }
@@ -2031,6 +2279,7 @@ FLASHMEM const InstBrowserEntry *instBrowserEntryAt(int idx) {
 }
 
 FLASHMEM void openInstBrowser(int instIdx) {
+  closeSf2Browser();
   instBrowserSlot = constrain(instIdx, 0, NUM_INSTRUMENTS - 1);
 
   if (!SD.sdfs.exists(ROOT_DIR)) {
@@ -2201,6 +2450,7 @@ FLASHMEM int sysPresetDeleteConfirmCursor() {
 }
 
 FLASHMEM void openSysPresetsModal(bool songMode) {
+  closeSf2Browser();
   instBrowserModalOpen = false;
   typePresetModalOpen = false;
   sysPresetsSongMode = songMode;
@@ -2300,6 +2550,7 @@ FLASHMEM bool isTypePresetGlobal() {
 }
 
 FLASHMEM void openTypePresetModal(bool globalPresets) {
+  closeSf2Browser();
   instBrowserModalOpen = false;
   sysPresetsModalOpen = false;
   sysPresetDelConfirmOpen = false;

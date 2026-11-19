@@ -124,7 +124,18 @@ def build_target(cli: str, key: str, version: str, debug: bool = False) -> Path:
         cmd.extend(["--build-property", "compiler.cpp.extra_flags=-DCAPSTAN_DEBUG=1"])
     cmd.append(str(ROOT))
 
-    res = subprocess.run(cmd, cwd=str(ROOT))
+    env = os.environ.copy()
+    win_arduino15 = Path.home() / "AppData" / "Local" / "Arduino15"
+    if "ARDUINO_DIRECTORIES_DATA" not in env and win_arduino15.is_dir():
+        env["ARDUINO_DIRECTORIES_DATA"] = str(win_arduino15)
+        staging = win_arduino15 / "staging"
+        if "ARDUINO_DIRECTORIES_DOWNLOADS" not in env and staging.is_dir():
+            env["ARDUINO_DIRECTORIES_DOWNLOADS"] = str(staging)
+    win_sketchbook = Path.home() / "Documents" / "Arduino"
+    if "ARDUINO_DIRECTORIES_USER" not in env and win_sketchbook.is_dir():
+        env["ARDUINO_DIRECTORIES_USER"] = str(win_sketchbook)
+
+    res = subprocess.run(cmd, cwd=str(ROOT), env=env)
     if res.returncode != 0:
         sys.exit(res.returncode)
 

@@ -57,46 +57,19 @@ static constexpr const char *CLIP_SAMPLER_PATH = "/Capstan/_CLIPSMP.TMP";
 static int8_t clipboardSamplerSrcSlot = -1; // -1 = none, 0..7 = live slot, -2 = spilled to CLIP_SAMPLER_PATH
 
 // ============================================================================
-// Lock-Free SD WAV Streaming Pool (4 concurrent stereo streams)
+// Lock-Free SD WAV & SF2 Streaming Pool (8 concurrent streams, 32 KB total ring)
 // ============================================================================
-static constexpr int NUM_SAMPLER_STREAMS = 4;
-static constexpr uint32_t SAMPLER_RING_FRAMES = 2048;
+static constexpr int NUM_SAMPLER_STREAMS = 8;
+static constexpr uint32_t SAMPLER_RING_FRAMES = 1024;
 static constexpr uint32_t SAMPLER_RING_MASK = SAMPLER_RING_FRAMES - 1;
-
-struct SamplerStream {
-  FsFile file;
-  int8_t cachedInstIdx = -1;
-  int8_t cachedKeyIdx = -1;
-  uint32_t dataOffset = 0;
-  uint32_t totalFrames = 0;
-  uint32_t sampleRate = SAMPLE_RATE_HZ;
-  uint32_t baseStepFp = 65536u; // 16.16 fixed-point step (65536 = 1.0x at 44.1 kHz)
-  uint8_t channels = 2;
-  uint8_t bitsPerSample = 16;
-  uint8_t audioFormat = 1;      // 1 = PCM, 3 = IEEE float
-  uint8_t bytesPerFrame = 4;
-
-  volatile bool active = false;
-  volatile bool pendingVoice = false;
-  volatile bool prewarmed = false;
-  volatile bool eofReached = false;
-  volatile uint8_t instIdx = 0;
-  volatile uint8_t keyIdx = 0;
-  volatile uint8_t voiceIdx = 0;
-  volatile uint32_t generation = 0;
-  volatile uint32_t head = 0;
-  volatile uint32_t tail = 0;
-  uint32_t fileFrame = 0;
-  uint32_t fracFp = 0;
-  int16_t lastL = 0;
-  int16_t lastR = 0;
-
-  uint32_t ring[SAMPLER_RING_FRAMES];
-};
 
 static SamplerStream samplerStreams[NUM_SAMPLER_STREAMS];
 static uint32_t streamGenCounter = 1;
 static volatile int8_t fillingStreamIdx = -1;
+
+SamplerStream *samplerStreamSlot(uint32_t streamIdx) {
+  return (streamIdx < (uint32_t)NUM_SAMPLER_STREAMS) ? &samplerStreams[streamIdx] : nullptr;
+}
 
 // ============================================================================
 // Sample Browser Modal State (32-Entry Sliding Window)
@@ -133,13 +106,13 @@ FLASHMEM bool samplerIsBlackKey(int keyIdx) {
   return SAMPLER_BLACK_KEY[keyIdx % 12] != 0;
 }
 
-int samplerNoteToKey(uint8_t midiNote) {
+FLASHMEM int samplerNoteToKey(uint8_t midiNote) {
   int k = (int)midiNote - (int)SAMPLER_BASE_NOTE;
   if (k >= 0 && k < SAMPLER_NUM_KEYS) return k;
   return -1;
 }
 
-bool samplerHasSample(int instIdx, int keyIdx) {
+FLASHMEM bool samplerHasSample(int instIdx, int keyIdx) {
   if (instIdx < 0 || instIdx >= NUM_INSTRUMENTS) return false;
   if (keyIdx < 0 || keyIdx >= SAMPLER_NUM_KEYS) return false;
   return (samplerPopulatedMask[instIdx] & (1ULL << keyIdx)) != 0;
@@ -162,7 +135,7 @@ FLASHMEM static void rebuildSamplerSlotMask(int instIdx) {
   samplerFailedMask[instIdx] = 0;
 }
 
-int samplerNoteToKeyForInst(int instIdx, uint8_t midiNote) {
+FLASHMEM int samplerNoteToKeyForInst(int instIdx, uint8_t midiNote) {
   (void)instIdx;
   return samplerNoteToKey(midiNote);
 }
@@ -238,7 +211,8 @@ FLASHMEM bool samplerIsKeyPlaying(int instIdx, int keyIdx) {
   if (instIdx < 0 || instIdx >= NUM_INSTRUMENTS) return false;
   if (keyIdx < 0 || keyIdx >= SAMPLER_NUM_KEYS) return false;
   for (int s = 0; s < NUM_SAMPLER_STREAMS; s++) {
-    if ((samplerStreams[s].active || samplerStreams[s].pendingVoice) &&
+    if (samplerStreams[s].streamKind == (uint8_t)SharedStreamKind::WavSampler &&
+        (samplerStreams[s].active || samplerStreams[s].pendingVoice) &&
         (int)samplerStreams[s].instIdx == instIdx &&
         (int)samplerStreams[s].keyIdx == keyIdx) {
       return true;
@@ -251,7 +225,8 @@ FLASHMEM uint64_t samplerPlayingKeyMask(int instIdx) {
   if (instIdx < 0 || instIdx >= NUM_INSTRUMENTS) return 0;
   uint64_t mask = 0;
   for (int s = 0; s < NUM_SAMPLER_STREAMS; s++) {
-    if ((samplerStreams[s].active || samplerStreams[s].pendingVoice) &&
+    if (samplerStreams[s].streamKind == (uint8_t)SharedStreamKind::WavSampler &&
+        (samplerStreams[s].active || samplerStreams[s].pendingVoice) &&
         (int)samplerStreams[s].instIdx == instIdx) {
       uint8_t k = samplerStreams[s].keyIdx;
       if (k < SAMPLER_NUM_KEYS) mask |= (1ULL << k);
@@ -286,14 +261,48 @@ FLASHMEM static void invalidateCachedStreamsForKey(int instIdx, int keyIdx) {
       st.pendingVoice = false;
       st.prewarmed = false;
       st.eofReached = true;
+      st.loopLockedInRing = false;
+      st.prevOutL = 0;
+      st.prevOutR = 0;
+      st.declickRem = 0;
       interrupts();
       if (st.file.isOpen()) {
         st.file.close();
       }
       st.cachedInstIdx = -1;
       st.cachedKeyIdx = -1;
+      if (instIdx < 0) {
+        st.cachedSf2Tag = 0;
+        st.streamKind = 0;
+      }
       st.totalFrames = 0;
     }
+  }
+}
+
+FLASHMEM void samplerInvalidateSf2Tag(uint16_t sf2FileTag) {
+  for (int s = 0; s < NUM_SAMPLER_STREAMS; s++) {
+    SamplerStream &st = samplerStreams[s];
+    if (st.streamKind == (uint8_t)SharedStreamKind::WavSampler && st.cachedSf2Tag == 0) continue;
+    if (sf2FileTag != 0 && st.cachedSf2Tag != sf2FileTag) continue;
+    noInterrupts();
+    st.active = false;
+    st.pendingVoice = false;
+    st.prewarmed = false;
+    st.eofReached = true;
+    st.loopLockedInRing = false;
+    st.prevOutL = 0;
+    st.prevOutR = 0;
+    st.declickRem = 0;
+    interrupts();
+    if (st.file.isOpen()) {
+      st.file.close();
+    }
+    st.cachedSf2Tag = 0;
+    st.cachedInstIdx = -1;
+    st.cachedKeyIdx = -1;
+    st.streamKind = 0;
+    st.totalFrames = 0;
   }
 }
 
@@ -412,19 +421,208 @@ static inline int16_t decodeSampleChannel(const uint8_t *p, uint8_t bits, uint8_
   return 0;
 }
 
-FLASHMEM static void fillSamplerStream(SamplerStream &st, int maxPasses, bool forceHeld = false) {
+static inline void packStereoSpan(uint32_t *dst, const int16_t *srcL, const int16_t *srcR, uint32_t n) {
+  for (uint32_t i = 0; i < n; i++) {
+    dst[i] = (uint32_t)(uint16_t)srcL[i] | ((uint32_t)(uint16_t)srcR[i] << 16);
+  }
+}
+
+FLASHMEM static bool readSf2FramesToRing(SamplerStream &st, uint8_t *rawBuf, uint32_t srcFrame,
+                                         uint32_t count, uint32_t dstHead, bool isStereo, uint32_t ringMask) {
+  if (count == 0) return true;
+  const size_t wantBytes = (size_t)count * 2u;
+  const uint64_t posL = (uint64_t)st.dataOffset + (uint64_t)srcFrame * 2ULL;
+  if (st.file.curPosition() != posL && !st.file.seekSet(posL)) return false;
+  if (st.file.read(rawBuf, wantBytes) != (int)wantBytes) return false;
+
+  const uint32_t ringCap = ringMask + 1u;
+  const uint32_t idx0 = dstHead & ringMask;
+  const uint32_t first = min(count, ringCap - idx0);
+
+  if (!isStereo) {
+    // Native little-endian 16-bit PCM in 4-byte-aligned RAM1 chunk -> zero-shift span memcpy
+    int16_t *mRing = reinterpret_cast<int16_t *>(st.ring);
+    memcpy(&mRing[idx0], rawBuf, (size_t)first * 2u);
+    if (count > first) {
+      memcpy(&mRing[0], rawBuf + (size_t)first * 2u, (size_t)(count - first) * 2u);
+    }
+    return true;
+  }
+
+  // Stage Right channel in upper slice [4096..8191] of 16 KB RAM1 chunk (supports up to 2,048 stereo frames)
+  uint8_t *rawR = rawBuf + 4096;
+  const uint64_t posR = (uint64_t)st.dataOffsetR + (uint64_t)srcFrame * 2ULL;
+  if (st.file.curPosition() != posR && !st.file.seekSet(posR)) return false;
+  if (st.file.read(rawR, wantBytes) != (int)wantBytes) return false;
+
+  const int16_t *srcL = reinterpret_cast<const int16_t *>(rawBuf);
+  const int16_t *srcR = reinterpret_cast<const int16_t *>(rawR);
+  packStereoSpan(&st.ring[idx0], srcL, srcR, first);
+  if (count > first) {
+    packStereoSpan(&st.ring[0], srcL + first, srcR + first, count - first);
+  }
+  return true;
+}
+
+FLASHMEM static void fillSf2Stream(SamplerStream &st, int maxPasses, bool forceHeld, bool topUp = false) {
+  if (!st.file.isOpen() || st.totalFrames == 0) {
+    st.eofReached = true;
+    return;
+  }
+  if (st.loopLockedInRing) return;
+
+  const bool isStereo = (st.streamKind == (uint8_t)SharedStreamKind::Sf2StereoLink);
+  const uint32_t ringCap = isStereo ? SHARED_STEREO_RING_FRAMES : SHARED_MONO_RING_FRAMES;
+  const uint32_t ringMask = ringCap - 1u;
+  // Coalesce steady-state refills into one larger contiguous SDIO transfer (up to 768 stereo = 1.5 KB/ch
+  // or 1,536 mono = 3 KB) to halve non-interleaved stereo L/R seek overhead.
+  const uint32_t maxFramesPerRead = forceHeld ? 512u : (isStereo ? 768u : 1536u);
+  uint8_t *rawBuf = reinterpret_cast<uint8_t *>(storageSharedChunkBuf());
+  const uint32_t minFree = forceHeld ? 128u : (topUp ? (isStereo ? 256u : 512u) : (isStereo ? 384u : 768u));
+  const uint32_t startHead = st.head;
+  int effPasses = forceHeld ? maxPasses : 1;
+
+  for (int pass = 0; pass < effPasses; pass++) {
+    if (st.loopLockedInRing) break;
+
+    const FmVoice *v = fmSynthVoiceAt(st.voiceIdx);
+    const bool held = forceHeld || (st.sf2LoopMode == 1) ||
+                      ((v != nullptr) && v->active && (v->gate || v->sustained));
+    const bool hasLoop = (st.sf2LoopMode != 0) &&
+                         (st.loopEndFrame > st.loopStartFrame) &&
+                         (st.loopEndFrame <= st.totalFrames);
+    const uint32_t loopLen = hasLoop ? (st.loopEndFrame - st.loopStartFrame) : 0u;
+    const uint32_t maxLockLen = ringCap >> 1; // <= 1024 mono frames or <= 512 stereo frames
+    const bool canLockInRing = hasLoop && held && (loopLen > 0u) && (loopLen <= maxLockLen);
+
+    uint32_t queued = st.head - st.tail;
+
+    // Lock short/single-cycle sustain loops directly inside st.ring (0 SD reads/sec during sustain)
+    if (canLockInRing && st.fileFrame == st.loopStartFrame) {
+      if (queued + loopLen + 4u > ringCap) {
+        break;
+      }
+      uint32_t remLoop = loopLen;
+      uint32_t curF = st.loopStartFrame;
+      uint32_t writeH = st.head;
+      bool ok = true;
+      while (remLoop > 0u) {
+        uint32_t n = min(remLoop, maxFramesPerRead);
+        if (!readSf2FramesToRing(st, rawBuf, curF, n, writeH, isStereo, ringMask)) {
+          ok = false;
+          break;
+        }
+        curF += n;
+        writeH += n;
+        remLoop -= n;
+      }
+      if (!ok) {
+        st.eofReached = true;
+        break;
+      }
+      const uint32_t g1Idx = (loopLen > 1u) ? (st.head + 1u) : st.head;
+      if (isStereo) {
+        st.ring[writeH & ringMask]        = st.ring[st.head & ringMask];
+        st.ring[(writeH + 1u) & ringMask] = st.ring[g1Idx & ringMask];
+      } else {
+        int16_t *mRing = reinterpret_cast<int16_t *>(st.ring);
+        mRing[writeH & ringMask]        = mRing[st.head & ringMask];
+        mRing[(writeH + 1u) & ringMask] = mRing[g1Idx & ringMask];
+      }
+      __asm__ volatile("" ::: "memory");
+      uint32_t irq = saveIrq();
+      if ((st.active || st.pendingVoice) && st.generation != 0) {
+        st.ringLoopStart = st.head;
+        st.ringLoopLen = (uint16_t)loopLen;
+        st.head = writeH;
+        st.fileFrame = st.loopEndFrame;
+        st.loopLockedInRing = true;
+      }
+      restoreIrq(irq);
+      break;
+    }
+
+    if (queued + minFree > ringCap && !(pass > 0 && (st.head - startHead) < 256u)) break;
+
+    uint32_t limitFrame = st.totalFrames;
+    if (hasLoop && held) {
+      if (canLockInRing && st.fileFrame < st.loopStartFrame) {
+        limitFrame = st.loopStartFrame;
+      } else if (st.fileFrame < st.loopEndFrame) {
+        limitFrame = st.loopEndFrame;
+      } else {
+        st.fileFrame = st.loopStartFrame;
+        if (canLockInRing) continue;
+        limitFrame = st.loopEndFrame;
+      }
+    } else if (st.fileFrame >= st.totalFrames) {
+      st.eofReached = true;
+      break;
+    }
+
+    uint32_t room = (ringCap > queued + 4u) ? (ringCap - 4u - queued) : 0u;
+    uint32_t rem = (limitFrame > st.fileFrame) ? (limitFrame - st.fileFrame) : 0u;
+    uint32_t toRead = min(min(room, maxFramesPerRead), rem);
+    if (toRead == 0u) {
+      if (!hasLoop || !held) st.eofReached = true;
+      break;
+    }
+
+    if (!readSf2FramesToRing(st, rawBuf, st.fileFrame, toRead, st.head, isStereo, ringMask)) {
+      st.eofReached = true;
+      break;
+    }
+
+    const uint32_t nextHead = st.head + toRead;
+    if (!hasLoop || !held) {
+      // Pad 2 trailing guard samples with the final sample for clean Hermite EOF clamping
+      if (st.fileFrame + toRead >= st.totalFrames) {
+        if (isStereo) {
+          uint32_t lastVal = st.ring[(nextHead - 1u) & ringMask];
+          st.ring[nextHead & ringMask]        = lastVal;
+          st.ring[(nextHead + 1u) & ringMask] = lastVal;
+        } else {
+          int16_t *mRing = reinterpret_cast<int16_t *>(st.ring);
+          int16_t lastVal = mRing[(nextHead - 1u) & ringMask];
+          mRing[nextHead & ringMask]        = lastVal;
+          mRing[(nextHead + 1u) & ringMask] = lastVal;
+        }
+      }
+    }
+
+    __asm__ volatile("" ::: "memory");
+    st.head = nextHead;
+    st.fileFrame += toRead;
+    if (hasLoop && held && st.fileFrame >= st.loopEndFrame && !canLockInRing) {
+      st.fileFrame = st.loopStartFrame;
+      // If we hit loopEndFrame with only a short tail (< 256 frames), immediately wrap and read loopStartFrame
+      if ((st.head - startHead) < 256u && effPasses < 3) {
+        effPasses++;
+      }
+    } else if ((!hasLoop || !held) && st.fileFrame >= st.totalFrames) {
+      st.eofReached = true;
+      break;
+    }
+  }
+}
+
+FLASHMEM static void fillSamplerStream(SamplerStream &st, int maxPasses, bool forceHeld = false, bool topUp = false) {
+  if (st.streamKind != (uint8_t)SharedStreamKind::WavSampler) {
+    fillSf2Stream(st, maxPasses, forceHeld, topUp);
+    return;
+  }
   if (!st.file.isOpen() || st.totalFrames == 0 || st.bytesPerFrame == 0) {
     st.eofReached = true;
     return;
   }
 
-  // Stage multi-sector SD reads (up to 4,096 bytes = 8 sectors) through the shared RAM1 chunk buffer
-  // for DMA_SDIO cache safety and low SDIO command overhead.
-  static constexpr size_t SAMPLER_READ_BUF_BYTES = 4096;
+  // Stage multi-sector SD reads (up to 2,048 bytes = 4 sectors) through the shared RAM1 chunk buffer
+  // for DMA_SDIO cache safety and low SDIO command overhead across up to 8 concurrent streams.
+  static constexpr size_t SAMPLER_READ_BUF_BYTES = 2048;
   uint8_t *rawBuf = reinterpret_cast<uint8_t *>(storageSharedChunkBuf());
   const uint32_t maxFramesPerRead = max(1u, (uint32_t)(SAMPLER_READ_BUF_BYTES / st.bytesPerFrame));
 
-  const uint32_t minFree = forceHeld ? 64u : 512u;
+  const uint32_t minFree = forceHeld ? 64u : (topUp ? 192u : 256u);
   for (int pass = 0; pass < maxPasses; pass++) {
     uint32_t queued = st.head - st.tail;
     if (queued + minFree > SAMPLER_RING_FRAMES) break;
@@ -487,11 +685,48 @@ FLASHMEM static void fillSamplerStream(SamplerStream &st, int maxPasses, bool fo
   }
 }
 
-FLASHMEM static bool prepareSamplerStreamSlow(int instIdx, int keyIdx, uint32_t &outStreamIdx, uint32_t &outStreamGen) {
-  int chosen = -1;
-  // 1. Prefer an existing stream slot that already has this exact (instIdx, keyIdx) cached
+static inline uint32_t nextSharedStreamGen() {
+  streamGenCounter = (streamGenCounter >= 0x1FFEu) ? 1u : (streamGenCounter + 1u);
+  return streamGenCounter;
+}
+
+static inline uint32_t sharedStreamAge(uint32_t curGen, uint32_t slotGen) {
+  if (slotGen == 0) return 0xFFFFFFFFu;
+  return (curGen >= slotGen) ? (curGen - slotGen) : (curGen + 0x1FFEu - slotGen);
+}
+
+FLASHMEM static void reapOrphanedActiveStreams() {
   for (int s = 0; s < NUM_SAMPLER_STREAMS; s++) {
-    if (samplerStreams[s].cachedInstIdx == instIdx &&
+    SamplerStream &st = samplerStreams[s];
+    if (!st.active) continue;
+    const FmVoice *v = fmSynthVoiceAt(st.voiceIdx);
+    if (!v || !v->active || v->opPhase[0] != (uint32_t)s || v->opPhase[1] != st.generation) {
+      st.active = false;
+      st.loopLockedInRing = false;
+    }
+  }
+}
+
+FLASHMEM static int pickOldestStreamSlot() {
+  int chosen = 0;
+  uint32_t bestAge = sharedStreamAge(streamGenCounter, samplerStreams[0].generation);
+  for (int s = 1; s < NUM_SAMPLER_STREAMS; s++) {
+    uint32_t age = sharedStreamAge(streamGenCounter, samplerStreams[s].generation);
+    if (age > bestAge) {
+      bestAge = age;
+      chosen = s;
+    }
+  }
+  return chosen;
+}
+
+FLASHMEM static bool prepareSamplerStreamSlow(int instIdx, int keyIdx, uint32_t &outStreamIdx, uint32_t &outStreamGen) {
+  reapOrphanedActiveStreams();
+  int chosen = -1;
+  // 1. Prefer an idle stream slot that already has this exact (instIdx, keyIdx) cached
+  for (int s = 0; s < NUM_SAMPLER_STREAMS; s++) {
+    if (!samplerStreams[s].active && !samplerStreams[s].pendingVoice &&
+        samplerStreams[s].cachedInstIdx == instIdx &&
         samplerStreams[s].cachedKeyIdx == keyIdx &&
         samplerStreams[s].file.isOpen()) {
       chosen = s;
@@ -499,7 +734,7 @@ FLASHMEM static bool prepareSamplerStreamSlow(int instIdx, int keyIdx, uint32_t 
     }
   }
 
-  // 2. Otherwise pick an idle stream slot
+  // 2. Otherwise pick any idle stream slot
   if (chosen < 0) {
     for (int s = 0; s < NUM_SAMPLER_STREAMS; s++) {
       if (!samplerStreams[s].active && !samplerStreams[s].pendingVoice) {
@@ -511,30 +746,33 @@ FLASHMEM static bool prepareSamplerStreamSlow(int instIdx, int keyIdx, uint32_t 
 
   // 3. Otherwise steal the oldest stream slot
   if (chosen < 0) {
-    chosen = 0;
-    uint32_t minGen = samplerStreams[0].generation;
-    for (int s = 1; s < NUM_SAMPLER_STREAMS; s++) {
-      if (samplerStreams[s].generation < minGen) {
-        minGen = samplerStreams[s].generation;
-        chosen = s;
-      }
-    }
+    chosen = pickOldestStreamSlot();
   }
 
   SamplerStream &st = samplerStreams[chosen];
   fillingStreamIdx = (int8_t)chosen;
+  int16_t savedPrevL = 0, savedPrevR = 0;
+  bool wasActiveStream = false;
   noInterrupts();
+  wasActiveStream = st.active;
+  savedPrevL = st.prevOutL;
+  savedPrevR = st.prevOutR;
   st.active = false;
   st.pendingVoice = false;
   st.prewarmed = false;
+  st.prevOutL = 0;
+  st.prevOutR = 0;
   interrupts();
 
-  if (!st.file.isOpen() || st.cachedInstIdx != instIdx || st.cachedKeyIdx != keyIdx || st.totalFrames == 0) {
+  if (!st.file.isOpen() || st.streamKind != (uint8_t)SharedStreamKind::WavSampler ||
+      st.cachedInstIdx != instIdx || st.cachedKeyIdx != keyIdx || st.totalFrames == 0) {
     if (st.file.isOpen()) {
       st.file.close();
     }
     st.cachedInstIdx = -1;
     st.cachedKeyIdx = -1;
+    st.cachedSf2Tag = 0;
+    st.streamKind = (uint8_t)SharedStreamKind::WavSampler;
     st.totalFrames = 0;
 
     char fullPath[SAMPLER_PATH_MAX];
@@ -551,8 +789,9 @@ FLASHMEM static bool prepareSamplerStreamSlow(int instIdx, int keyIdx, uint32_t 
   }
 
   noInterrupts();
-  uint32_t gen = (streamGenCounter & 0xFFFFu) + 1u;
-  streamGenCounter = gen;
+  uint32_t gen = nextSharedStreamGen();
+  st.streamKind = (uint8_t)SharedStreamKind::WavSampler;
+  st.loopLockedInRing = false;
   st.instIdx = (uint8_t)instIdx;
   st.keyIdx = (uint8_t)keyIdx;
   st.generation = gen;
@@ -562,6 +801,9 @@ FLASHMEM static bool prepareSamplerStreamSlow(int instIdx, int keyIdx, uint32_t 
   st.fracFp = 0;
   st.lastL = 0;
   st.lastR = 0;
+  st.declickL = wasActiveStream ? savedPrevL : 0;
+  st.declickR = wasActiveStream ? savedPrevR : 0;
+  st.declickRem = (wasActiveStream && (savedPrevL != 0 || savedPrevR != 0)) ? 32 : 0;
   st.eofReached = false;
   interrupts();
 
@@ -582,7 +824,153 @@ FLASHMEM static bool prepareSamplerStreamSlow(int instIdx, int keyIdx, uint32_t 
   return true;
 }
 
-bool samplerPrepareVoiceOn(int instIdx, uint8_t note, uint32_t &outStreamIdx, uint32_t &outStreamGen, bool allowSdIo) {
+FLASHMEM void samplerPrewarmSf2File(const char *sf2Path, uint16_t sf2FileTag) {
+  if (!sf2Path || !sf2Path[0] || sf2FileTag == 0) return;
+  reapOrphanedActiveStreams();
+  for (int s = 0; s < NUM_SAMPLER_STREAMS; s++) {
+    SamplerStream &st = samplerStreams[s];
+    if (st.active || st.pendingVoice) continue;
+    if (st.file.isOpen() && st.cachedSf2Tag == sf2FileTag) continue;
+    // Keep any already-cached WAV Sampler key intact if that Sampler slot is still populated
+    if (st.file.isOpen() && st.streamKind == (uint8_t)SharedStreamKind::WavSampler &&
+        st.cachedInstIdx >= 0 && st.cachedInstIdx < NUM_INSTRUMENTS &&
+        (InstType)fmSynthPatch(st.cachedInstIdx).type == InstType::Sampler) {
+      continue;
+    }
+    if (st.file.isOpen()) {
+      st.file.close();
+    }
+    st.cachedInstIdx = -1;
+    st.cachedKeyIdx = -1;
+    st.cachedSf2Tag = 0;
+    st.prewarmed = false;
+    st.file = SD.sdfs.open(sf2Path, O_RDONLY);
+    if (st.file.isOpen()) {
+      st.cachedSf2Tag = sf2FileTag;
+    }
+  }
+}
+
+FLASHMEM bool samplerOpenSf2Stream(const SharedSf2StreamReq &req, uint32_t &outStreamIdx, uint32_t &outStreamGen, int initialPasses) {
+  if (!req.sf2Path || !req.sf2Path[0] || req.totalFrames == 0 || req.sf2FileTag == 0) {
+    return false;
+  }
+
+  reapOrphanedActiveStreams();
+
+  int chosen = -1;
+  // 1. Prefer an idle stream slot that already has this exact .sf2 file open!
+  for (int s = 0; s < NUM_SAMPLER_STREAMS; s++) {
+    if (!samplerStreams[s].active && !samplerStreams[s].pendingVoice &&
+        samplerStreams[s].cachedSf2Tag == req.sf2FileTag &&
+        samplerStreams[s].file.isOpen()) {
+      chosen = s;
+      break;
+    }
+  }
+  // 2. Prefer any completely idle stream slot without an open WAV cache
+  if (chosen < 0) {
+    for (int s = 0; s < NUM_SAMPLER_STREAMS; s++) {
+      if (!samplerStreams[s].active && !samplerStreams[s].pendingVoice &&
+          !samplerStreams[s].file.isOpen()) {
+        chosen = s;
+        break;
+      }
+    }
+  }
+  // 3. Otherwise pick any idle stream slot
+  if (chosen < 0) {
+    for (int s = 0; s < NUM_SAMPLER_STREAMS; s++) {
+      if (!samplerStreams[s].active && !samplerStreams[s].pendingVoice) {
+        chosen = s;
+        break;
+      }
+    }
+  }
+  // 4. Otherwise steal the truly oldest stream slot (wraparound-safe)
+  if (chosen < 0) {
+    chosen = pickOldestStreamSlot();
+  }
+
+  SamplerStream &st = samplerStreams[chosen];
+  fillingStreamIdx = (int8_t)chosen;
+  noInterrupts();
+  st.active = false;
+  st.pendingVoice = false;
+  st.prewarmed = false;
+  st.loopLockedInRing = false;
+  st.prevOutL = 0;
+  st.prevOutR = 0;
+  st.declickRem = 0;
+  interrupts();
+
+  if (!st.file.isOpen() || st.cachedSf2Tag != req.sf2FileTag) {
+    if (st.file.isOpen()) {
+      st.file.close();
+    }
+    st.cachedInstIdx = -1;
+    st.cachedKeyIdx = -1;
+    st.cachedSf2Tag = 0;
+    st.file = SD.sdfs.open(req.sf2Path, O_RDONLY);
+    if (!st.file.isOpen()) {
+      fillingStreamIdx = -1;
+      return false;
+    }
+    st.cachedSf2Tag = req.sf2FileTag;
+  }
+
+  uint32_t gen = 0;
+  noInterrupts();
+  gen = nextSharedStreamGen();
+  st.cachedInstIdx = -1;
+  st.cachedKeyIdx = -1;
+  st.streamKind = (uint8_t)req.kind;
+  st.sf2LoopMode = req.sf2LoopMode;
+  st.dataOffset = req.dataOffsetL;
+  st.dataOffsetR = req.dataOffsetR;
+  st.totalFrames = req.totalFrames;
+  st.loopStartFrame = req.loopStartFrame;
+  st.loopEndFrame = req.loopEndFrame;
+  st.bytesPerFrame = (req.kind == SharedStreamKind::Sf2StereoLink) ? 4u : 2u;
+  st.instIdx = (uint8_t)req.instIdx;
+  st.keyIdx = 0;
+  st.voiceIdx = (req.voiceIdx >= 0) ? (uint8_t)req.voiceIdx : 0u;
+  st.generation = gen;
+  st.head = 0;
+  st.tail = 0;
+  st.ringLoopStart = 0;
+  st.ringLoopLen = 0;
+  st.fileFrame = min(req.startFrame, req.totalFrames);
+  st.fracFp = 0;
+  st.lastL = 0;
+  st.lastR = 0;
+  st.eofReached = false;
+  st.loopLockedInRing = false;
+  interrupts();
+
+  fillSf2Stream(st, constrain(initialPasses, 1, 4), true);
+  if (st.head == 0 && !st.eofReached) {
+    fillingStreamIdx = -1;
+    return false;
+  }
+
+  noInterrupts();
+  if (req.voiceIdx >= 0) {
+    st.voiceIdx = (uint8_t)req.voiceIdx;
+    st.active = true;
+    st.pendingVoice = false;
+  } else {
+    st.pendingVoice = true;
+  }
+  interrupts();
+  fillingStreamIdx = -1;
+
+  outStreamIdx = (uint32_t)chosen;
+  outStreamGen = gen;
+  return true;
+}
+
+FLASHMEM bool samplerPrepareVoiceOn(int instIdx, uint8_t note, uint32_t &outStreamIdx, uint32_t &outStreamGen, bool allowSdIo) {
   if (instIdx < 0 || instIdx >= NUM_INSTRUMENTS) return false;
   int keyIdx = (int)note - (int)SAMPLER_BASE_NOTE;
   if (keyIdx < 0 || keyIdx >= SAMPLER_NUM_KEYS) return false;
@@ -598,14 +986,17 @@ bool samplerPrepareVoiceOn(int instIdx, uint8_t note, uint32_t &outStreamIdx, ui
   for (int s = 0; s < NUM_SAMPLER_STREAMS; s++) {
     if (s == (int)fillingStreamIdx) continue;
     SamplerStream &st = samplerStreams[s];
-    if (st.cachedInstIdx == instIdx &&
+    if (st.streamKind == (uint8_t)SharedStreamKind::WavSampler &&
+        st.cachedInstIdx == instIdx &&
         st.cachedKeyIdx == keyIdx &&
         st.totalFrames > 0 &&
         st.head > 0 &&
         st.head <= SAMPLER_RING_FRAMES &&
         st.fileFrame == st.head) {
-      uint32_t gen = (streamGenCounter & 0xFFFFu) + 1u;
-      streamGenCounter = gen;
+      uint32_t gen = nextSharedStreamGen();
+      const bool wasActive = st.active;
+      const int16_t prevL = st.prevOutL;
+      const int16_t prevR = st.prevOutR;
       st.active = false;
       st.pendingVoice = true;
       st.prewarmed = false;
@@ -616,6 +1007,11 @@ bool samplerPrepareVoiceOn(int instIdx, uint8_t note, uint32_t &outStreamIdx, ui
       st.fracFp = 0;
       st.lastL = 0;
       st.lastR = 0;
+      st.prevOutL = 0;
+      st.prevOutR = 0;
+      st.declickL = wasActive ? prevL : 0;
+      st.declickR = wasActive ? prevR : 0;
+      st.declickRem = (wasActive && (prevL != 0 || prevR != 0)) ? 32 : 0;
       st.eofReached = (st.fileFrame >= st.totalFrames);
       restoreIrq(irq);
       outStreamIdx = (uint32_t)s;
@@ -641,27 +1037,56 @@ void samplerActivateStream(uint32_t streamIdx, uint32_t streamGen, int voiceIdx)
   }
 }
 
-FLASHMEM void samplerServiceActiveStreams() {
+FLASHMEM void samplerServiceActiveStreams(bool topUp) {
   if (fillingStreamIdx >= 0) return;
-  for (int s = 0; s < NUM_SAMPLER_STREAMS; s++) {
-    SamplerStream &st = samplerStreams[s];
-    if (st.pendingVoice) {
-      if (!st.eofReached && (st.head - st.tail) < (SAMPLER_RING_FRAMES - 256u)) {
-        fillingStreamIdx = (int8_t)s;
-        fillSamplerStream(st, 2, true);
-        fillingStreamIdx = -1;
+  uint8_t servicedMask = 0;
+
+  // Two-tier urgency scheduling: Pass 0 refills nearly-empty (< ~6 ms) streams first so
+  // high-pitched voices never starve behind half-full voices during 16 KB audio track writes.
+  for (int tier = 0; tier < 2; tier++) {
+    for (int s = 0; s < NUM_SAMPLER_STREAMS; s++) {
+      if (servicedMask & (uint8_t)(1u << s)) continue;
+      SamplerStream &st = samplerStreams[s];
+      const bool isMonoSf2 = (st.streamKind == (uint8_t)SharedStreamKind::Sf2Mono16);
+      const uint32_t ringCap = isMonoSf2 ? SHARED_MONO_RING_FRAMES : SHARED_STEREO_RING_FRAMES;
+      const uint32_t urgentThresh = isMonoSf2 ? 512u : 256u;
+
+      if (st.pendingVoice) {
+        if (st.eofReached || st.loopLockedInRing) {
+          servicedMask |= (uint8_t)(1u << s);
+          continue;
+        }
+        uint32_t queued = st.head - st.tail;
+        if (tier == 0 && queued >= urgentThresh) continue;
+        servicedMask |= (uint8_t)(1u << s);
+        if (queued < (ringCap - 128u)) {
+          fillingStreamIdx = (int8_t)s;
+          fillSamplerStream(st, 2, true);
+          fillingStreamIdx = -1;
+        }
+        continue;
       }
-      continue;
-    }
-    if (!st.active) continue;
-    const FmVoice *v = fmSynthVoiceAt(st.voiceIdx);
-    if (!v || !v->active || v->opPhase[0] != (uint32_t)s || v->opPhase[1] != st.generation) {
-      st.active = false;
-      continue;
-    }
-    if (!st.eofReached) {
+
+      if (!st.active) {
+        servicedMask |= (uint8_t)(1u << s);
+        continue;
+      }
+      const FmVoice *v = fmSynthVoiceAt(st.voiceIdx);
+      if (!v || !v->active || v->opPhase[0] != (uint32_t)s || v->opPhase[1] != st.generation) {
+        st.active = false;
+        st.loopLockedInRing = false;
+        servicedMask |= (uint8_t)(1u << s);
+        continue;
+      }
+      if (st.eofReached || st.loopLockedInRing) {
+        servicedMask |= (uint8_t)(1u << s);
+        continue;
+      }
+      uint32_t queued = st.head - st.tail;
+      if (tier == 0 && queued >= urgentThresh) continue;
+      servicedMask |= (uint8_t)(1u << s);
       fillingStreamIdx = (int8_t)s;
-      fillSamplerStream(st, 3, false);
+      fillSamplerStream(st, 2, false, topUp);
       fillingStreamIdx = -1;
     }
   }
@@ -671,12 +1096,13 @@ FLASHMEM void samplerServiceStreams() {
   if (fillingStreamIdx >= 0) return;
   samplerServiceActiveStreams();
 
-  // Pre-warm at most 1 idle stream slot per pass so the first 4 Sampler keys trigger in ISR with 0 SD I/O
+  // Pre-warm at most 1 idle stream slot per pass so up to 8 Sampler keys trigger in ISR with 0 SD I/O
   for (int s = 0; s < NUM_SAMPLER_STREAMS; s++) {
     SamplerStream &st = samplerStreams[s];
     if (st.active || st.pendingVoice || st.prewarmed) continue;
 
-    if (st.file.isOpen() && st.cachedInstIdx >= 0 && st.cachedKeyIdx >= 0 && st.totalFrames > 0) {
+    if (st.file.isOpen() && st.streamKind == (uint8_t)SharedStreamKind::WavSampler &&
+        st.cachedInstIdx >= 0 && st.cachedKeyIdx >= 0 && st.totalFrames > 0) {
       fillingStreamIdx = (int8_t)s;
       if (st.head > 0 && st.head <= SAMPLER_RING_FRAMES && st.fileFrame == st.head) {
         if (!st.eofReached && st.head < SAMPLER_RING_FRAMES) {
@@ -715,7 +1141,7 @@ FLASHMEM void samplerServiceStreams() {
       return;
     }
 
-    // Slot has no file open yet: look for an uncached populated key on any Sampler instrument
+    // Slot has no WAV file open yet: look for an uncached populated key on any Sampler instrument
     for (int inst = 0; inst < NUM_INSTRUMENTS; inst++) {
       if ((InstType)fmSynthPatch(inst).type != InstType::Sampler) continue;
       uint64_t availMask = samplerPopulatedMask[inst] & ~samplerFailedMask[inst];
@@ -724,7 +1150,8 @@ FLASHMEM void samplerServiceStreams() {
         if ((availMask & (1ULL << k)) == 0) continue;
         bool alreadyCached = false;
         for (int j = 0; j < NUM_SAMPLER_STREAMS; j++) {
-          if (samplerStreams[j].cachedInstIdx == inst &&
+          if (samplerStreams[j].streamKind == (uint8_t)SharedStreamKind::WavSampler &&
+              samplerStreams[j].cachedInstIdx == inst &&
               samplerStreams[j].cachedKeyIdx == k &&
               samplerStreams[j].file.isOpen()) {
             alreadyCached = true;
@@ -734,6 +1161,12 @@ FLASHMEM void samplerServiceStreams() {
         if (alreadyCached) continue;
 
         fillingStreamIdx = (int8_t)s;
+        if (st.file.isOpen()) {
+          st.file.close();
+        }
+        st.cachedSf2Tag = 0;
+        st.streamKind = (uint8_t)SharedStreamKind::WavSampler;
+        st.loopLockedInRing = false;
         char fullPath[SAMPLER_PATH_MAX];
         resolveKeyFullPath(inst, k, fullPath, sizeof(fullPath));
         st.file = SD.sdfs.open(fullPath, O_RDONLY);
@@ -767,20 +1200,28 @@ FLASHMEM void samplerServiceStreams() {
   }
 }
 
-void samplerSilenceInst(int instIdx) {
+FLASHMEM void samplerSilenceInst(int instIdx) {
   for (int s = 0; s < NUM_SAMPLER_STREAMS; s++) {
     if ((int)samplerStreams[s].instIdx == instIdx &&
         (samplerStreams[s].active || samplerStreams[s].pendingVoice)) {
       samplerStreams[s].active = false;
       samplerStreams[s].pendingVoice = false;
+      samplerStreams[s].loopLockedInRing = false;
+      samplerStreams[s].prevOutL = 0;
+      samplerStreams[s].prevOutR = 0;
+      samplerStreams[s].declickRem = 0;
     }
   }
 }
 
-void samplerStopAllStreams() {
+FLASHMEM void samplerStopAllStreams() {
   for (int s = 0; s < NUM_SAMPLER_STREAMS; s++) {
     samplerStreams[s].active = false;
     samplerStreams[s].pendingVoice = false;
+    samplerStreams[s].loopLockedInRing = false;
+    samplerStreams[s].prevOutL = 0;
+    samplerStreams[s].prevOutR = 0;
+    samplerStreams[s].declickRem = 0;
   }
 }
 
@@ -1516,13 +1957,17 @@ static void samplerRenderVoice(FmVoice &v, const FmPatch &p, const FmInstRuntime
   if (rt.pitchBendRatio != 1.0f) {
     stepFp = max(1u, (uint32_t)((float)stepFp * rt.pitchBendRatio + 0.5f));
   }
-  const float voiceGain = v.velScale * 0.90f;
+  static constexpr float SAMPLER_VOICE_BASE_GAIN = 0.25f;
+  const float voiceGain = v.velScale * SAMPLER_VOICE_BASE_GAIN;
 
   int startIdx = (v.startSampleOffset < (uint8_t)numFrames) ? (int)v.startSampleOffset : 0;
   v.startSampleOffset = 0;
   for (int i = startIdx; i < numFrames; i++) {
     if (!instAdvanceVoiceEnvelopes(v)) {
       st.active = false;
+      st.prevOutL = 0;
+      st.prevOutR = 0;
+      st.declickRem = 0;
       break;
     }
 
@@ -1537,6 +1982,9 @@ static void samplerRenderVoice(FmVoice &v, const FmPatch &p, const FmInstRuntime
         v.active = false;
         v.ampStage = EnvStage::Idle;
         st.active = false;
+        st.prevOutL = 0;
+        st.prevOutR = 0;
+        st.declickRem = 0;
         break;
       }
       rawL = (float)st.lastL * (1.0f / 32768.0f);
@@ -1569,8 +2017,18 @@ static void samplerRenderVoice(FmVoice &v, const FmPatch &p, const FmInstRuntime
 
     float outSampleL = 0.0f, outSampleR = 0.0f;
     instApplyVoiceStereoFilterAndAmp(v, rawL, rawR, voiceGain, outSampleL, outSampleR);
-    outL[i] += (int32_t)(outSampleL * 32768.0f);
-    outR[i] += (int32_t)(outSampleR * 32768.0f);
+    int32_t outSL = (int32_t)(outSampleL * 32768.0f);
+    int32_t outSR = (int32_t)(outSampleR * 32768.0f);
+    if (st.declickRem > 0) {
+      int32_t w = (int32_t)st.declickRem;
+      outSL += ((int32_t)st.declickL * w) >> 5;
+      outSR += ((int32_t)st.declickR * w) >> 5;
+      st.declickRem--;
+    }
+    st.prevOutL = (int16_t)constrain(outSL, -32768, 32767);
+    st.prevOutR = (int16_t)constrain(outSR, -32768, 32767);
+    outL[i] += outSL;
+    outR[i] += outSR;
   }
 }
 

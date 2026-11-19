@@ -766,7 +766,7 @@ FLASHMEM static void masterOnEditPress(bool shiftHeld) {
   SongSettings &ps = songSettings();
   int col = constrain(masterCell, 0, MASTER_FX_ROW_COLS - 1);
   if (col == MASTER_COL_VOL) {
-    uint8_t nextVol = (ps.masterVolume > 0) ? 0 : MASTER_VOLUME_DEFAULT;
+    uint8_t nextVol = (ps.masterVolume > 0) ? 0 : appDefaultMasterVolume();
     appSetMasterVolume(nextVol);
     saveSessionWhenIdle();
     uiForceRedraw();
@@ -865,8 +865,9 @@ FLASHMEM static void masterOnResetParam() {
     int col = constrain(masterCell, 0, MASTER_FX_ROW_COLS - 1);
     if (col == MASTER_COL_VOL) {
       SongSettings &ps = songSettings();
-      if (ps.masterVolume != MASTER_VOLUME_DEFAULT) {
-        appSetMasterVolume(MASTER_VOLUME_DEFAULT);
+      const uint8_t defVol = appDefaultMasterVolume();
+      if (ps.masterVolume != defVol) {
+        appSetMasterVolume(defVol);
         saveSessionWhenIdle();
       }
     } else {

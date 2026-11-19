@@ -284,12 +284,14 @@ def verify_dma_and_storage_source_invariants():
     check(
         '"SCREEN BRIGHTNESS"' in page_sys_cpp
         and '"METRONOME VOLUME"' in page_sys_cpp
-        and '"HEADPHONE GAIN"' in page_sys_cpp
+        and '"HEADPHONE GAIN"' not in page_sys_cpp
         and '"INSTRUMENT PRESETS"' in page_sys_cpp
         and '"PROJECTS"' in page_sys_cpp
         and '"MIDI MAPPINGS"' in page_sys_cpp
         and '"MANAGE"' in page_sys_cpp
+        and '"USB CHARGE WHILE ON"' in page_sys_cpp
         and '"USB STORAGE DRIVE"' in page_sys_cpp
+        and page_sys_cpp.index('"USB CHARGE WHILE ON"') < page_sys_cpp.index('"USB STORAGE DRIVE"')
         and '"Delete preset?"' in page_sys_cpp
         and '"Delete project?"' in page_sys_cpp
         and '"Remove song?"' in page_sys_cpp
@@ -299,14 +301,17 @@ def verify_dma_and_storage_source_invariants():
         and "'87" not in ui_splash_cpp
         and re.search(r'#define\s+CAPSTAN_VERSION\s+"\d+\.\d+"', config_h) is not None
         and "max(SX(62), textWidth(title) + SX(8))" in ui_cpp
-        and "SSET_BRIGHTNESS   = 0" in (SRC_DIR / "app.h").read_text(encoding="utf-8")
-        and "SSET_METRO_VOL    = 1" in (SRC_DIR / "app.h").read_text(encoding="utf-8")
-        and "SSET_HP_GAIN      = 2" in (SRC_DIR / "app.h").read_text(encoding="utf-8")
-        and "SSET_INST_PRESETS = 3" in (SRC_DIR / "app.h").read_text(encoding="utf-8")
-        and "SSET_PROJECTS     = 4" in (SRC_DIR / "app.h").read_text(encoding="utf-8")
-        and "SSET_MIDI_MAP     = 5" in (SRC_DIR / "app.h").read_text(encoding="utf-8")
-        and "SSET_USB_DRIVE    = 6" in (SRC_DIR / "app.h").read_text(encoding="utf-8")
-        and "SSET_COUNT        = 7" in (SRC_DIR / "app.h").read_text(encoding="utf-8")
+        and "SSET_BRIGHTNESS    = 0" in (SRC_DIR / "app.h").read_text(encoding="utf-8")
+        and "SSET_METRO_VOL     = 1" in (SRC_DIR / "app.h").read_text(encoding="utf-8")
+        and "SSET_INST_PRESETS  = 2" in (SRC_DIR / "app.h").read_text(encoding="utf-8")
+        and "SSET_PROJECTS      = 3" in (SRC_DIR / "app.h").read_text(encoding="utf-8")
+        and "SSET_MIDI_MAP      = 4" in (SRC_DIR / "app.h").read_text(encoding="utf-8")
+        and "SSET_USB_CHARGE_ON = 5" in (SRC_DIR / "app.h").read_text(encoding="utf-8")
+        and "SSET_USB_DRIVE     = 6" in (SRC_DIR / "app.h").read_text(encoding="utf-8")
+        and "SSET_COUNT         = 7" in (SRC_DIR / "app.h").read_text(encoding="utf-8")
+        and "SSET_HP_GAIN" not in (SRC_DIR / "app.h").read_text(encoding="utf-8")
+        and "usbChargeWhileOn = true" in storage_h
+        and "usbChargeOffEnc" in storage_cpp
         and "ps.masterVolume" in page_master_cpp
         and "systemSettings" not in page_master_cpp
         and "MIN_BRIGHTNESS = 5" in config_h
@@ -317,7 +322,9 @@ def verify_dma_and_storage_source_invariants():
         and "setMetronomeVolume(" in engine_cpp
         and "VOLUME_MAX = 100, VOLUME_UNITY = 80" in config_h
         and "PAN_MAX = 100" in config_h
-        and "MASTER_VOLUME_MAX = 100, MASTER_VOLUME_UNITY = 80, MASTER_VOLUME_DEFAULT = 40" in config_h
+        and "MASTER_VOLUME_MAX = 100, MASTER_VOLUME_UNITY = 80" in config_h
+        and "MASTER_VOLUME_SPK_DEFAULT = 40" in config_h
+        and "MASTER_VOLUME_HP_DEFAULT = 50" in config_h
         and '"USB STORAGE MODE"' in usb_drive_cpp
         and '"PRESS ANY KEY TO EXIT"' in usb_drive_cpp
         and "drawUsbOverlayHeader(" in usb_drive_cpp
@@ -330,37 +337,109 @@ def verify_dma_and_storage_source_invariants():
         and "usbMonitor = MonitorMode::On" in storage_h
         and "usbInputMonitor = true" in storage_h
         and "midiClockOut = MidiClockOut::Off" in storage_h,
-        "System Settings displays 'SYS | vX.Y' header with Brightness (5..100, default 50), Metronome Volume (0..100, default 80), Instrument Presets (VIEW/DEL), and USB Storage Drive overlay ('USB STORAGE MODE')",
+        "System Settings displays 'SYS | vX.Y' header with Brightness (5..100, default 50), Metronome Volume (0..100, default 80), Instrument Presets, Projects, MIDI Mappings, and USB Storage Drive (no Headphone Gain row)",
     )
 
-    # 1i. USB Audio (14-ch Out / 2-ch In UAC2) & USB MIDI (lock-free packet queue + clock/thru loop prevention) invariants
+    # 1i. USB Audio (2-ch Stereo Out / 2-ch Stereo In UAC2), Dynamic USB Mass Storage, & USB MIDI invariants
     patch_py = (ROOT / "tools" / "teensy_msc" / "patch.py").read_text(encoding="utf-8")
+    usb_audio_cpp = (ROOT / "tools" / "teensy_msc" / "usb_audio_l7.cpp").read_text(encoding="utf-8")
+    usb_msc_c = (ROOT / "tools" / "teensy_msc" / "usb_msc.c").read_text(encoding="utf-8")
+    engine_h = (SRC_DIR / "engine.h").read_text(encoding="utf-8")
     midi_usb_cpp = (SRC_DIR / "midi_usb.cpp").read_text(encoding="utf-8")
+    usb_names_c = (SRC_DIR / "usb_names.c").read_text(encoding="utf-8")
+    usb_drive_h = (SRC_DIR / "usb_drive.h").read_text(encoding="utf-8")
     midi_in_cpp = (SRC_DIR / "midi_in.cpp").read_text(encoding="utf-8")
+    midi_map_cpp = (SRC_DIR / "midi_map.cpp").read_text(encoding="utf-8")
     check(
-        "AUDIO_TX_CHANNELS_480\t14" in patch_py
+        "PRODUCT_ID\t\t0x048A" in patch_py
+        and "MSC_STORAGE_PID\t0x04D5" in patch_py
+        and "BCD_DEVICE\t\t0x0381" in patch_py
+        and "BCD_DEVICE\t\t0x0379" in patch_py
+        and "compute_patch_stamp()" in patch_py
+        and "L7_DELAY" not in patch_py
+        and "NUM_INTERFACE\t\t6" in patch_py
+        and "MIDI_INTERFACE        2" in patch_py
+        and "AUDIO_INTERFACE\t3" in patch_py
+        and "AUDIO_TX_CHANNELS_480\t2" in patch_py
+        and "AUDIO_TX_CHANNELS_12\t2" in patch_py
         and "AUDIO_RX_CHANNELS\t2" in patch_py
-        and '"Track %d %s"' in patch_py
-        and "range(1, 5)" in patch_py
-        and '"Track %d"' in patch_py
-        and "range(5, 9)" in patch_py
+        and "AUDIO_TX_ENDPOINT     7" in patch_py
+        and "AUDIO_RX_ENDPOINT     6" in patch_py
+        and "AUDIO_SYNC_ENDPOINT\t6" in patch_py
+        and 'CHANNEL_NAMES = ["Master L", "Master R"]' in patch_py
+        and 'tx_config = "0x03,0,0,0"' in patch_py
+        and 'fb_size = "4" if hs else "3"' in patch_py
+        and "250,                                    // bMaxPower (500 mA)" in patch_py
+        and "usb_self_powered_no_charge" in patch_py
+        and "usb_set_self_powered_no_charge(" in usb_msc_c
+        and "usbReenumerateChargeDescriptor(" in midi_usb_cpp
+        and "usb_configuration = 0;" in patch_py
+        and "USB1_USBCMD &= ~USB_USBCMD_ATDTW;" in patch_py
+        and "USB1_ENDPTPRIME = epmask;" in patch_py
+        and "USB_USBMODE_SDIS" in patch_py
+        and "USB_USBSTS_UEI" in patch_py
+        and "USBPHY_CTRL_ENUTMILEVEL2" in patch_py
+        and "endpoint->next = (uint32_t)first_active;" in patch_py
+        and "'C', 'A', 'P', 'S', 'T', 'A', 'N', '-', '0', SERIAL_MODEL_DIGIT, '-'" in usb_names_c
+        and "HW_OCOTP_MAC0" in usb_names_c
+        and "startup_middle_hook(" in usb_names_c
+        and "ISO_N = 8" in usb_audio_cpp
+        and "SYNC_N = 4" in usb_audio_cpp
+        and "USB_AUDIO_IRQ_PRIORITY = 64" in usb_audio_cpp
+        and "DMAMEM static TxIsoPool" not in usb_audio_cpp
+        and "DMAMEM static RxIsoPool" not in usb_audio_cpp
+        and "ARM_DWT_CYCCNT" in usb_audio_cpp
+        and "SOF_MIN_STEP_UFRAMES = 64u" in usb_audio_cpp
+        and "sample_usb_sof_clock(" in usb_audio_cpp
+        and "USB1_FRINDEX" in usb_audio_cpp
+        and "usb_host_rate" in usb_audio_cpp
+        and "setup_rx_stream(false)" in usb_audio_cpp
+        and "setup_tx_stream(false)" in usb_audio_cpp
+        and "RATE_KI_BLOCK" in usb_audio_cpp
+        and "rx_integ *= 0.995f" in usb_audio_cpp
+        and "lerp_stereo_frame(" in usb_audio_cpp
+        and "USB_OUT_CHANNELS = 2;" in engine_h
+        and "usbTrackChannel" not in engine_h
+        and "usbTrackChannel" not in engine_cpp
         and "usbFrame[0] = (int16_t)constrain(postFxL" in engine_cpp
         and "usbFrame[1] = (int16_t)constrain(postFxR" in engine_cpp,
-        "tools/teensy_msc/patch.py configures 14 UAC2 output channels (Master L/R pre-master-vol + Track 1-4 L/R + Track 5-8) and 2 input channels matching USB_OUT_CHANNELS",
+        "tools/teensy_msc & usb_names.c configure Normal Mode (PID 0x048A, CAPSTAN-01/02-<HWID>), self-healing stamp, SDIS/UEI/first_active hub safety, and 8 ms CYCCNT clock checkpoints",
     )
     check(
-        "midiOutTakeUsbPackets(" in midi_usb_cpp
+        "midiOutHasUsbPending(" in midi_usb_cpp
+        and "usb_midi_available()" in midi_usb_cpp
+        and "USB_MIDI_RX_BUDGET_PER_TICK" in midi_usb_cpp
+        and "if (!usbMIDI.read()) continue;" in midi_usb_cpp
+        and "DMAMEM static uint32_t usbMidiTxBuf" not in midi_usb_cpp
+        and "UsbEndpointQueueHead" not in midi_usb_cpp
+        and "usb_midi_reset_epoch" in midi_usb_cpp
+        and "usbShutdownDetach()" in midi_usb_cpp
+        and "midiOutTakeUsbPackets(" in midi_usb_cpp
         and "midiOutTakeUsbTicks(" in midi_usb_cpp
         and "USB_MIDI_TX_EP_MASK" in midi_usb_cpp
         and "NVIC_DISABLE_IRQ(IRQ_USB1)" in midi_usb_cpp
         and "usb_transmit(MIDI_TX_ENDPOINT" in midi_usb_cpp
+        and "usbMidiEndpointActive()" in midi_usb_cpp
+        and "!usb_msc_is_active()" in midi_usb_cpp
         and "usbMIDI.send" not in midi_usb_cpp
-        and "pollTimer.priority(224)" in usb_drive_cpp
+        and "usb_msc_set_mode(" in usb_drive_cpp
+        and "storageSharedChunkBuf()" in usb_drive_cpp
+        and "usbDriveBegin" not in usb_drive_cpp
+        and "usbDriveBegin" not in usb_drive_h
+        and "pollTimer" not in usb_drive_cpp
+        and "usb_msc_clear_halt(" in usb_msc_c
+        and "csw_pending_after_unjam" in usb_msc_c
+        and "cbw_invalid_wedge" in usb_msc_c
+        and "case 0x5A:" in usb_msc_c
         and "L7_IRQ_SAFE" in patch_py
+        and "L7_MIDI_SAFE" in patch_py
+        and "L7_SERIAL_FLASH" in patch_py
+        and "usb_midi_reset(" in patch_py
+        and "requestContinuousCcUiRedraw(" in midi_map_cpp
         and "availableForWrite() <= 0" in engine_cpp
         and "midiActiveClockOutPorts()" in engine_cpp
         and "FLASHMEM uint8_t midiActiveClockOutPorts()" not in engine_cpp,
-        "midi_usb.cpp and engine.cpp guard USB/TRS MIDI TX from ISR races/blocking and suppress MIDI clock feedback loops",
+        "midi_usb.cpp, usb_midi.c, usb_serial.c, usb_drive.cpp, and usb_msc.c isolate dynamic MSC mode (PID 0x04D5), harden error/reset paths, detach cleanly on power-off, and coalesce CC UI redraws",
     )
     check(
         "saveIrq()" in midi_seq_cpp
@@ -393,8 +472,10 @@ def verify_dma_and_storage_source_invariants():
     power_off_body = m8_board_cpp[power_off_idx:] if power_off_idx != -1 else ""
     check(
         power_off_idx != -1
+        and "bqWrite(0x00, _bqDefaultReg00)" in power_off_body
         and "bqWrite(0x02, 0x00)" in power_off_body
         and "bqWrite(0x03, _cgPaused ? 0x06 : 0x16)" in power_off_body
+        and "setUsbChargeWhileOn(" in m8_board_cpp
         and "digitalWrite(40, LOW)" in power_off_body
         and "digitalWrite(28, LOW)" in power_off_body
         and "digitalWrite(6, HIGH)" in power_off_body
@@ -606,7 +687,7 @@ def verify_dma_and_storage_source_invariants():
     inst_sampler_h = (SRC_DIR / "inst_sampler.h").read_text(encoding="utf-8")
     inst_sampler_cpp = (SRC_DIR / "inst_sampler.cpp").read_text(encoding="utf-8")
     check(
-        "NUM_INST_TYPES = 4" in instruments_h
+        "NUM_INST_TYPES = 5" in instruments_h
         and "Sampler = 3" in instruments_h
         and "SAMPLER_NUM_KEYS = 48" in inst_sampler_h
         and "SAMPLER_BASE_NOTE = 36" in inst_sampler_h
@@ -651,7 +732,17 @@ def verify_dma_and_storage_source_invariants():
         and "MIDI_TARGET_COUNT" in midi_map_h
         and "MIDI_CAT_NAVIGATION" in midi_map_h
         and "MIDI_TGT_NAV_EDIT" in midi_map_h
+        and "MIDI_TGT_NAV_OPT" in midi_map_h
+        and "MIDI_TGT_NAV_SHIFT" in midi_map_h
+        and "MIDI_TGT_SET_LOOP_START" in midi_map_h
+        and "MIDI_TGT_SET_LOOP_END" in midi_map_h
         and '"CAT: NAVIGATION"' in midi_map_cpp
+        and '"OPT"' in midi_map_cpp
+        and '"SHIFT"' in midi_map_cpp
+        and '"SET LOOP START"' in midi_map_cpp
+        and '"SET LOOP END"' in midi_map_cpp
+        and "midiMapCategoryRowTarget(" in page_sys_cpp
+        and "inputSetMidiModifierHeld(" in midi_map_cpp
         and "inputTriggerNav(" in midi_map_cpp
         and "inputTriggerMidiOptEdit(" in midi_map_cpp
         and "midiMapHandleCc(" in midi_map_cpp
@@ -726,29 +817,165 @@ def verify_dma_and_storage_source_invariants():
         "clearAudioTrack() unconditionally removes/truncates track WAV on SD and ensureTrackWavOpen() truncates stale trailing bytes",
     )
 
-    # 1w. Audio Gain Staging, Hybrid Headphone Volume, Dual HP/Speaker Master Vol Memory, Lookahead Limiting, Q14 Delay Headroom, & Instrument Output Level invariants
+    # 1w. Audio Gain Staging, Hybrid Headphone Volume, Dual HP/Speaker Master Vol Memory, Lookahead Limiting, Q14 Delay/Allpass Headroom, & Polyphonic Instrument Headroom invariants
+    inst_fm2op_cpp = (SRC_DIR / "inst_fm2op.cpp").read_text(encoding="utf-8")
+    inst_pd_cpp = (SRC_DIR / "inst_phasedist.cpp").read_text(encoding="utf-8")
+    inst_nd_cpp = (SRC_DIR / "inst_noisedrone.cpp").read_text(encoding="utf-8")
+    inst_smp_cpp = (SRC_DIR / "inst_sampler.cpp").read_text(encoding="utf-8")
     check(
-        "HeadphoneGain" in config_h
-        and "DEFAULT_HEADPHONE_GAIN = HeadphoneGain::Normal" in config_h
-        and '"LOW"' in page_sys_cpp
-        and '"NORMAL"' in page_sys_cpp
-        and '"HIGH"' in page_sys_cpp
-        and '"LOW (IEM)"' not in page_sys_cpp
-        and '"HIGH (STUDIO)"' not in page_sys_cpp
+        "HeadphoneGain" not in config_h
+        and "HeadphoneGain" not in storage_h
+        and "MASTER_ATTEN_STEP_DB = 0.3f" in config_h
+        and "MASTER_HP_MIN_DB = -51.5f" in config_h
+        and "MASTER_HP_MAX_ANA_DB = 6.0f" in config_h
+        and "MASTER_HP_MAX_TOTAL_DB = 14.0f" in config_h
+        and "masterHeadphoneStepDb(" in config_h
         and "MIN_LINE_IN_GAIN_TENTHS = -120" in config_h
         and "MAX_LINE_IN_GAIN_TENTHS = 120" in config_h
         and "DEFAULT_LINE_IN_GAIN_TENTHS = 0" in config_h
         and "masterVolHpEnc" in storage_h
         and "masterVolSpkEnc" in storage_h
+        and "reservedHpGain" in storage_cpp
+        and "appDefaultMasterVolume(" in app_cpp
         and "appSetMasterVolume(" in app_cpp
         and "recomputeHybridMasterGain(" in engine_cpp
+        and "SGTL_HP_UNITY_VOL_INT = 104" in engine_cpp
+        and "SGTL_HP_MAX_VOL_INT   = 116" in engine_cpp
+        and "outputMeterScale" in engine_cpp
+        and "(float)nextStep / 129.0f" in app_cpp
+        and "softClipToInt16(" in engine_cpp
         and "PostFxLimiter" in engine_cpp
-        and "LookaheadMonitorLimiter" in engine_cpp
+        and "LookaheadMonitorLimiter" in master_fx_cpp
+        and "rawPostFxL" in engine_cpp
+        and ") * masterGain;" in engine_cpp
         and "appServiceCodecHardware(" in app_cpp
         and "readDelayTapQ14(" in master_fx_cpp
+        and "softLimitQ14(" in master_fx_cpp
+        and "softLimitVoiceSvf(" in instruments_cpp
+        and "instBusLimiter" in instruments_cpp
+        and "cyclesToPhase32(" in inst_fm2op_cpp
+        and "4500.0f" in inst_fm2op_cpp
+        and "4500.0f" in inst_pd_cpp
+        and "4500.0f" in inst_nd_cpp
+        and "SAMPLER_VOICE_BASE_GAIN = 0.25f" in inst_smp_cpp
+        and "declickRem" in inst_smp_cpp
+        and "NUM_SAMPLER_STREAMS = 8" in inst_smp_cpp
         and '"OUT: OUTPUT LEVEL"' in page_inst_edit_cpp
         and '"OUT LEVEL"' in midi_map_cpp,
-        "Hybrid SGTL5000 headphone gain (LOW/NORMAL/HIGH, default NORMAL), dual HP/Speaker Master Volume memory (default 40), decoupled PostFx/Monitor lookahead limiters, Q14 Delay headroom, -12.0..+12.0 dB Line In Gain, and Instrument Output Level are configured",
+        "Unified Option A SGTL5000 headphone volume (-51.5..0..+6/+14 dB, default 50 HP / 40 Speaker), 1:1 0.5 dB PGA slewing, dual HP/Speaker memory, Q14/Allpass & polyphonic synth/sampler headroom are configured",
+    )
+
+    # 1x. Song Settings Chromatic Tuner (LINE IN, USB IN, I01-I08 pre-Drive, A01-A08, per-Song A4 REF, LIVE/MUTE)
+    tuner_h = (SRC_DIR / "tuner.h").read_text(encoding="utf-8")
+    tuner_cpp = (SRC_DIR / "tuner.cpp").read_text(encoding="utf-8")
+    inst_tuner_idx = instruments_cpp.find("tunerPushStereo32(")
+    inst_drive_idx = instruments_cpp.find("applyInstDriveBlock(inst,", inst_tuner_idx if inst_tuner_idx != -1 else 0)
+    check(
+        "PSET_DEF_THRESH   = 3" in app_h
+        and "PSET_TUNER        = 4" in app_h
+        and '"CHROMATIC TUNER"' in page_song_cpp
+        and 'songTunerActive ? "TUNER" : "SONG"' in page_song_cpp
+        and '"SOURCE: %s"' in page_song_cpp
+        and '"A4 REF: %u.%u HZ"' in page_song_cpp
+        and '"LIVE"' in page_song_cpp
+        and '"MUTE"' in page_song_cpp
+        and '"IN LVL"' in page_song_cpp
+        and "TUNER_SELECTABLE_SOURCES = 18" in tuner_h
+        and "MIN_TUNER_REF_TENTHS     = 4000" in tuner_h
+        and "MAX_TUNER_REF_TENTHS     = 4800" in tuner_h
+        and "DEFAULT_TUNER_REF_TENTHS = 4400" in tuner_h
+        and "tunerMatchRefToCurrentPitch(" in tuner_cpp
+        and "fmSynthReleaseDirectVoices(" in tuner_cpp
+        and "liveAuditionInstIdx(" in midi_seq_cpp
+        and "tunerRefTenthsEnc" in storage_cpp
+        and inst_tuner_idx != -1
+        and inst_drive_idx != -1
+        and inst_tuner_idx < inst_drive_idx,
+        "Song Settings Chromatic Tuner (PSET_TUNER below REC TRIG THRESH, 'TUNER' header, LINE IN/USB IN/I01-I08 pre-Drive + external MIDI trigger/A01-A08, per-Song A4 REF, pitch-match, and LIVE/MUTE) is configured",
+    )
+
+    # 1y. SoundFont 2.x (.sf2) Internal Instrument (Hybrid RAM1 Pre-Roll Cache + Shared Ring-Locked SDIO Streamer)
+    inst_sf2_h = (SRC_DIR / "inst_sf2.h").read_text(encoding="utf-8")
+    inst_sf2_cpp = (SRC_DIR / "inst_sf2.cpp").read_text(encoding="utf-8")
+    sf2_dma_pattern = re.compile(
+        r"\.\s*(?:read|write)\s*\(\s*(?:sf2ZonePool|sf2SlotFile|sf2SlotDir|sf2Voices|sf2InstZoneIds|sf2ModPool|sf2InstModIds|sf2ZoneModGroup)"
+    )
+    check(
+        not sf2_dma_pattern.search(inst_sf2_cpp),
+        "inst_sf2.cpp never passes DMAMEM buffers (sf2ZonePool/sf2SlotFile/sf2Voices) directly to FsFile::read/write",
+    )
+    check(
+        'SOUNDFONTS_DIR = "/Capstan/SOUNDFONTS"' in config_h
+        and "SoundFont = 5" in instruments_h
+        and "instSoundFontEngine()" in inst_sf2_cpp
+        and "instSoundFontEngine()" in instruments_cpp
+        and all(
+            tok in inst_sf2_cpp
+            for tok in (
+                '"SOUNDFONT"',
+                '"SF2"',
+                '"SOUNDFONT FILE"',
+                '"BANK & PRESET"',
+                '"TONE & PLAYBACK"',
+                'outLabel = "TUNE";',
+                'outLabel = "LOOP";',
+                'outLabel = "ENV";',
+                'outLabel = "INTP";',
+                'outLabel = "VEL";',
+                'outLabel = "PAN";',
+                '"HQ"',
+                '"LIN"',
+                '"ADSR"',
+                '"SF21"',
+                '"SF1P"',
+                "storageSharedChunkBuf()",
+                "storageKeepTracksStreaming()",
+                "sf2PreRoll",
+                "sf2PreRollInfo",
+                "sf2FilterAlphaLut",
+                "SF2_MAX_ZONES_PER_INST   = 254",
+                "sizeof(Sf2Zone) == 48",
+                "sizeof(Sf2ZoneAux) == 4",
+                '"pmod"',
+                '"imod"',
+                "sf2EvalModSource(",
+                "sf2ApplyVoiceMods(",
+                "sf2RecomputeLiveMods(",
+                "sf2RefreshLivePatchParams(",
+                "sf2EmitOrReuseModGroup(",
+                "sf2PresetModRowCount(",
+                "sf2InstModRowCount(",
+            )
+        )
+        and "Aftertouch" not in instruments_h
+        and "Aftertouch" not in inst_sf2_h
+        and "SF2_MOD_COLS_PER_ROW = 4" in inst_sf2_h
+        and "SF2_NONCC_AFTERTOUCH" not in inst_sf2_cpp
+        and "INST_EDIT_CACHE_SLOTS = 1 + INST_EDIT_MAX_VIS_BODY_ROWS" in page_inst_edit_cpp
+        and "drawSf2ModParamCell(" in page_inst_edit_cpp
+        and '"PRESET MODULATORS"' in page_inst_edit_cpp
+        and '"INSTRUMENT MODULATORS"' in page_inst_edit_cpp
+        and "loopLockedInRing" in inst_sampler_cpp
+        and "packStereoSpan(" in inst_sampler_cpp
+        and "samplerOpenSf2Stream(" in inst_sampler_cpp
+        and "nextSharedStreamGen()" in inst_sampler_cpp
+        and "reapOrphanedActiveStreams()" in inst_sampler_cpp
+        and "samplerPrewarmSf2File(" in inst_sampler_cpp
+        and "drawSf2BrowserModal(" in page_inst_edit_cpp
+        and "sf2BrowserMode()" in ui_cpp
+        and "const int wL = SX(214);" in page_inst_edit_cpp
+        and "isSf2BrowserOpen()" in input_cpp
+        and "fmSynthAudition(" not in page_inst_edit_cpp
+        and "fmSynthAudition(" not in input_cpp[input_cpp.find("confirmSf2BrowserSelection()") : input_cpp.find("confirmTypePresetSelection()")]
+        and "triggerSamplerKeyAuditionHold(" in input_cpp
+        and "sf2ServiceStreams()" in storage_cpp
+        and "sf2ServiceStreams(true)" in storage_cpp
+        and "uiClearRegionStreaming(" in ui_cpp
+        and "keepStreaming(true)" in ui_cpp
+        and "keepStreaming()" in (SRC_DIR / "page_main.cpp").read_text(encoding="utf-8")
+        and '"SF2 PRESET"' in midi_map_cpp
+        and '"INTERP"' in midi_map_cpp,
+        "SoundFont 2.x (.sf2) instrument defines /Capstan/SOUNDFONTS browser, preset selector, TUNE/LOOP/ENV(SF2|ADSR)/INTP(HQ|LIN)/VEL/PAN controls, in-ring loop lock, MIDI CC map, and SF21/SF1P persistence",
     )
 
 
@@ -776,6 +1003,23 @@ def verify_wav_and_binary_headers():
     check(
         len(hdr) == 512 and hdr[0:4] == b"RIFF" and hdr[504:508] == b"data",
         "512-byte sector-aligned RIFF WAVE header layout is valid",
+    )
+
+    # Verify SoundFont 2.x RIFF 'sfbk' / 'pdta' Hydra packed struct sizes match SF2.01 specification
+    phdr_rec = struct.pack("<20sHHHIII", b"Grand Piano\x00" + b"\x00" * 8, 0, 0, 0, 0, 0, 0)
+    bag_rec = struct.pack("<HH", 0, 0)
+    mod_rec = struct.pack("<HHhHH", 0, 0, 0, 0, 0)
+    gen_rec = struct.pack("<Hh", 58, 60)
+    inst_rec = struct.pack("<20sH", b"PianoInst\x00" + b"\x00" * 10, 0)
+    shdr_rec = struct.pack("<20sIIIIIBbHH", b"Piano_C4\x00" + b"\x00" * 11, 0, 64, 8, 56, 44100, 60, 0, 0, 1)
+    check(
+        len(phdr_rec) == 38
+        and len(bag_rec) == 4
+        and len(mod_rec) == 10
+        and len(gen_rec) == 4
+        and len(inst_rec) == 22
+        and len(shdr_rec) == 46,
+        "SoundFont 2.x RIFF 'sfbk' Hydra record layouts (phdr=38B, bag=4B, mod=10B, gen=4B, inst=22B, shdr=46B) match SF2.01 spec",
     )
 
 
@@ -828,9 +1072,13 @@ def verify_elf_symbols():
         ram2_event_pool_addr = None
         ram2_rings_addr = None
         ram1_input_ring_addr = None
+        ram1_tuner_ring_addr = None
         ram2_sin_lut_addr = None
+        ram1_sf2_preroll_addr = None
+        ram2_sf2_zone_pool_addr = None
         usb_tx_ring_addr = syms.get("_ZL7tx_ring")
         usb_tx_ring_size = sizes.get("_ZL7tx_ring")
+        usb_midi_tx_buf_addr = syms.get("_ZL12usbMidiTxBuf")
 
         for name, addr in syms.items():
             if "looper" in name and "chunk" in name:
@@ -841,8 +1089,14 @@ def verify_elf_symbols():
                 ram2_rings_addr = addr
             elif "looper" in name and "inputRing" in name:
                 ram1_input_ring_addr = addr
+            elif "looper" in name and "tunerRing" in name:
+                ram1_tuner_ring_addr = addr
             elif "looper" in name and "sinLut" in name:
                 ram2_sin_lut_addr = addr
+            elif "sf2PreRoll" in name:
+                ram1_sf2_preroll_addr = addr
+            elif "sf2ZonePool" in name:
+                ram2_sf2_zone_pool_addr = addr
 
         check(
             ram1_chunk_addr is not None and 0x20000000 <= ram1_chunk_addr < 0x20080000,
@@ -851,6 +1105,10 @@ def verify_elf_symbols():
         check(
             ram1_input_ring_addr is not None and 0x20000000 <= ram1_input_ring_addr < 0x20080000,
             f"[{label}] looper::inputRing is in RAM1 DTCM (0x{ram1_input_ring_addr or 0:08X})",
+        )
+        check(
+            ram1_tuner_ring_addr is not None and 0x20000000 <= ram1_tuner_ring_addr < 0x20080000,
+            f"[{label}] looper::tunerRing (4 KB decimated tuner capture buffer) is in RAM1 DTCM (0x{ram1_tuner_ring_addr or 0:08X}), preserving RAM2 budget",
         )
         check(
             ram2_rings_addr is not None and 0x20200000 <= ram2_rings_addr < 0x20280000,
@@ -865,10 +1123,36 @@ def verify_elf_symbols():
             f"[{label}] looper::sinLut (4 KB FM sine LUT) is in cached RAM2 DMAMEM (0x{ram2_sin_lut_addr or 0:08X})",
         )
         check(
+            ram1_sf2_preroll_addr is not None and 0x20000000 <= ram1_sf2_preroll_addr < 0x20080000,
+            f"[{label}] sf2PreRoll (41.1 KB zero-latency SF2 attack/micro-loop cache) is in uncached RAM1 DTCM (0x{ram1_sf2_preroll_addr or 0:08X})",
+        )
+        check(
+            ram2_sf2_zone_pool_addr is not None and 0x20200000 <= ram2_sf2_zone_pool_addr < 0x20280000,
+            f"[{label}] sf2ZonePool (12.2 KB SF2 Hydra zone descriptors, 254 zones) is in cached RAM2 DMAMEM (0x{ram2_sf2_zone_pool_addr or 0:08X})",
+        )
+        check(
             usb_tx_ring_addr is not None
             and 0x20200000 <= usb_tx_ring_addr < 0x20280000
-            and usb_tx_ring_size == 256 * 14 * 2,
-            f"[{label}] usb_audio_l7 tx_ring is 7,168 B (256 frames x 14 ch x 2 B, got {usb_tx_ring_size} B) in RAM2 DMAMEM (0x{usb_tx_ring_addr or 0:08X})",
+            and usb_tx_ring_size == 768 * 2 * 2,
+            f"[{label}] usb_audio_l7 tx_ring is 3,072 B (768 frames x 2 ch x 2 B, got {usb_tx_ring_size} B) in RAM2 DMAMEM (0x{usb_tx_ring_addr or 0:08X})",
+        )
+        check(
+            usb_midi_tx_buf_addr is not None and 0x20000000 <= usb_midi_tx_buf_addr < 0x20080000,
+            f"[{label}] midi_usb usbMidiTxBuf is in uncached RAM1 DTCM (0x{usb_midi_tx_buf_addr or 0:08X})",
+        )
+        ep0_setup_addr = syms.get("endpoint0_setup")
+        ep0_complete_addr = syms.get("endpoint0_complete")
+        etext_addr = syms.get("_etext")
+        check(
+            ep0_setup_addr is not None
+            and ep0_setup_addr >= 0x60000000
+            and ep0_complete_addr is not None
+            and ep0_complete_addr >= 0x60000000,
+            f"[{label}] Cold USB EP0 handlers (endpoint0_setup=0x{ep0_setup_addr or 0:08X}, endpoint0_complete=0x{ep0_complete_addr or 0:08X}) reside in FLASHMEM (not inlined into ITCM usb_isr)",
+        )
+        check(
+            etext_addr is not None and etext_addr <= (163840 - 2048),
+            f"[{label}] ITCM code end (_etext=0x{etext_addr or 0:08X}, {etext_addr or 0} B) stays within 5 banks (<= 163,840 B) with >= 2 KB headroom ({163840 - (etext_addr or 0)} B free in bank 5)",
         )
 
     if not found_any:
