@@ -24,11 +24,10 @@ static const uint8_t INIT[] PROGMEM = {
 };
 
 // MADCTL orientation values for rotations 0..3 (MX=0x40, MY=0x80, MV=0x20, BGR=0x08).
-static const uint8_t MADCTL[4] = {0x48, 0x28, 0x88, 0xE8};
+PROGMEM static const uint8_t MADCTL[4] = {0x48, 0x28, 0x88, 0xE8};
 
-// Single-scanline RGB666 staging buffer (480 pixels * 3 bytes/pixel = 1,440 bytes).
+// Single-scanline RGB666 width (480 pixels * 3 bytes/pixel = 1,440 bytes on stack).
 static constexpr int ROW_PX = 480;
-static uint8_t rowBuf[ROW_PX * 3];
 
 static inline void px666(uint16_t c, uint8_t *o) {   // Unpack RGB565 into 3 RGB666 bytes (top 6 bits of each channel)
   o[0] = (c & 0xF800) >> 8;
@@ -36,15 +35,15 @@ static inline void px666(uint16_t c, uint8_t *o) {   // Unpack RGB565 into 3 RGB
   o[2] = (c & 0x001F) << 3;
 }
 
-void ILI9488Spi::start() {
+FLASHMEM void ILI9488Spi::start() {
   _spi.beginTransaction(SPISettings(_hz, MSBFIRST, SPI_MODE0));
   if (_cs != _dc) digitalWriteFast(_cs, LOW);
 }
-void ILI9488Spi::stop() {
+FLASHMEM void ILI9488Spi::stop() {
   if (_cs != _dc) digitalWriteFast(_cs, HIGH);
   _spi.endTransaction();
 }
-void ILI9488Spi::cmd(uint8_t c) {
+FLASHMEM void ILI9488Spi::cmd(uint8_t c) {
   digitalWriteFast(_dc, LOW);
   _spi.transfer(c);
   digitalWriteFast(_dc, HIGH);
@@ -81,14 +80,14 @@ FLASHMEM void ILI9488Spi::begin(uint32_t hz) {
   stop();
 }
 
-void ILI9488Spi::sendCmd(uint8_t c, const uint8_t *d, uint8_t n) {
+FLASHMEM void ILI9488Spi::sendCmd(uint8_t c, const uint8_t *d, uint8_t n) {
   start();
   cmd(c);
   if (n) data(d, n);
   stop();
 }
 
-void ILI9488Spi::setRotation(uint8_t r) {
+FLASHMEM void ILI9488Spi::setRotation(uint8_t r) {
   r &= 3;
   bool landscape = r & 1;
   _pw = landscape ? 480 : 320;
@@ -98,10 +97,12 @@ void ILI9488Spi::setRotation(uint8_t r) {
   _ox = 0;
   _oy = 0;
   setClipRect();
-  sendCmd(0x36, &MADCTL[r], 1);
+  uint8_t m = MADCTL[r];
+  sendCmd(0x36, &m, 1);
 }
 
 FLASHMEM void ILI9488Spi::clearPanel(uint16_t color) {
+  uint8_t rowBuf[ROW_PX * 3];
   uint8_t px[3];
   px666(color, px);
   for (int i = 0; i < ROW_PX; i++) memcpy(rowBuf + 3 * i, px, 3);
@@ -116,9 +117,9 @@ FLASHMEM void ILI9488Spi::clearPanel(uint16_t color) {
   stop();
 }
 
-void ILI9488Spi::invertDisplay(bool on) { sendCmd(on ? 0x21 : 0x20, nullptr, 0); }
+FLASHMEM void ILI9488Spi::invertDisplay(bool on) { sendCmd(on ? 0x21 : 0x20, nullptr, 0); }
 
-void ILI9488Spi::setClipRect(int16_t x, int16_t y, int16_t w, int16_t h) {
+FLASHMEM void ILI9488Spi::setClipRect(int16_t x, int16_t y, int16_t w, int16_t h) {
   if (x < 0) { w += x; x = 0; }
   if (y < 0) { h += y; y = 0; }
   if (x + w > _w) w = _w - x;
@@ -126,7 +127,7 @@ void ILI9488Spi::setClipRect(int16_t x, int16_t y, int16_t w, int16_t h) {
   _cx = x; _cy = y; _cw = max(w, (int16_t)0); _ch = max(h, (int16_t)0);
 }
 
-bool ILI9488Spi::clip(int16_t &x, int16_t &y, int16_t &w, int16_t &h, int16_t &dx, int16_t &dy) const {
+FLASHMEM bool ILI9488Spi::clip(int16_t &x, int16_t &y, int16_t &w, int16_t &h, int16_t &dx, int16_t &dy) const {
   int16_t x0 = max(x, _cx), y0 = max(y, _cy);
   int16_t x1 = min((int)x + w, (int)_cx + _cw), y1 = min((int)y + h, (int)_cy + _ch);
   if (x1 <= x0 || y1 <= y0) return false;
@@ -135,7 +136,7 @@ bool ILI9488Spi::clip(int16_t &x, int16_t &y, int16_t &w, int16_t &h, int16_t &d
   return true;
 }
 
-void ILI9488Spi::window(int16_t x0, int16_t y0, int16_t x1, int16_t y1) {
+FLASHMEM void ILI9488Spi::window(int16_t x0, int16_t y0, int16_t x1, int16_t y1) {
   x0 += _ox; x1 += _ox;
   y0 += _oy; y1 += _oy;
   uint8_t c[4] = {(uint8_t)(x0 >> 8), (uint8_t)x0, (uint8_t)(x1 >> 8), (uint8_t)x1};
@@ -145,9 +146,10 @@ void ILI9488Spi::window(int16_t x0, int16_t y0, int16_t x1, int16_t y1) {
   cmd(0x2C);
 }
 
-void ILI9488Spi::fillRect(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t color) {
+FLASHMEM void ILI9488Spi::fillRect(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t color) {
   int16_t dx, dy;
   if (!clip(x, y, w, h, dx, dy)) return;
+  uint8_t rowBuf[ROW_PX * 3];
   uint8_t px[3];
   px666(color, px);
   int chunk = min((int)w * h, ROW_PX);     // Fill scanline buffer once and stream in ROW_PX chunks
@@ -158,10 +160,11 @@ void ILI9488Spi::fillRect(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t c
   stop();
 }
 
-void ILI9488Spi::writeRect(int16_t x, int16_t y, int16_t w, int16_t h, const uint16_t *px) {
+FLASHMEM void ILI9488Spi::writeRect(int16_t x, int16_t y, int16_t w, int16_t h, const uint16_t *px) {
   const int16_t stride = w;
   int16_t dx, dy;
   if (!clip(x, y, w, h, dx, dy)) return;
+  uint8_t rowBuf[ROW_PX * 3];
   start();
   window(x, y, x + w - 1, y + h - 1);
   for (int16_t r = 0; r < h; r++) {

@@ -677,10 +677,20 @@ def verify_dma_and_storage_source_invariants():
         and "isInstGeneralView" not in page_inst_edit_cpp
         and "syncInstEditScroll()" in page_inst_edit_cpp
         and "instGenBaseRow()" in page_inst_edit_cpp
-        and all(lbl in page_inst_edit_cpp for lbl in ('"AMT"', '"ATK"', '"DEC"', '"SUS"', '"REL"', '"DRIVE"', '"CHORUS"', '"DELAY"', '"D.FB"', '"REVERB"'))
+        and "INST_FX_COUNT  = 7" in instruments_h
+        and all(lbl in page_inst_edit_cpp for lbl in ('"AMT"', '"ATK"', '"DEC"', '"SUS"', '"REL"', '"DRV"', '"CHOR"', '"DLAY"', '"D.FB"', '"RVRB"', '"TAPE"', '"COMP"'))
+        and "instGetTape(" in instruments_cpp
+        and "instSetTape(" in instruments_cpp
+        and "instGetComp(" in instruments_cpp
+        and "instSetComp(" in instruments_cpp
+        and '"IFX1"' in instruments_cpp
+        and '"IF1X"' in instruments_cpp
+        and '"FX TAPE"' in midi_map_cpp
+        and '"FX COMP"' in midi_map_cpp
+        and "instNeedsSharedAuxSend(" in master_fx_cpp
         and "processInstDriveSample(" in master_fx_cpp
         and "processInstFxSample(" in master_fx_cpp,
-        "Instrument Editor merges Specific & General controls into one scrollable page (no OPT double-tap toggle) with 8-voice polyphony/inst (32 global), AMP/FLT, and FX",
+        "Instrument Editor merges Specific & General controls into one scrollable page (no OPT double-tap toggle) with 8-voice polyphony/inst (32 global), AMP/FLT, and 7-slot FX (DRV->CHOR->DLAY->RVRB->TAPE->COMP)",
     )
 
     # 1q. Sampler Instrument (4-Octave C3..B6 Keyboard, PRESS: STOP/ONCE/REP/REPTHRU, SD WAV Browser & Streaming)
@@ -871,8 +881,8 @@ def verify_dma_and_storage_source_invariants():
     inst_tuner_idx = instruments_cpp.find("tunerPushStereo32(")
     inst_drive_idx = instruments_cpp.find("applyInstDriveBlock(inst,", inst_tuner_idx if inst_tuner_idx != -1 else 0)
     check(
-        "PSET_DEF_THRESH   = 3" in app_h
-        and "PSET_TUNER        = 4" in app_h
+        re.search(r"PSET_DEF_THRESH\s*=\s*2\b", app_h) is not None
+        and re.search(r"PSET_TUNER\s*=\s*5\b", app_h) is not None
         and '"CHROMATIC TUNER"' in page_song_cpp
         and 'songTunerActive ? "TUNER" : "SONG"' in page_song_cpp
         and '"SOURCE: %s"' in page_song_cpp
@@ -976,6 +986,54 @@ def verify_dma_and_storage_source_invariants():
         and '"SF2 PRESET"' in midi_map_cpp
         and '"INTERP"' in midi_map_cpp,
         "SoundFont 2.x (.sf2) instrument defines /Capstan/SOUNDFONTS browser, preset selector, TUNE/LOOP/ENV(SF2|ADSR)/INTP(HQ|LIN)/VEL/PAN controls, in-ring loop lock, MIDI CC map, and SF21/SF1P persistence",
+    )
+
+    # 1z. Per-Audio-Track FX Chain (Drive -> Chorus -> Delay -> Reverb -> Tape -> Comp) & OPT Double-Tap Cycling
+    master_fx_h = (SRC_DIR / "master_fx.h").read_text(encoding="utf-8")
+    check(
+        "AudioTrackFxSlot" in master_fx_h
+        and "AudioTrackFxParams" in master_fx_h
+        and "prepareAudioTrackFxBlock(" in engine_cpp
+        and "processAudioTrackInsertSample(" in engine_cpp
+        and "processAudioTrackAuxSample(" in engine_cpp
+        and "AUD_PMODE_COUNT    = 5" in app_h
+        and "cycleAudioParamMode()" in input_cpp
+        and all(lbl in page_audio_cpp for lbl in ('"DRV"', '"CHR"', '"DLY"', '"DFB"', '"RVB"', '"TAP"', '"COMP"'))
+        and "overview[2] == 0xF1" in storage_cpp
+        and "anyAudioTrackDelayOrReverbActive()" in storage_cpp
+        and "MIDI_TGT_AUD_FX_BASE" in midi_map_h
+        and "VERB_AP2_L_LEN = 2076" in master_fx_cpp
+        and "VERB_AP2_R_LEN = 1912" in master_fx_cpp
+        and "else if (dInt > bufLen - 2) dInt = bufLen - 2;" in master_fx_cpp,
+        "Per-Audio-Track FX chain (Drive -> Chorus -> Delay -> Reverb -> Tape -> Comp), Audio page OPT double-tap 5-mode cycling, SONG.DAT persistence, and MIDI CC mappings are configured",
+    )
+
+    # 1aa. Audio Input FX Chain (Line In + USB In: Drive -> Chorus -> Delay -> Reverb -> Tape -> Comp -> Out Vol, Pre-Monitor & Pre-Rec)
+    eng_tuner_idx = engine_cpp.find("pushTunerInputBlock(tSrc,")
+    eng_infx_idx = engine_cpp.find("processAudioInputFxBlock(inFxCtx,")
+    eng_rec_idx = engine_cpp.find("int16_t recSampleL[AUDIO_BLOCK_SAMPLES];", eng_infx_idx if eng_infx_idx != -1 else 0)
+    check(
+        re.search(r"PSET_LINE_IN_GAIN\s*=\s*0\b", app_h) is not None
+        and re.search(r"PSET_AUDIO_INPUT_FX\s*=\s*1\b", app_h) is not None
+        and re.search(r"PSET_DEF_THRESH\s*=\s*2\b", app_h) is not None
+        and '"AUDIO INPUT FX"' in page_song_cpp
+        and '"OUT VOL"' in page_song_cpp
+        and "drawSongInputFxView(" in page_song_cpp
+        and "isSongInputFxOpen()" in ui_cpp
+        and "isSongInputFxOpen()" in input_cpp
+        and "updateAudioInputFxTargets(" in engine_cpp
+        and "getAudioInputVolume(" in engine_cpp
+        and "setAudioInputVolume(" in engine_cpp
+        and "setAudioInputOutGain(" in master_fx_cpp
+        and eng_tuner_idx != -1
+        and eng_infx_idx != -1
+        and eng_rec_idx != -1
+        and eng_tuner_idx < eng_infx_idx < eng_rec_idx
+        and "dp.audio[0].overview[10] == 0xF2" in storage_cpp
+        and "dp.audio[0].overview[18]" in storage_cpp
+        and "MIDI_TGT_IN_FX_BASE" in midi_map_h
+        and '"IN OUT VOL"' in midi_map_cpp,
+        "Audio Input FX chain (Drive -> Chorus -> Delay -> Reverb -> Tape -> Comp -> Out Vol [80 unity], pre-monitor & pre-record, post-Tuner), Song Settings top rows (LINE IN GAIN, AUDIO INPUT FX, REC TRIG THRESH), SONG.DAT persistence, and MIDI CC mappings are configured",
     )
 
 

@@ -11,10 +11,47 @@ using namespace looper;
 
 static uint64_t prevAudioTrackKey[VISIBLE_TRACK_ROWS][AUD_CELL_COUNT] = {};
 static uint64_t prevAudioMeterKey[VISIBLE_TRACK_ROWS] = {};
+static uint8_t prevAudioRowParamMode[VISIBLE_TRACK_ROWS] = {};
 static float trSmooth[NUM_AUDIO_TRACKS] = {};
 static int lastAudioTrackRow = 0;
 static int lastAudioTrackCell = AUD_CELL_WAVE;
 static int lastAudioSrcTrigCell = AUD_CELL_SRC;
+
+FLASHMEM static bool audioParamCellFxSlot(AudioParamMode mode, int cell,
+                                          AudioTrackFxSlot &outSlot, const char *&outLbl) {
+  switch (mode) {
+    case AUD_PMODE_DRV_CHOR:
+      if (cell == AUD_CELL_VOL) { outSlot = AUD_FX_DRIVE; outLbl = "DRV"; return true; }
+      if (cell == AUD_CELL_PAN) { outSlot = AUD_FX_CHOR;  outLbl = "CHR"; return true; }
+      return false;
+    case AUD_PMODE_DLY_DFB:
+      if (cell == AUD_CELL_VOL) { outSlot = AUD_FX_DLAY;  outLbl = "DLY"; return true; }
+      if (cell == AUD_CELL_PAN) { outSlot = AUD_FX_DFB;   outLbl = "DFB"; return true; }
+      return false;
+    case AUD_PMODE_RVB_TAPE:
+      if (cell == AUD_CELL_VOL) { outSlot = AUD_FX_RVRB;  outLbl = "RVB"; return true; }
+      if (cell == AUD_CELL_PAN) { outSlot = AUD_FX_TAPE;  outLbl = "TAP"; return true; }
+      return false;
+    case AUD_PMODE_COMP:
+      if (cell == AUD_CELL_VOL || cell == AUD_CELL_PAN) {
+        outSlot = AUD_FX_COMP;
+        outLbl = "COMP";
+        return true;
+      }
+      return false;
+    case AUD_PMODE_MIX:
+    default:
+      return false;
+  }
+}
+
+FLASHMEM static void formatAudioFxVal(uint8_t pct, char *out, size_t outSz) {
+  if (pct == 0) {
+    snprintf(out, outSz, "OFF");
+  } else {
+    snprintf(out, outSz, "%02u", (unsigned)pct);
+  }
+}
 
 FLASHMEM static const char *audioHeaderTitle() {
   const char *teTitle = trackEditHeaderTitle(Page::Audio);
@@ -24,6 +61,7 @@ FLASHMEM static const char *audioHeaderTitle() {
 FLASHMEM static void audioInvalidateCache() {
   memset(prevAudioTrackKey, 0, sizeof(prevAudioTrackKey));
   memset(prevAudioMeterKey, 0, sizeof(prevAudioMeterKey));
+  memset(prevAudioRowParamMode, 0xFF, sizeof(prevAudioRowParamMode));
 }
 
 FLASHMEM static void drawAudioTrackRow(int visSlot, int t, const TimelineFrameCtx &ctx, bool full) {
@@ -232,28 +270,71 @@ FLASHMEM static void drawAudioTrackRow(int visSlot, int t, const TimelineFrameCt
     }
   }
 
-  // Cell 3: Volume (2-line "VOL" / "01".."100" or "OFF")
-  if (staticDue || prevAudioTrackKey[visSlot][AUD_CELL_VOL] == 0) {
-    char vStr[8];
-    if (tr.volume <= 0) snprintf(vStr, sizeof(vStr), "OFF");
-    else snprintf(vStr, sizeof(vStr), "%02d", (int)tr.volume);
-    drawTwoLineParamBox(SX(252), y, SX(32), h, "VOL", vStr,
-                        selC == AUD_CELL_VOL, tr.volume > 0, ACCENT,
-                        SY(7), SY(21), prevAudioTrackKey[visSlot][AUD_CELL_VOL], full);
+  // Cells 3 & 4: Right-hand parameter pair (cycled via double-tap OPT:
+  //   [VOL, BAL/PAN] -> [DRV, CHR] -> [DLY, DFB] -> [RVB, TAP] -> [COMP])
+  const AudioParamMode pMode = audioParamMode();
+  const bool modeChanged = full || (prevAudioRowParamMode[visSlot] != (uint8_t)pMode);
+  if (modeChanged) {
+    if (!full && prevAudioRowParamMode[visSlot] == (uint8_t)AUD_PMODE_COMP && pMode != AUD_PMODE_COMP) {
+      // Clear the 2px gap at SX(284) previously spanned by the full-width COMP cell
+      board.tft().fillRect(SX(284), y, SX(2), h, BG);
+    }
+    prevAudioRowParamMode[visSlot] = (uint8_t)pMode;
+    prevAudioTrackKey[visSlot][AUD_CELL_VOL] = 0;
+    prevAudioTrackKey[visSlot][AUD_CELL_PAN] = 0;
   }
 
-  // Cell 4: Balance ("BAL" on stereo 01..04) / Pan ("PAN" on mono 05..08)
-  if (staticDue || prevAudioTrackKey[visSlot][AUD_CELL_PAN] == 0) {
-    const char *panLbl = isAudioTrackMono(t) ? "PAN" : "BAL";
-    char pStr[8];
-    if (tr.balance == 0) snprintf(pStr, sizeof(pStr), "C");
-    else if (tr.balance <= -PAN_MAX) snprintf(pStr, sizeof(pStr), "L");
-    else if (tr.balance >= PAN_MAX) snprintf(pStr, sizeof(pStr), "R");
-    else if (tr.balance < 0) snprintf(pStr, sizeof(pStr), "L%02d", -(int)tr.balance);
-    else snprintf(pStr, sizeof(pStr), "R%02d", (int)tr.balance);
-    drawTwoLineParamBox(SX(286), y, SX(32), h, panLbl, pStr,
-                        selC == AUD_CELL_PAN, true, ACCENT,
-                        SY(7), SY(21), prevAudioTrackKey[visSlot][AUD_CELL_PAN], full);
+  if (pMode == AUD_PMODE_MIX) {
+    if (staticDue || prevAudioTrackKey[visSlot][AUD_CELL_VOL] == 0) {
+      char vStr[8];
+      if (tr.volume <= 0) snprintf(vStr, sizeof(vStr), "OFF");
+      else snprintf(vStr, sizeof(vStr), "%02d", (int)tr.volume);
+      drawTwoLineParamBox(SX(252), y, SX(32), h, "VOL", vStr,
+                          selC == AUD_CELL_VOL, tr.volume > 0, ACCENT,
+                          SY(7), SY(21), prevAudioTrackKey[visSlot][AUD_CELL_VOL], full);
+    }
+    if (staticDue || prevAudioTrackKey[visSlot][AUD_CELL_PAN] == 0) {
+      const char *panLbl = isAudioTrackMono(t) ? "PAN" : "BAL";
+      char pStr[8];
+      if (tr.balance == 0) snprintf(pStr, sizeof(pStr), "C");
+      else if (tr.balance <= -PAN_MAX) snprintf(pStr, sizeof(pStr), "L");
+      else if (tr.balance >= PAN_MAX) snprintf(pStr, sizeof(pStr), "R");
+      else if (tr.balance < 0) snprintf(pStr, sizeof(pStr), "L%02d", -(int)tr.balance);
+      else snprintf(pStr, sizeof(pStr), "R%02d", (int)tr.balance);
+      drawTwoLineParamBox(SX(286), y, SX(32), h, panLbl, pStr,
+                          selC == AUD_CELL_PAN, true, ACCENT,
+                          SY(7), SY(21), prevAudioTrackKey[visSlot][AUD_CELL_PAN], full);
+    }
+  } else if (pMode == AUD_PMODE_COMP) {
+    if (staticDue || prevAudioTrackKey[visSlot][AUD_CELL_VOL] == 0) {
+      uint8_t pct = getAudioTrackFx(t, AUD_FX_COMP);
+      char fStr[8];
+      formatAudioFxVal(pct, fStr, sizeof(fStr));
+      drawTwoLineParamBox(SX(252), y, SX(66), h, "COMP", fStr,
+                          selC == AUD_CELL_VOL || selC == AUD_CELL_PAN, pct > 0, ACCENT,
+                          SY(7), SY(21), prevAudioTrackKey[visSlot][AUD_CELL_VOL], full);
+    }
+  } else {
+    AudioTrackFxSlot slotL = AUD_FX_DRIVE, slotR = AUD_FX_CHOR;
+    const char *lblL = "DRV", *lblR = "CHR";
+    audioParamCellFxSlot(pMode, AUD_CELL_VOL, slotL, lblL);
+    audioParamCellFxSlot(pMode, AUD_CELL_PAN, slotR, lblR);
+    if (staticDue || prevAudioTrackKey[visSlot][AUD_CELL_VOL] == 0) {
+      uint8_t pctL = getAudioTrackFx(t, slotL);
+      char lStr[8];
+      formatAudioFxVal(pctL, lStr, sizeof(lStr));
+      drawTwoLineParamBox(SX(252), y, SX(32), h, lblL, lStr,
+                          selC == AUD_CELL_VOL, pctL > 0, ACCENT,
+                          SY(7), SY(21), prevAudioTrackKey[visSlot][AUD_CELL_VOL], full);
+    }
+    if (staticDue || prevAudioTrackKey[visSlot][AUD_CELL_PAN] == 0) {
+      uint8_t pctR = getAudioTrackFx(t, slotR);
+      char rStr[8];
+      formatAudioFxVal(pctR, rStr, sizeof(rStr));
+      drawTwoLineParamBox(SX(286), y, SX(32), h, lblR, rStr,
+                          selC == AUD_CELL_PAN, pctR > 0, ACCENT,
+                          SY(7), SY(21), prevAudioTrackKey[visSlot][AUD_CELL_PAN], full);
+    }
   }
 }
 
@@ -286,6 +367,9 @@ FLASHMEM void audioRestoreLastTrackCursor() {
               lastAudioTrackCell >= 0 && lastAudioTrackCell < AUD_CELL_COUNT)
                  ? lastAudioTrackCell
                  : AUD_CELL_WAVE;
+  if (audioParamMode() == AUD_PMODE_COMP && cell == AUD_CELL_PAN) {
+    cell = AUD_CELL_VOL;
+  }
   audioRow = row;
   audioCell = cell;
   lastAudioTrackRow = row;
@@ -388,6 +472,7 @@ FLASHMEM static void audioOnCursorMove(int dx, int dy, uint8_t dir) {
       audioRow = constrain(audioRow + dy, 0, TRACK_ROWS - 1);
       syncAudioScroll();
     }
+    const int maxTrackCell = (audioParamMode() == AUD_PMODE_COMP) ? AUD_CELL_VOL : (AUD_CELL_COUNT - 1);
     if (audioRow == HEADER_ROW) {
       headerCell = constrain(headerCell, 0, HEADER_CELL_COUNT - 1);
     } else if (audioRow == TRANSPORT_ROW) {
@@ -395,10 +480,11 @@ FLASHMEM static void audioOnCursorMove(int dx, int dy, uint8_t dir) {
     } else if (audioRow == INFO_ROW) {
       audioCell = constrain(audioCell, 0, activeInfoCellCount() - 1);
     } else {
-      audioCell = constrain(audioCell, 0, AUD_CELL_COUNT - 1);
+      audioCell = constrain(audioCell, 0, maxTrackCell);
     }
   }
   if (dx != 0) {
+    const int maxTrackCell = (audioParamMode() == AUD_PMODE_COMP) ? AUD_CELL_VOL : (AUD_CELL_COUNT - 1);
     if (audioRow == HEADER_ROW) {
       headerCell = constrain(headerCell + dx, 0, HEADER_CELL_COUNT - 1);
     } else if (audioRow == TRANSPORT_ROW) {
@@ -410,12 +496,13 @@ FLASHMEM static void audioOnCursorMove(int dx, int dy, uint8_t dir) {
       if (dx > 0) {
         if (audioCell == AUD_CELL_ARM) audioCell = stCell;
         else if (audioCell == AUD_CELL_SRC || audioCell == AUD_CELL_TRIG) audioCell = AUD_CELL_WAVE;
-        else audioCell = constrain(audioCell + 1, AUD_CELL_WAVE, AUD_CELL_COUNT - 1);
+        else audioCell = constrain(audioCell + 1, AUD_CELL_WAVE, maxTrackCell);
       } else {
         if (audioCell == AUD_CELL_WAVE) audioCell = stCell;
         else if (audioCell == AUD_CELL_SRC || audioCell == AUD_CELL_TRIG) audioCell = AUD_CELL_ARM;
-        else if (audioCell > AUD_CELL_WAVE) audioCell = audioCell - 1;
+        else if (audioCell > AUD_CELL_WAVE) audioCell = min(audioCell, maxTrackCell) - 1;
       }
+      noteAudioParamCursorCol(audioCell);
     }
   }
   if (audioRow >= 0 && audioRow < TRACK_ROWS) {
@@ -461,16 +548,27 @@ FLASHMEM static void audioOnOptAdjust(int dx, int dy, int delta) {
         storageSyncArmedAudioTrack();
       }
       saveSessionWhenIdle();
-    } else if (audioCell == AUD_CELL_VOL) {
+    } else if (audioCell == AUD_CELL_VOL || audioCell == AUD_CELL_PAN) {
       int step = (dx != 0) ? dx : (dy * 5);
-      int v = constrain((int)tr.volume + step, 0, VOLUME_MAX);
-      setTrackMix(t, v, tr.balance);
-      saveSessionWhenIdle();
-    } else if (audioCell == AUD_CELL_PAN) {
-      int step = (dx != 0) ? dx : (dy * 5);
-      int b = constrain((int)tr.balance + step, -PAN_MAX, PAN_MAX);
-      setTrackMix(t, tr.volume, b);
-      saveSessionWhenIdle();
+      const AudioParamMode pMode = audioParamMode();
+      AudioTrackFxSlot fxSlot = AUD_FX_DRIVE;
+      const char *fxLbl = nullptr;
+      if (audioParamCellFxSlot(pMode, audioCell, fxSlot, fxLbl)) {
+        int cur = (int)getAudioTrackFx(t, fxSlot);
+        int next = constrain(cur + step, 0, 100);
+        if (next != cur) {
+          setAudioTrackFx(t, fxSlot, next);
+          saveSessionWhenIdle();
+        }
+      } else if (audioCell == AUD_CELL_VOL) {
+        int v = constrain((int)tr.volume + step, 0, VOLUME_MAX);
+        setTrackMix(t, v, tr.balance);
+        saveSessionWhenIdle();
+      } else {
+        int b = constrain((int)tr.balance + step, -PAN_MAX, PAN_MAX);
+        setTrackMix(t, tr.volume, b);
+        saveSessionWhenIdle();
+      }
     }
     uiForceRedraw();
   } else if (audioRow == INFO_ROW) {
@@ -533,7 +631,7 @@ FLASHMEM static void audioOnEditPress(bool shiftHeld) {
     }
     saveSessionWhenIdle();
     uiForceRedraw();
-  } else if (audioCell == AUD_CELL_VOL) {
+  } else if (audioParamMode() == AUD_PMODE_MIX && audioCell == AUD_CELL_VOL) {
     if (tr.recordedFrames > 0 || tr.state == TrackState::Muted) {
       if (recording.mode != Recording::Idle && recording.track == t && recording.autoMute) {
         tr.state = TrackState::Muted;
@@ -545,7 +643,7 @@ FLASHMEM static void audioOnEditPress(bool shiftHeld) {
       }
       uiForceRedraw();
     }
-  } else if (audioCell == AUD_CELL_PAN) {
+  } else if (audioParamMode() == AUD_PMODE_MIX && audioCell == AUD_CELL_PAN) {
     setTrackMix(t, tr.volume, 0);
     saveSessionWhenIdle();
     uiForceRedraw();
@@ -573,12 +671,21 @@ FLASHMEM static void audioOnResetParam() {
         storageSyncArmedAudioTrack();
       }
       saveSessionWhenIdle();
-    } else if (audioCell == AUD_CELL_VOL) {
-      setTrackMix(t, VOLUME_UNITY, tracks[t].balance);
-      saveSessionWhenIdle();
-    } else if (audioCell == AUD_CELL_PAN) {
-      setTrackMix(t, tracks[t].volume, 0);
-      saveSessionWhenIdle();
+    } else if (audioCell == AUD_CELL_VOL || audioCell == AUD_CELL_PAN) {
+      AudioTrackFxSlot fxSlot = AUD_FX_DRIVE;
+      const char *fxLbl = nullptr;
+      if (audioParamCellFxSlot(audioParamMode(), audioCell, fxSlot, fxLbl)) {
+        if (getAudioTrackFx(t, fxSlot) != 0) {
+          setAudioTrackFx(t, fxSlot, 0);
+          saveSessionWhenIdle();
+        }
+      } else if (audioCell == AUD_CELL_VOL) {
+        setTrackMix(t, VOLUME_UNITY, tracks[t].balance);
+        saveSessionWhenIdle();
+      } else {
+        setTrackMix(t, tracks[t].volume, 0);
+        saveSessionWhenIdle();
+      }
     }
     uiForceRedraw();
   } else if (audioRow == INFO_ROW) {

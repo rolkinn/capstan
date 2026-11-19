@@ -74,7 +74,7 @@ struct SynthEvent {
 };
 static_assert(sizeof(SynthEvent) == 8, "SynthEvent must be 8 bytes");
 
-static constexpr uint32_t SYNTH_EV_RING_SIZE = 128;
+static constexpr uint32_t SYNTH_EV_RING_SIZE = 64;
 static constexpr uint32_t SYNTH_EV_RING_MASK = SYNTH_EV_RING_SIZE - 1;
 static SynthEvent synthEvRing[SYNTH_EV_RING_SIZE];
 static volatile uint32_t synthEvHead = 0;
@@ -82,14 +82,19 @@ static volatile uint32_t synthEvTail = 0;
 
 // Active song's 8 instrument slots (all start blank with InstType::None)
 static FmPatch patches[NUM_INSTRUMENTS];
+static uint8_t instTapePct[NUM_INSTRUMENTS] = {};
+static uint8_t instCompPct[NUM_INSTRUMENTS] = {};
 
 // Copy/Paste clipboard for Instruments page
 DMAMEM static FmPatch clipboardPatch;
+static uint8_t clipboardTapePct = 0;
+static uint8_t clipboardCompPct = 0;
 static bool clipboardValid = false;
 
 // Per-instrument runtime state (pitch bend, CC, telemetry) and cached envelope rates
 static FmInstRuntime instRt[NUM_INSTRUMENTS];
 static float instCurLevel[NUM_INSTRUMENTS];
+static float instFxCurOutLvl = 1.0f;
 DMAMEM static FmInstEnvRates instEnvRates[NUM_INSTRUMENTS];
 
 // 32-voice polyphonic pool: 8 voices max per instrument slot (I01..I08)
@@ -373,6 +378,26 @@ FmPatch &fmSynthPatch(int instIdx) {
   return patches[constrain(instIdx, 0, NUM_INSTRUMENTS - 1)];
 }
 
+uint8_t instGetTape(int instIdx) {
+  if (instIdx < 0 || instIdx >= NUM_INSTRUMENTS) return 0;
+  return instTapePct[instIdx];
+}
+
+FLASHMEM void instSetTape(int instIdx, int pct) {
+  if (instIdx < 0 || instIdx >= NUM_INSTRUMENTS) return;
+  instTapePct[instIdx] = (uint8_t)constrain(pct, 0, (int)INST_FX_MAX);
+}
+
+uint8_t instGetComp(int instIdx) {
+  if (instIdx < 0 || instIdx >= NUM_INSTRUMENTS) return 0;
+  return instCompPct[instIdx];
+}
+
+FLASHMEM void instSetComp(int instIdx, int pct) {
+  if (instIdx < 0 || instIdx >= NUM_INSTRUMENTS) return;
+  instCompPct[instIdx] = (uint8_t)constrain(pct, 0, (int)INST_FX_MAX);
+}
+
 FLASHMEM bool fmSynthIsSlotEmpty(int instIdx) {
   if (instIdx < 0 || instIdx >= NUM_INSTRUMENTS) return true;
   return instEngineForType((InstType)patches[instIdx].type) == nullptr;
@@ -414,6 +439,8 @@ FLASHMEM void fmSynthResetToDefault(int instIdx, bool keepName) {
   if (curType == InstType::SoundFont) {
     sf2UnloadFile(instIdx);
   }
+  instTapePct[instIdx] = 0;
+  instCompPct[instIdx] = 0;
   resetInstDriveState(instIdx);
   syncInstCurLevel(instIdx);
 }
@@ -425,6 +452,8 @@ FLASHMEM void fmSynthCreateInSlot(int instIdx, InstType type) {
   samplerClearSlot(instIdx);
   sf2ClearSlot(instIdx);
   instMidiMapClearInst(instIdx);
+  instTapePct[instIdx] = 0;
+  instCompPct[instIdx] = 0;
   const InstEngineOps *ops = instEngineForType(type);
   if (ops) {
     const FmPatch &src = ops->defaultPatch();
@@ -445,6 +474,8 @@ FLASHMEM void fmSynthDeleteSlot(int instIdx) {
   samplerClearSlot(instIdx);
   sf2ClearSlot(instIdx);
   instMidiMapClearInst(instIdx);
+  instTapePct[instIdx] = 0;
+  instCompPct[instIdx] = 0;
   memset(&patches[instIdx], 0, sizeof(FmPatch));
   patches[instIdx].type = (uint8_t)InstType::None;
   instCurLevel[instIdx] = 1.0f;
@@ -454,6 +485,8 @@ FLASHMEM bool fmSynthCopySlot(int instIdx) {
   if (instIdx < 0 || instIdx >= NUM_INSTRUMENTS) return false;
   if (fmSynthIsSlotEmpty(instIdx)) return false;
   clipboardPatch = patches[instIdx];
+  clipboardTapePct = instTapePct[instIdx];
+  clipboardCompPct = instCompPct[instIdx];
   samplerCopySlot(instIdx);
   sf2CopySlot(instIdx);
   instMidiMapCopyInst(instIdx);
@@ -466,11 +499,15 @@ FLASHMEM bool fmSynthPasteSlot(int instIdx) {
   fmSynthSilenceInst(instIdx);
   resetInstDriveState(instIdx);
   patches[instIdx] = clipboardPatch;
+  instTapePct[instIdx] = clipboardTapePct;
+  instCompPct[instIdx] = clipboardCompPct;
   syncInstCurLevel(instIdx);
   samplerPasteSlot(instIdx);
   sf2PasteSlot(instIdx);
   instMidiMapPasteInst(instIdx);
   memset(&clipboardPatch, 0, sizeof(clipboardPatch));
+  clipboardTapePct = 0;
+  clipboardCompPct = 0;
   clipboardValid = false;
   return true;
 }
@@ -496,11 +533,16 @@ FLASHMEM void fmSynthResetAll() {
   lastFxInst = -1;
   lastFxMidiTrack = -1;
   lastInstWantCap = false;
+  instFxCurOutLvl = 1.0f;
   instBusLimiter.reset();
   memset(instCapDelayL, 0, sizeof(instCapDelayL));
   memset(instCapDelayR, 0, sizeof(instCapDelayR));
   latchedDroneMask = 0;
   autoDroneMask = 0;
+  memset(instTapePct, 0, sizeof(instTapePct));
+  memset(instCompPct, 0, sizeof(instCompPct));
+  clipboardTapePct = 0;
+  clipboardCompPct = 0;
   for (int i = 0; i < NUM_INSTRUMENTS; i++) {
     memset(&patches[i], 0, sizeof(FmPatch));
     patches[i].type = (uint8_t)InstType::None;
@@ -969,7 +1011,7 @@ FLASHMEM bool fmSynthNoteOn(int instIdx, uint8_t note, uint8_t velocity, uint8_t
     fmSynthNoteOff(instIdx, note, sampleOffset, midiTrack);
     return true;
   }
-  if (synthEvHead - synthEvTail >= SYNTH_EV_RING_SIZE - 16) {
+  if (synthEvHead - synthEvTail >= SYNTH_EV_RING_SIZE - 8) {
     return true;
   }
 
@@ -1186,7 +1228,7 @@ FLASHMEM bool fmSynthHasActiveOutput() {
   for (int i = 0; i < NUM_FM_VOICES; i++) {
     if (voices[i].active) return true;
   }
-  return instFxTailFrames > 0 || instLimTailFrames > 0;
+  return instFxTailFrames > 0 || instLimTailFrames > 0 || isInstFxChainEnabled();
 }
 
 FLASHMEM void fmSynthService() {
@@ -1266,15 +1308,16 @@ __attribute__((noinline)) static void applyInstDriveBlock(int drvSlot, uint8_t d
                                                           int32_t *bufL, int32_t *bufR, int numFrames) {
   for (int i = 0; i < numFrames; i++) {
     float xL = (float)bufL[i] * (1.0f / 32768.0f);
-    float drvL = processInstDriveSample(drvSlot, drive, xL);
+    float drvL = processInstDriveChannelSample(drvSlot, 0, drive, xL);
     int32_t sL = (int32_t)(drvL * 32768.0f);
     if (bufR[i] == bufL[i]) {
+      (void)processInstDriveChannelSample(drvSlot, 1, drive, xL);
       bufL[i] = sL;
       bufR[i] = sL;
     } else {
       float xR = (float)bufR[i] * (1.0f / 32768.0f);
       bufL[i] = sL;
-      bufR[i] = (int32_t)(processInstDriveSample(drvSlot, drive, xR) * 32768.0f);
+      bufR[i] = (int32_t)(processInstDriveChannelSample(drvSlot, 1, drive, xR) * 32768.0f);
     }
   }
 }
@@ -1289,8 +1332,230 @@ __attribute__((noinline)) static void scaleInstLevelBlock(int32_t *bufL, int32_t
   }
 }
 
+FLASHMEM __attribute__((noinline)) static void renderSharedCapInstVoices(
+    int inst, int captureMidiTrack, int numFrames,
+    const FmPatch &p, const FmInstRuntime &rt, const InstEngineOps *ops,
+    bool hasDrive, bool hasLevelScale, float startLvl, float targetLvl, bool rampingLvl,
+    int32_t *instL, int32_t *instR, int32_t *capOutL, int32_t *capOutR) {
+  int32_t capInstL[AUDIO_BLOCK_SAMPLES] = {};
+  int32_t capInstR[AUDIO_BLOCK_SAMPLES] = {};
+  for (int vIdx = 0; vIdx < NUM_FM_VOICES; vIdx++) {
+    FmVoice &v = voices[vIdx];
+    if (v.active && v.instIdx == (uint8_t)inst) {
+      if (v.midiTrack == (uint8_t)captureMidiTrack) {
+        ops->renderVoice(v, p, rt, capInstL, capInstR, numFrames);
+      } else {
+        ops->renderVoice(v, p, rt, instL, instR, numFrames);
+      }
+    }
+  }
+  for (int i = 0; i < numFrames; i++) {
+    instL[i] += capInstL[i];
+    instR[i] += capInstR[i];
+  }
+  const float gStep = rampingLvl ? ((targetLvl - startLvl) / (float)max(1, numFrames)) : 0.0f;
+  if (hasDrive) {
+    applyInstDriveBlock(NUM_INSTRUMENTS + inst, p.fx.drive, capInstL, capInstR, numFrames);
+  }
+  if (hasLevelScale) {
+    scaleInstLevelBlock(capInstL, capInstR, numFrames, startLvl, gStep);
+  }
+  for (int i = 0; i < numFrames; i++) {
+    capOutL[i] += capInstL[i];
+    capOutR[i] += capInstR[i];
+  }
+}
+
+FLASHMEM __attribute__((noinline)) static void noteInstFxTailSend(
+    int inst, const InstFxParams &fx, uint8_t tapePct, uint8_t compPct, int numFrames,
+    uint8_t &maxChor, uint8_t &maxDly, uint8_t &maxDfb, uint8_t &maxVerb,
+    uint8_t &maxTape, uint8_t &maxComp) {
+  lastFxInst = (int8_t)inst;
+  if (fx.chorus > maxChor) maxChor = fx.chorus;
+  if (fx.delay > maxDly) maxDly = fx.delay;
+  if (fx.delayFeedback > maxDfb) maxDfb = fx.delayFeedback;
+  if (fx.reverb > maxVerb) maxVerb = fx.reverb;
+  if (tapePct > maxTape) maxTape = tapePct;
+  if (compPct > maxComp) maxComp = compPct;
+  if (fx.delay > 0 || fx.reverb > 0) {
+    int32_t dlyTail = (fx.delay > 0)
+                          ? (int32_t)(SAMPLE_RATE_HZ * (0.6f + 0.044f * (float)fx.delayFeedback))
+                          : 0;
+    int32_t revTail = (fx.reverb > 0)
+                          ? (int32_t)(SAMPLE_RATE_HZ * (0.8f + 0.25f * (float)fx.reverb))
+                          : 0;
+    int32_t reqTail = max(dlyTail, revTail);
+    if (reqTail > instFxTailFrames) instFxTailFrames = reqTail;
+  } else {
+    int32_t minTail = (tapePct > 0) ? (2 * numFrames) : numFrames;
+    if (instFxTailFrames < minTail) {
+      instFxTailFrames = minTail;
+    }
+  }
+  instFxSilentBlocks = 0;
+}
+
+FLASHMEM __attribute__((noinline)) static void finishInstFxTailBlock(int numFrames, float tailPeak,
+                                                                     uint8_t maxDly, bool measuredPeak) {
+  instFxTailFrames = max((int32_t)0, instFxTailFrames - (int32_t)numFrames);
+  if (measuredPeak) {
+    if (tailPeak < 1.5e-4f) {
+      int32_t gateBlocks = (maxDly > 0) ? 132 : 8;
+      if (++instFxSilentBlocks >= gateBlocks) {
+        instFxTailFrames = 0;
+      }
+    } else {
+      instFxSilentBlocks = 0;
+    }
+  }
+  if (instFxTailFrames == 0) {
+    instFxSilentBlocks = 0;
+    lastFxMidiTrack = -1;
+    setInstFxParams(0, 0, 0, 0, 0, 0);
+  }
+}
+
+FLASHMEM __attribute__((noinline)) static void packInstAuxBlock(const int32_t *sendL, const int32_t *sendR,
+                                                                int numFrames, uint32_t *instAuxOut,
+                                                                bool *outHasInstAux) {
+  if (!instAuxOut || !outHasInstAux) return;
+  int n = min(numFrames, (int)AUDIO_BLOCK_SAMPLES);
+  for (int i = 0; i < n; i++) {
+    int16_t sL = (int16_t)constrain((sendL[i] + 1) >> 1, -32768, 32767);
+    int16_t sR = (int16_t)constrain((sendR[i] + 1) >> 1, -32768, 32767);
+    instAuxOut[i] = (uint16_t)sL | ((uint32_t)(uint16_t)sR << 16);
+  }
+  *outHasInstAux = true;
+}
+
+FLASHMEM __attribute__((noinline)) static bool computeInstFxMaxOutLvl(
+    bool anyActive, int tunerInst, bool tunerMuteInst, float &outMaxLvl) {
+  float maxLvl = 0.0f;
+  bool anyFxBus = false;
+  if (instFxTailFrames > 0 && lastFxInst >= 0 && lastFxInst < NUM_INSTRUMENTS &&
+      patches[lastFxInst].type != (uint8_t)InstType::None) {
+    maxLvl = INST_LEVEL_LUT[constrain(instPatchLevel(patches[lastFxInst]), 0, (int)VOLUME_MAX)];
+    anyFxBus = true;
+  }
+  if (anyActive) {
+    uint8_t activeInstMask = 0;
+    for (int vIdx = 0; vIdx < NUM_FM_VOICES; vIdx++) {
+      if (voices[vIdx].active && voices[vIdx].instIdx < NUM_INSTRUMENTS) {
+        activeInstMask |= (uint8_t)(1u << voices[vIdx].instIdx);
+      }
+    }
+    for (int inst = 0; inst < NUM_INSTRUMENTS; inst++) {
+      if ((activeInstMask & (uint8_t)(1u << inst)) == 0) continue;
+      if (inst == tunerInst && tunerMuteInst) continue;
+      const FmPatch &p = patches[inst];
+      if (p.fx.chorus > 0 || p.fx.delay > 0 || p.fx.reverb > 0 ||
+          instTapePct[inst] > 0 || instCompPct[inst] > 0) {
+        float tgt = INST_LEVEL_LUT[constrain(instPatchLevel(p), 0, (int)VOLUME_MAX)];
+        if (tgt > maxLvl) maxLvl = tgt;
+        anyFxBus = true;
+      }
+    }
+  }
+  outMaxLvl = anyFxBus ? maxLvl : 1.0f;
+  return anyFxBus;
+}
+
+FLASHMEM __attribute__((noinline)) static void runInstFxBusBlock(
+    bool anyFxSend, bool wantCap, int captureMidiTrack,
+    bool capUsedFxSend, bool otherUsedFxSend, int numFrames,
+    uint8_t maxChor, uint8_t maxDly, uint8_t maxDfb, uint8_t maxVerb,
+    uint8_t maxTape, uint8_t maxComp,
+    float fxOutStart, float fxOutTarget, float invFrames,
+    int32_t *fxSendL, int32_t *fxSendR,
+    const int32_t *capDryFxL, const int32_t *capDryFxR,
+    int32_t *outL, int32_t *outR, int32_t *capOutL, int32_t *capOutR,
+    uint32_t *instAuxOut, bool *outHasInstAux) {
+  if (anyFxSend) {
+    lastFxMidiTrack = (capUsedFxSend && !otherUsedFxSend) ? (int8_t)captureMidiTrack : (int8_t)-1;
+  }
+  const bool routeFxToCap = wantCap &&
+                            ((capUsedFxSend && !otherUsedFxSend) ||
+                             (!anyFxSend && lastFxMidiTrack == (int8_t)captureMidiTrack));
+  const bool routeDryFxToCap = wantCap && capUsedFxSend && otherUsedFxSend;
+
+  if (instFxTailFrames > 0 && lastFxInst >= 0 && lastFxInst < NUM_INSTRUMENTS &&
+      patches[lastFxInst].type != (uint8_t)InstType::None) {
+    const InstFxParams &tfx = patches[lastFxInst].fx;
+    if (tfx.chorus > maxChor) maxChor = tfx.chorus;
+    if (tfx.delay > maxDly) maxDly = tfx.delay;
+    if (tfx.delayFeedback > maxDfb) maxDfb = tfx.delayFeedback;
+    if (tfx.reverb > maxVerb) maxVerb = tfx.reverb;
+    if (instTapePct[lastFxInst] > maxTape) maxTape = instTapePct[lastFxInst];
+    if (instCompPct[lastFxInst] > maxComp) maxComp = instCompPct[lastFxInst];
+  }
+  setInstFxParams(maxChor, maxDly, maxDfb, maxVerb, maxTape, maxComp);
+
+  const bool instChainActive = isInstFxChainEnabled();
+  const bool needSharedAux   = anyFxSend && instNeedsSharedAuxSend();
+  const bool scaleFxOut      = (fabsf(fxOutTarget - 1.0f) > 1e-4f) || (fabsf(fxOutStart - 1.0f) > 1e-4f);
+  const float fxGStep        = scaleFxOut ? ((fxOutTarget - fxOutStart) * invFrames) : 0.0f;
+  float fxG                  = fxOutStart;
+  float tailPeak = 0.0f;
+  if (!instChainActive) {
+    if (anyFxSend) {
+      if (scaleFxOut) {
+        scaleInstLevelBlock(fxSendL, fxSendR, numFrames, fxOutStart, fxGStep);
+      }
+      if (needSharedAux) {
+        packInstAuxBlock(fxSendL, fxSendR, numFrames, instAuxOut, outHasInstAux);
+      }
+      for (int i = 0; i < numFrames; i++) {
+        outL[i] += fxSendL[i];
+        outR[i] += fxSendR[i];
+        if (routeFxToCap) {
+          capOutL[i] += fxSendL[i];
+          capOutR[i] += fxSendR[i];
+        }
+      }
+    }
+  } else {
+    for (int i = 0; i < numFrames; i++) {
+      float xL = anyFxSend ? ((float)fxSendL[i] * (1.0f / 32768.0f)) : 0.0f;
+      float xR = anyFxSend ? ((float)fxSendR[i] * (1.0f / 32768.0f)) : 0.0f;
+      processInstFxSample(xL, xR);
+      float absSum = fabsf(xL) + fabsf(xR);
+      if (absSum > tailPeak) tailPeak = absSum;
+      if (scaleFxOut) {
+        fxG += fxGStep;
+        xL *= fxG;
+        xR *= fxG;
+      }
+      int32_t wetL = (int32_t)(xL * 32768.0f);
+      int32_t wetR = (int32_t)(xR * 32768.0f);
+      fxSendL[i] = wetL;
+      fxSendR[i] = wetR;
+      outL[i] += wetL;
+      outR[i] += wetR;
+      if (routeFxToCap) {
+        capOutL[i] += wetL;
+        capOutR[i] += wetR;
+      }
+    }
+    if (needSharedAux) {
+      packInstAuxBlock(fxSendL, fxSendR, numFrames, instAuxOut, outHasInstAux);
+    }
+  }
+  instFxCurOutLvl = fxOutTarget;
+  if (routeDryFxToCap) {
+    for (int i = 0; i < numFrames; i++) {
+      capOutL[i] += capDryFxL[i];
+      capOutR[i] += capDryFxR[i];
+    }
+  }
+  if (!anyFxSend && instFxTailFrames > 0) {
+    finishInstFxTailBlock(numFrames, tailPeak, maxDly, instChainActive);
+  }
+}
+
 bool fmSynthRenderBlock(int32_t *outL, int32_t *outR, int numFrames,
-                        int captureMidiTrack, int32_t *capOutL, int32_t *capOutR) {
+                        int captureMidiTrack, int32_t *capOutL, int32_t *capOutR,
+                        uint32_t *instAuxOut, bool *outHasInstAux) {
+  if (outHasInstAux) *outHasInstAux = false;
   if (synthEvTail != synthEvHead) {
     fmSynthProcessQueuedEvents();
   }
@@ -1315,7 +1580,7 @@ bool fmSynthRenderBlock(int32_t *outL, int32_t *outR, int numFrames,
       break;
     }
   }
-  if (!anyActive && instFxTailFrames <= 0 && instLimTailFrames <= 0) {
+  if (!anyActive && instFxTailFrames <= 0 && instLimTailFrames <= 0 && !isInstFxChainEnabled()) {
     lastInstWantCap = false;
     return false;
   }
@@ -1335,7 +1600,11 @@ bool fmSynthRenderBlock(int32_t *outL, int32_t *outR, int numFrames,
   bool anyFxSend = false;
   bool capUsedFxSend = false;
   bool otherUsedFxSend = false;
-  uint8_t maxChor = 0, maxDly = 0, maxDfb = 0, maxVerb = 0;
+  uint8_t maxChor = 0, maxDly = 0, maxDfb = 0, maxVerb = 0, maxTape = 0, maxComp = 0;
+  float fxOutTarget = 1.0f;
+  const bool anyFxBusInst = computeInstFxMaxOutLvl(anyActive, tunerInst, tunerMuteInst, fxOutTarget);
+  const float fxOutStart  = anyFxBusInst ? instFxCurOutLvl : 1.0f;
+  const float invFrames   = 1.0f / (float)max(1, numFrames);
 
   if (anyActive) {
     for (int inst = 0; inst < NUM_INSTRUMENTS; inst++) {
@@ -1363,8 +1632,11 @@ bool fmSynthRenderBlock(int32_t *outL, int32_t *outR, int numFrames,
         continue;
       }
 
+      const uint8_t iTape = instTapePct[inst];
+      const uint8_t iComp = instCompPct[inst];
       const bool hasDrive = (p.fx.drive > 0);
-      const bool hasBusFx = (p.fx.chorus > 0 || p.fx.delay > 0 || p.fx.reverb > 0);
+      const bool hasBusFx = (p.fx.chorus > 0 || p.fx.delay > 0 || p.fx.reverb > 0 ||
+                             iTape > 0 || iComp > 0);
       const int instLvl = constrain(instPatchLevel(p), 0, (int)VOLUME_MAX);
       const float targetLvl = INST_LEVEL_LUT[instLvl];
       const float startLvl = instCurLevel[inst];
@@ -1385,34 +1657,9 @@ bool fmSynthRenderBlock(int32_t *outL, int32_t *outR, int numFrames,
       int32_t instL[AUDIO_BLOCK_SAMPLES] = {};
       int32_t instR[AUDIO_BLOCK_SAMPLES] = {};
       if (hasCapVoice && hasOtherVoice) {
-        // Shared instrument across multiple MIDI tracks: render captured track separately
-        int32_t capInstL[AUDIO_BLOCK_SAMPLES] = {};
-        int32_t capInstR[AUDIO_BLOCK_SAMPLES] = {};
-        for (int vIdx = 0; vIdx < NUM_FM_VOICES; vIdx++) {
-          FmVoice &v = voices[vIdx];
-          if (v.active && v.instIdx == (uint8_t)inst) {
-            if (v.midiTrack == (uint8_t)captureMidiTrack) {
-              ops->renderVoice(v, p, rt, capInstL, capInstR, numFrames);
-            } else {
-              ops->renderVoice(v, p, rt, instL, instR, numFrames);
-            }
-          }
-        }
-        for (int i = 0; i < numFrames; i++) {
-          instL[i] += capInstL[i];
-          instR[i] += capInstR[i];
-        }
-        const float gStep = rampingLvl ? ((targetLvl - startLvl) / (float)max(1, numFrames)) : 0.0f;
-        if (hasDrive) {
-          applyInstDriveBlock(NUM_INSTRUMENTS + inst, p.fx.drive, capInstL, capInstR, numFrames);
-        }
-        if (hasLevelScale) {
-          scaleInstLevelBlock(capInstL, capInstR, numFrames, startLvl, gStep);
-        }
-        for (int i = 0; i < numFrames; i++) {
-          capOutL[i] += capInstL[i];
-          capOutR[i] += capInstR[i];
-        }
+        renderSharedCapInstVoices(inst, captureMidiTrack, numFrames, p, rt, ops,
+                                  hasDrive, hasLevelScale, startLvl, targetLvl, rampingLvl,
+                                  instL, instR, capOutL, capOutR);
       } else {
         for (int vIdx = 0; vIdx < NUM_FM_VOICES; vIdx++) {
           FmVoice &v = voices[vIdx];
@@ -1432,13 +1679,12 @@ bool fmSynthRenderBlock(int32_t *outL, int32_t *outR, int numFrames,
         applyInstDriveBlock(inst, p.fx.drive, instL, instR, numFrames);
       }
 
-      if (hasLevelScale) {
-        const float gStep = rampingLvl ? ((targetLvl - startLvl) / (float)max(1, numFrames)) : 0.0f;
-        scaleInstLevelBlock(instL, instR, numFrames, startLvl, gStep);
-        instCurLevel[inst] = targetLvl;
-      }
-
       if (inst == tunerInst && tunerMuteInst) {
+        if (hasLevelScale) {
+          const float gStep = rampingLvl ? ((targetLvl - startLvl) * invFrames) : 0.0f;
+          scaleInstLevelBlock(instL, instR, numFrames, startLvl, gStep);
+          instCurLevel[inst] = targetLvl;
+        }
         if (hasCapVoice && !hasOtherVoice) {
           for (int i = 0; i < numFrames; i++) {
             capOutL[i] += instL[i];
@@ -1450,6 +1696,14 @@ bool fmSynthRenderBlock(int32_t *outL, int32_t *outR, int numFrames,
 
       const bool silentInst = (!rampingLvl && instLvl <= 0);
       if (hasBusFx && !silentInst) {
+        // Apply relative trim into FX bus so OUT: OUTPUT LEVEL acts post-COMP
+        const float preTgt = (fxOutTarget > 1e-5f) ? (targetLvl / fxOutTarget) : 0.0f;
+        const float preSt  = (fxOutStart  > 1e-5f) ? min(2.0f, startLvl / fxOutStart) : preTgt;
+        if (fabsf(preTgt - 1.0f) > 1e-4f || fabsf(preSt - 1.0f) > 1e-4f) {
+          scaleInstLevelBlock(instL, instR, numFrames, preSt, (preTgt - preSt) * invFrames);
+        }
+        instCurLevel[inst] = targetLvl;
+
         if (!anyFxSend) {
           memset(fxSendL, 0, numFrames * sizeof(int32_t));
           memset(fxSendR, 0, numFrames * sizeof(int32_t));
@@ -1457,36 +1711,26 @@ bool fmSynthRenderBlock(int32_t *outL, int32_t *outR, int numFrames,
         }
         if (hasCapVoice && !hasOtherVoice) {
           capUsedFxSend = true;
+          const float dryRatio = (preTgt > 1e-5f) ? fxOutTarget : 0.0f;
           for (int i = 0; i < numFrames; i++) {
-            capDryFxL[i] += instL[i];
-            capDryFxR[i] += instR[i];
+            capDryFxL[i] += (int32_t)((float)instL[i] * dryRatio);
+            capDryFxR[i] += (int32_t)((float)instR[i] * dryRatio);
           }
         } else {
           otherUsedFxSend = true;
         }
-        lastFxInst = (int8_t)inst;
-        if (p.fx.chorus > maxChor) maxChor = p.fx.chorus;
-        if (p.fx.delay > maxDly) maxDly = p.fx.delay;
-        if (p.fx.delayFeedback > maxDfb) maxDfb = p.fx.delayFeedback;
-        if (p.fx.reverb > maxVerb) maxVerb = p.fx.reverb;
-        if (p.fx.delay > 0 || p.fx.reverb > 0) {
-          int32_t dlyTail = (p.fx.delay > 0)
-                                ? (int32_t)(SAMPLE_RATE_HZ * (0.6f + 0.044f * (float)p.fx.delayFeedback))
-                                : 0;
-          int32_t revTail = (p.fx.reverb > 0)
-                                ? (int32_t)(SAMPLE_RATE_HZ * (0.8f + 0.082f * (float)p.fx.reverb))
-                                : 0;
-          int32_t reqTail = max(dlyTail, revTail);
-          if (reqTail > instFxTailFrames) instFxTailFrames = reqTail;
-        } else if (instFxTailFrames < numFrames) {
-          instFxTailFrames = numFrames;
-        }
-        instFxSilentBlocks = 0;
+        noteInstFxTailSend(inst, p.fx, iTape, iComp, numFrames,
+                           maxChor, maxDly, maxDfb, maxVerb, maxTape, maxComp);
         for (int i = 0; i < numFrames; i++) {
           fxSendL[i] += instL[i];
           fxSendR[i] += instR[i];
         }
       } else {
+        if (hasLevelScale) {
+          const float gStep = rampingLvl ? ((targetLvl - startLvl) * invFrames) : 0.0f;
+          scaleInstLevelBlock(instL, instR, numFrames, startLvl, gStep);
+          instCurLevel[inst] = targetLvl;
+        }
         for (int i = 0; i < numFrames; i++) {
           outL[i] += instL[i];
           outR[i] += instR[i];
@@ -1501,83 +1745,21 @@ bool fmSynthRenderBlock(int32_t *outL, int32_t *outR, int numFrames,
     }
   }
 
-  if (anyFxSend || instFxTailFrames > 0) {
-    if (anyFxSend) {
-      lastFxMidiTrack = (capUsedFxSend && !otherUsedFxSend) ? (int8_t)captureMidiTrack : (int8_t)-1;
-    }
-    const bool routeFxToCap = wantCap &&
-                              ((capUsedFxSend && !otherUsedFxSend) ||
-                               (!anyFxSend && lastFxMidiTrack == (int8_t)captureMidiTrack));
-    const bool routeDryFxToCap = wantCap && capUsedFxSend && otherUsedFxSend;
-
-    if (lastFxInst >= 0 && lastFxInst < NUM_INSTRUMENTS &&
-        patches[lastFxInst].type != (uint8_t)InstType::None) {
-      const InstFxParams &tfx = patches[lastFxInst].fx;
-      if (tfx.chorus > maxChor) maxChor = tfx.chorus;
-      if (tfx.delay > maxDly) maxDly = tfx.delay;
-      if (tfx.delayFeedback > maxDfb) maxDfb = tfx.delayFeedback;
-      if (tfx.reverb > maxVerb) maxVerb = tfx.reverb;
-    }
-    setInstFxParams(maxChor, maxDly, maxDfb, maxVerb);
-
-    float tailPeak = 0.0f;
-    if (!isInstFxChainEnabled()) {
-      if (anyFxSend) {
-        for (int i = 0; i < numFrames; i++) {
-          outL[i] += fxSendL[i];
-          outR[i] += fxSendR[i];
-          if (routeFxToCap) {
-            capOutL[i] += fxSendL[i];
-            capOutR[i] += fxSendR[i];
-          }
-        }
-      }
-    } else {
-      for (int i = 0; i < numFrames; i++) {
-        float xL = anyFxSend ? ((float)fxSendL[i] * (1.0f / 32768.0f)) : 0.0f;
-        float xR = anyFxSend ? ((float)fxSendR[i] * (1.0f / 32768.0f)) : 0.0f;
-        processInstFxSample(xL, xR);
-        float absSum = fabsf(xL) + fabsf(xR);
-        if (absSum > tailPeak) tailPeak = absSum;
-        int32_t wetL = (int32_t)(xL * 32768.0f);
-        int32_t wetR = (int32_t)(xR * 32768.0f);
-        outL[i] += wetL;
-        outR[i] += wetR;
-        if (routeFxToCap) {
-          capOutL[i] += wetL;
-          capOutR[i] += wetR;
-        }
-      }
-    }
-    if (routeDryFxToCap) {
-      for (int i = 0; i < numFrames; i++) {
-        capOutL[i] += capDryFxL[i];
-        capOutR[i] += capDryFxR[i];
-      }
-    }
-    if (!anyFxSend) {
-      instFxTailFrames = max((int32_t)0, instFxTailFrames - (int32_t)numFrames);
-      if (tailPeak < 1.5e-4f) {
-        // Allow at least 128 blocks (~370 ms) when Delay is active so a 327 ms delay tap isn't gated early
-        int32_t gateBlocks = (maxDly > 0) ? 132 : 8;
-        if (++instFxSilentBlocks >= gateBlocks) {
-          instFxTailFrames = 0;
-        }
-      } else {
-        instFxSilentBlocks = 0;
-      }
-      if (instFxTailFrames == 0) {
-        instFxSilentBlocks = 0;
-        lastFxMidiTrack = -1;
-        setInstFxParams(0, 0, 0, 0);
-      }
-    }
+  if (anyFxSend || instFxTailFrames > 0 || isInstFxChainEnabled()) {
+    runInstFxBusBlock(anyFxSend, wantCap, captureMidiTrack,
+                      capUsedFxSend, otherUsedFxSend, numFrames,
+                      maxChor, maxDly, maxDfb, maxVerb, maxTape, maxComp,
+                      fxOutStart, fxOutTarget, invFrames,
+                      fxSendL, fxSendR, capDryFxL, capDryFxR,
+                      outL, outR, capOutL, capOutR, instAuxOut, outHasInstAux);
+  } else {
+    instFxCurOutLvl = fxOutTarget;
   }
 
   // Zero-overshoot 32-sample (0.73 ms) lookahead linear peak guard on the summed
   // internal instrument bus (and M01..M08 capture bus) so dense polyphonic chords
   // never flat-top or hit downstream waveshapers even at LEVEL = 100 or across 32 voices.
-  if (anyActive || anyFxSend || instFxTailFrames > 0) {
+  if (anyActive || anyFxSend || instFxTailFrames > 0 || isInstFxChainEnabled()) {
     instLimTailFrames = (int32_t)LookaheadMonitorLimiter::LOOKAHEAD;
   } else {
     instLimTailFrames = max((int32_t)0, instLimTailFrames - (int32_t)numFrames);
@@ -1714,6 +1896,21 @@ FLASHMEM static void validateAndClampPatch(FmPatch &p, int slotIdx) {
   setInstPatchLevel(p, instPatchLevel(p));
 }
 
+struct DiskInstFxExtChunk {
+  char magic[4];      // "IFX1"
+  uint16_t version;   // 1
+  uint16_t count;     // NUM_INSTRUMENTS (8)
+  uint8_t tape[NUM_INSTRUMENTS];
+  uint8_t comp[NUM_INSTRUMENTS];
+};
+
+struct DiskSingleInstFxExtChunk {
+  char magic[4];      // "IF1X"
+  uint16_t version;   // 1
+  uint8_t tape;
+  uint8_t comp;
+};
+
 FLASHMEM bool fmSynthSaveSong(FsFile &f) {
   if (!f.isOpen()) return false;
   // Stage in RAM1 stack struct for DMA_SDIO cache safety
@@ -1729,6 +1926,15 @@ FLASHMEM bool fmSynthSaveSong(FsFile &f) {
   if (!samplerSaveSongData(f)) return false;
   if (!instMidiMapSaveSongData(f)) return false;
   if (!sf2SaveSongData(f)) return false;
+  DiskInstFxExtChunk fxExt{};
+  memcpy(fxExt.magic, "IFX1", 4);
+  fxExt.version = 1;
+  fxExt.count = NUM_INSTRUMENTS;
+  for (int i = 0; i < NUM_INSTRUMENTS; i++) {
+    fxExt.tape[i] = instTapePct[i];
+    fxExt.comp[i] = instCompPct[i];
+  }
+  if (f.write(&fxExt, sizeof(fxExt)) != (int)sizeof(fxExt)) return false;
   f.truncate();
   f.sync();
   return true;
@@ -1736,6 +1942,8 @@ FLASHMEM bool fmSynthSaveSong(FsFile &f) {
 
 FLASHMEM bool fmSynthLoadSong(FsFile &f) {
   instMidiMapResetAll();
+  memset(instTapePct, 0, sizeof(instTapePct));
+  memset(instCompPct, 0, sizeof(instCompPct));
   if (!f.isOpen() || !f.seekSet(0)) return false;
   DiskInstFile df{};
   int rd = f.read(&df, sizeof(df));
@@ -1752,6 +1960,15 @@ FLASHMEM bool fmSynthLoadSong(FsFile &f) {
     samplerLoadSongData(f);
     instMidiMapLoadSongData(f);
     sf2LoadSongData(f);
+    DiskInstFxExtChunk fxExt{};
+    int fxRd = f.read(&fxExt, sizeof(fxExt));
+    if (fxRd == (int)sizeof(fxExt) && memcmp(fxExt.magic, "IFX1", 4) == 0 && fxExt.version == 1) {
+      int fn = min((int)fxExt.count, NUM_INSTRUMENTS);
+      for (int i = 0; i < fn; i++) {
+        instTapePct[i] = (uint8_t)constrain((int)fxExt.tape[i], 0, (int)INST_FX_MAX);
+        instCompPct[i] = (uint8_t)constrain((int)fxExt.comp[i], 0, (int)INST_FX_MAX);
+      }
+    }
     return true;
   }
   if (df.version == 2) {
@@ -1837,6 +2054,14 @@ FLASHMEM static bool saveInstrumentFileToDir(int instIdx, const char *dirPath) {
   if (ok) {
     ok = sf2SaveSingleInstData(f, instIdx);
   }
+  if (ok) {
+    DiskSingleInstFxExtChunk fxExt{};
+    memcpy(fxExt.magic, "IF1X", 4);
+    fxExt.version = 1;
+    fxExt.tape = instTapePct[instIdx];
+    fxExt.comp = instCompPct[instIdx];
+    ok = (f.write(&fxExt, sizeof(fxExt)) == (int)sizeof(fxExt));
+  }
   f.truncate();
   f.sync();
   f.close();
@@ -1888,6 +2113,8 @@ FLASHMEM bool fmSynthLoadInstrumentFile(int instIdx, const char *fullPath) {
 
   fmSynthSilenceInst(instIdx);
   resetInstDriveState(instIdx);
+  instTapePct[instIdx] = 0;
+  instCompPct[instIdx] = 0;
   patches[instIdx] = sid.patch;
   validateAndClampPatch(patches[instIdx], instIdx);
   syncInstCurLevel(instIdx);
@@ -1901,6 +2128,12 @@ FLASHMEM bool fmSynthLoadInstrumentFile(int instIdx, const char *fullPath) {
     sf2LoadSingleInstData(f, instIdx);
   } else {
     sf2ClearSlot(instIdx);
+  }
+  DiskSingleInstFxExtChunk fxExt{};
+  int fxRd = f.read(&fxExt, sizeof(fxExt));
+  if (fxRd == (int)sizeof(fxExt) && memcmp(fxExt.magic, "IF1X", 4) == 0 && fxExt.version == 1) {
+    instTapePct[instIdx] = (uint8_t)constrain((int)fxExt.tape, 0, (int)INST_FX_MAX);
+    instCompPct[instIdx] = (uint8_t)constrain((int)fxExt.comp, 0, (int)INST_FX_MAX);
   }
   f.close();
   return true;

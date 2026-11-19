@@ -27,8 +27,8 @@ static int64_t noteEdStartIdx32 = 0;
 static int noteEdVelocity = 100;
 static uint64_t prevPianoStripKey[PIANO_STRIP_COUNT] = {};
 
-static constexpr uint32_t WAVE_EDIT_MUTE_DELAY_MS = 160;
-static constexpr uint32_t WAVE_EDIT_DOUBLE_TAP_MAX_MS = 350;
+static constexpr uint32_t WAVE_EDIT_MUTE_DELAY_MS = 280;
+static constexpr uint32_t WAVE_EDIT_DOUBLE_TAP_MAX_MS = 450;
 static uint32_t pendingWaveEditTapMs = 0;
 static int pendingWaveEditTapTrack = -1;
 

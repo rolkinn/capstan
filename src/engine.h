@@ -94,6 +94,7 @@ struct Track {
   uint32_t recordedFrames = 0;                     // valid stereo frames on tape (0 .. MAX_REC_FRAMES)
   int8_t volume = VOLUME_UNITY;                    // 0 (off) .. VOLUME_MAX (100), default 80
   int8_t balance = 0;                              // -PAN_MAX (-100 L) .. 0 (C) .. +PAN_MAX (+100 R)
+  AudioTrackFxParams fx;                           // Per-track FX (Drive -> Chor -> Dly -> Rvrb -> Tape -> Comp)
   float mixLL = 1.0f, mixLR = 0.0f, mixRL = 0.0f, mixRR = 1.0f;
   volatile float peakL = 0.0f, peakR = 0.0f;
 
@@ -206,6 +207,14 @@ uint32_t midiTicksToFrames(uint32_t ticks, float bpm);
 
 // Mixer & Metronome controls
 void setTrackMix(int t, int volume, int balance);
+uint8_t getAudioTrackFx(int t, AudioTrackFxSlot slot);
+void setAudioTrackFx(int t, AudioTrackFxSlot slot, int pct);
+uint8_t getAudioInputFx(AudioTrackFxSlot slot);
+void setAudioInputFx(AudioTrackFxSlot slot, int pct);
+uint8_t getAudioInputVolume();
+void setAudioInputVolume(int vol);
+const AudioTrackFxParams &audioInputFxParams();
+void setAllAudioInputFx(const AudioTrackFxParams &fx, int volume = VOLUME_UNITY);
 void takeTrackPeaks(int t, float &left, float &right);
 void takeInputPeaks(float &left, float &right);
 void takeOutputPeaks(float &left, float &right);

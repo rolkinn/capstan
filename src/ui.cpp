@@ -1276,7 +1276,7 @@ FLASHMEM void uiRefresh() {
   static bool lastSysMidiMapOpen = false;
   static bool lastTypePresetOpen = false;
   static bool lastMidiBrowserOpen = false;
-  static bool lastSongTunerOpen = false;
+  static uint8_t lastSongSubState = 0;
   bool kbOpen = isSaveKeyboardOpen() &&
                 (pg == Page::Main || pg == Page::Instruments || pg == Page::InstrumentEdit ||
                  pg == Page::SystemSettings);
@@ -1300,7 +1300,9 @@ FLASHMEM void uiRefresh() {
   bool sysMidiMapOpen = isSysMidiMapModalOpen() && (pg == Page::SystemSettings);
   bool typePresetOpen = isTypePresetModalOpen() && (pg == Page::InstrumentType);
   bool midiBrowserOpen = isMidiClipBrowserOpen() && (pg == Page::Midi || pg == Page::Audio);
-  bool songTunerOpen = isSongTunerOpen() && (pg == Page::SongSettings);
+  uint8_t songSubSt = (pg == Page::SongSettings)
+                          ? (uint8_t)((isSongTunerOpen() ? 1u : 0u) | (isSongInputFxOpen() ? 2u : 0u))
+                          : 0u;
   bool pageOrScreenChanged = (lastDrawnGen != uiGeneration) || (lastDrawnPage != pg);
   bool modalChanged = (!pageOrScreenChanged) &&
                       ((kbOpen != lastKeyboardOpen) || (teModalOpen != lastTeModalOpen) ||
@@ -1314,7 +1316,7 @@ FLASHMEM void uiRefresh() {
                        (usbSavePromptOpen != lastUsbSavePromptOpen) || (sysProjState != lastSysProjState) ||
                        (sysMidiMapOpen != lastSysMidiMapOpen) ||
                        (typePresetOpen != lastTypePresetOpen) || (midiBrowserOpen != lastMidiBrowserOpen) ||
-                       (songTunerOpen != lastSongTunerOpen));
+                       (songSubSt != lastSongSubState));
 
   if (!pageOrScreenChanged && !modalChanged && !uiImmediate && (now - lastRefreshMs < 33)) return;
   lastRefreshMs = now;
@@ -1347,7 +1349,7 @@ FLASHMEM void uiRefresh() {
     lastSysMidiMapOpen = sysMidiMapOpen;
     lastTypePresetOpen = typePresetOpen;
     lastMidiBrowserOpen = midiBrowserOpen;
-    lastSongTunerOpen = songTunerOpen;
+    lastSongSubState = songSubSt;
     invalidateUiCache();
     if (sysProjState != 4) {
       drawHeaderBar(true);
@@ -1375,7 +1377,7 @@ FLASHMEM void uiRefresh() {
     lastSysMidiMapOpen = sysMidiMapOpen;
     lastTypePresetOpen = typePresetOpen;
     lastMidiBrowserOpen = midiBrowserOpen;
-    lastSongTunerOpen = songTunerOpen;
+    lastSongSubState = songSubSt;
     invalidateUiCache();
     if (projPlayChanged) {
       if (sysProjState != 4) {
@@ -1526,6 +1528,15 @@ FLASHMEM void Surface::drawPill(int x, int y, int pw, int ph, const char *label,
   fillRect(x + 1, y + 1, pw - 2, ph - 2, bg);
   int tw = textWidth(label);
   drawText(x + max(1, (pw - tw) / 2), y + TY(ph), label, fg);
+}
+
+FLASHMEM void Surface::fillRect(int x, int y, int rw, int rh, uint16_t c) {
+  int x0 = max(0, x), y0 = max(0, y);
+  int x1 = min(w, x + rw), y1 = min(h, y + rh);
+  for (int py = y0; py < y1; py++) {
+    uint16_t *row = px + py * w;
+    for (int cx = x0; cx < x1; cx++) row[cx] = c;
+  }
 }
 
 FLASHMEM void Surface::blit(int screenX, int screenY) {

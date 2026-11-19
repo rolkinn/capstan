@@ -175,7 +175,7 @@ FLASHMEM static void updateSpeakerFromHeadphones() {
 FLASHMEM void setup() {
   Serial.begin(115200);
   if (CrashReport) Serial.print(CrashReport);
-  AudioMemory(12);
+  AudioMemory(10);
 #if defined(AUDIO_UAC2)
   usbAudioRead = usb_audio_rx_block;
   usbAudioWrite = usb_audio_tx_block;

@@ -21,11 +21,11 @@ struct RawMidiMsg {
   uint8_t d2;
   uint8_t source;       // 0 = MIDI_SERIAL (TRS), 1 = MIDI_USB
   uint8_t sampleOffset; // 0..127 sub-block sample offset at arrival
+  TransportMode tMode;
   uint32_t thruSentMask;// bitmask of output destinations already dispatched in ISR
   uint32_t tapeFrame;
-  TransportMode tMode;
 };
-static constexpr uint32_t IN_RING_SIZE = 128;
+static constexpr uint32_t IN_RING_SIZE = 64;
 static volatile RawMidiMsg inRing[IN_RING_SIZE];
 static volatile uint32_t inHead = 0, inTail = 0;
 static volatile bool midiActivityPending = false;
@@ -775,7 +775,7 @@ static inline uint8_t computePlaybackSampleOffset(uint32_t evTick, uint32_t bloc
 
 // Dispatch due playback events across all unmuted MIDI tracks up to curTick.
 // Safe to call from both 1 kHz usbTimer ISR (fromIsr == true) and loop() / keepStreaming() (fromIsr == false).
-static void midiSeqDispatchPlayback(float curBpm, bool fromIsr) {
+FLASHMEM static void midiSeqDispatchPlayback(float curBpm, bool fromIsr) {
   if (fromIsr && seqEditDepth != 0) return;
 
   uint32_t irq = saveIrq();

@@ -24,6 +24,8 @@ int headerCell = 0;
 int audioRow = 0, audioCell = AUD_CELL_WAVE, audioScroll = 0;
 int midiRow = 0, midiCell = MID_CELL_WAVE, midiScroll = 0;
 uint8_t timelineZoom = ZOOM_16_BARS;
+static uint8_t curAudioParamMode = AUD_PMODE_MIX;
+static bool lastAudioParamRightCol = false;
 
 FLASHMEM void syncAudioScroll() {
   if (audioRow >= 0 && audioRow < TRACK_ROWS) {
@@ -56,6 +58,53 @@ FLASHMEM void cycleTimelineZoom() {
     "ZOOM: FULL"
   };
   uiShowToast(ZOOM_NAMES[timelineZoom]);
+  uiForceRedraw();
+}
+
+AudioParamMode audioParamMode() {
+  return (AudioParamMode)curAudioParamMode;
+}
+
+FLASHMEM void setAudioParamMode(AudioParamMode mode) {
+  uint8_t m = (uint8_t)constrain((int)mode, 0, (int)AUD_PMODE_COUNT - 1);
+  curAudioParamMode = m;
+  lastAudioParamRightCol = false;
+  if (m == AUD_PMODE_COMP && audioRow >= 0 && audioRow < TRACK_ROWS && audioCell == AUD_CELL_PAN) {
+    audioCell = AUD_CELL_VOL;
+  }
+}
+
+FLASHMEM void noteAudioParamCursorCol(int cell) {
+  if (curAudioParamMode != AUD_PMODE_COMP) {
+    lastAudioParamRightCol = (cell == AUD_CELL_PAN);
+  } else if (cell != AUD_CELL_VOL && cell != AUD_CELL_PAN) {
+    lastAudioParamRightCol = false;
+  }
+}
+
+FLASHMEM void cycleAudioParamMode() {
+  if (curAudioParamMode != AUD_PMODE_COMP && audioRow >= 0 && audioRow < TRACK_ROWS) {
+    lastAudioParamRightCol = (audioCell == AUD_CELL_PAN);
+  }
+  curAudioParamMode = (uint8_t)((curAudioParamMode + 1u) % AUD_PMODE_COUNT);
+  if (audioRow >= 0 && audioRow < TRACK_ROWS) {
+    if (curAudioParamMode == AUD_PMODE_COMP) {
+      if (audioCell == AUD_CELL_PAN) {
+        audioCell = AUD_CELL_VOL;
+      }
+    } else if (curAudioParamMode == AUD_PMODE_MIX) {
+      audioCell = lastAudioParamRightCol ? AUD_CELL_PAN : AUD_CELL_VOL;
+    }
+    audioRememberTrackCursor();
+  }
+  PROGMEM static const char *const PMODE_NAMES[AUD_PMODE_COUNT] = {
+    "VOL / PAN",
+    "DRIVE / CHORUS",
+    "DELAY / D.FB",
+    "REVERB / TAPE",
+    "COMP"
+  };
+  uiShowToast(PMODE_NAMES[curAudioParamMode]);
   uiForceRedraw();
 }
 
@@ -157,8 +206,11 @@ FLASHMEM int fmRowColCount(int row) {
   if (row == genBase + 3) {
     return 1;
   }
+  if (row == genBase + 2) {
+    return INST_FX_COUNT;
+  }
   if (row >= genBase) {
-    return 5;
+    return INST_ENV_COUNT;
   }
   if (iType == InstType::Sampler) {
     return (row == SMP_ROW_PRESS) ? 1 : SAMPLER_NUM_KEYS;
@@ -335,6 +387,7 @@ FLASHMEM void setPage(Page p) {
   closeTypePresetModal();
   closeMidiNoteEditor();
   closeSongTuner();
+  closeSongInputFx();
   trackEditReset();
   if (p == Page::SystemSettings || p == Page::SongSettings || p == Page::Main) {
     prevRow1Page = p;

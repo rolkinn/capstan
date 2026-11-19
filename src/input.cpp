@@ -537,6 +537,7 @@ FLASHMEM static bool canOptScrubTimeline() {
       isClearTrackModalRevealing() ||
       isMidiClipBrowserOpen() ||
       isSongTunerOpen() ||
+      isSongInputFxOpen() ||
       trackEditIsModalOpen() ||
       trackEditPhase() == TrackEditPhase::DuplReveal ||
       isMidiNoteEditorOpen()) {
@@ -1421,6 +1422,9 @@ FLASHMEM void pollKeys() {
       if (currentPage() == Page::SongSettings && isSongTunerOpen()) {
         closeSongTuner();
         lastOptTapMs = 0;
+      } else if (currentPage() == Page::SongSettings && isSongInputFxOpen()) {
+        closeSongInputFx();
+        lastOptTapMs = 0;
       } else if (tep == TrackEditPhase::SelectRegion) {
         trackEditToggleEndpoint();
         lastOptTapMs = 0;
@@ -1437,7 +1441,11 @@ FLASHMEM void pollKeys() {
           lastOptTapMs = 0;
         } else if (ms - lastOptTapMs <= 260) {
           Page pg = currentPage();
-          if (pg == Page::Audio || pg == Page::Midi) {
+          if (pg == Page::Audio &&
+              audioRow >= 0 && audioRow < TRACK_ROWS &&
+              (audioCell == AUD_CELL_VOL || audioCell == AUD_CELL_PAN)) {
+            cycleAudioParamMode();
+          } else if (pg == Page::Audio || pg == Page::Midi) {
             cycleTimelineZoom();
           } else if (pg == Page::Master &&
                      masterRow >= MASTER_ROW_TRK_PARAM1 &&
@@ -1656,8 +1664,10 @@ FLASHMEM void pollKeys() {
     appToggleTransport();
   }
 
-  serviceMidiPendingWaveMute(now | (midiEditHeld ? BTN_EDIT : 0),
-                             editUsedAsModifier || midiEditUsedAsModifier);
+  bool anyEditHeld = ((now & BTN_EDIT) != 0) || midiEditHeld;
+  bool activeEditMod = (((now & BTN_EDIT) != 0) && editUsedAsModifier) ||
+                       (midiEditHeld && midiEditUsedAsModifier);
+  serviceMidiPendingWaveMute(now | (anyEditHeld ? BTN_EDIT : 0), activeEditMod);
   prevKeys = now;
 }
 

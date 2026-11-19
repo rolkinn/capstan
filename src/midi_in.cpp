@@ -138,7 +138,7 @@ FLASHMEM void midiInSysEx(const uint8_t *data, uint16_t len, uint32_t us, MidiSo
   }
 }
 
-void midiInByte(uint8_t b, uint32_t us, MidiSource from) {
+FLASHMEM __attribute__((noinline)) void midiInByte(uint8_t b, uint32_t us, MidiSource from) {
   if (suspended) return;
 
   // 1. System Real-Time messages (0xF8..0xFF) can appear anywhere, even mid-message or mid-SysEx

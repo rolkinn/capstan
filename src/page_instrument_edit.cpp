@@ -14,7 +14,7 @@
 using namespace m8;
 using namespace looper;
 
-static constexpr int FM_MAX_COLS = 6;
+static constexpr int FM_MAX_COLS = 7;
 static constexpr int INST_EDIT_CACHE_SLOTS = 1 + INST_EDIT_MAX_VIS_BODY_ROWS; // 0 = Header, 1..5 = visible viewport slots
 static uint64_t prevFmCellKey[INST_EDIT_CACHE_SLOTS][FM_MAX_COLS] = {};
 static uint64_t prevSectionTitleKey[INST_EDIT_MAX_VIS_BODY_ROWS] = {};
@@ -245,24 +245,28 @@ FLASHMEM static void setEnvField(InstEnvParams &env, int col, uint8_t val) {
   }
 }
 
-FLASHMEM static uint8_t getFxField(const InstFxParams &fx, int col) {
+FLASHMEM static uint8_t getInstFxColVal(int instIdx, const FmPatch &p, int col) {
   switch (col) {
-    case INST_FX_DRIVE:  default: return fx.drive;
-    case INST_FX_CHORUS: return fx.chorus;
-    case INST_FX_DELAY:  return fx.delay;
-    case INST_FX_DFB:    return fx.delayFeedback;
-    case INST_FX_REVERB: return fx.reverb;
+    case INST_FX_DRIVE:  default: return p.fx.drive;
+    case INST_FX_CHORUS: return p.fx.chorus;
+    case INST_FX_DELAY:  return p.fx.delay;
+    case INST_FX_DFB:    return p.fx.delayFeedback;
+    case INST_FX_REVERB: return p.fx.reverb;
+    case INST_FX_TAPE:   return instGetTape(instIdx);
+    case INST_FX_COMP:   return instGetComp(instIdx);
   }
 }
 
-FLASHMEM static void setFxField(InstFxParams &fx, int col, uint8_t val) {
+FLASHMEM static void setInstFxColVal(int instIdx, FmPatch &p, int col, uint8_t val) {
   val = (uint8_t)constrain((int)val, 0, (int)INST_FX_MAX);
   switch (col) {
-    case INST_FX_DRIVE:  fx.drive = val; break;
-    case INST_FX_CHORUS: fx.chorus = val; break;
-    case INST_FX_DELAY:  fx.delay = val; break;
-    case INST_FX_DFB:    fx.delayFeedback = val; break;
-    case INST_FX_REVERB: fx.reverb = val; break;
+    case INST_FX_DRIVE:  p.fx.drive = val; break;
+    case INST_FX_CHORUS: p.fx.chorus = val; break;
+    case INST_FX_DELAY:  p.fx.delay = val; break;
+    case INST_FX_DFB:    p.fx.delayFeedback = val; break;
+    case INST_FX_REVERB: p.fx.reverb = val; break;
+    case INST_FX_TAPE:   instSetTape(instIdx, val); break;
+    case INST_FX_COMP:   instSetComp(instIdx, val); break;
   }
 }
 
@@ -271,7 +275,7 @@ PROGMEM static const char *const ENV_COL_LABELS[INST_ENV_COUNT] = {
 };
 
 PROGMEM static const char *const FX_COL_LABELS[INST_FX_COUNT] = {
-  "DRIVE", "CHORUS", "DELAY", "D.FB", "REVERB"
+  "DRV", "CHOR", "DLAY", "D.FB", "RVRB", "TAPE", "COMP"
 };
 
 FLASHMEM static void formatEnvCellValue(int col, uint8_t v, char *outVal, size_t valSz) {
@@ -1234,12 +1238,14 @@ FLASHMEM static void drawSectionRowInSlot(const FmPatch &p, InstType iType, cons
   }
 
   if (rowIdx == genBase + 2) {
+    const int instIdx = constrain(instListCursor, 0, NUM_INSTRUMENTS - 1);
     drawSectionTitle(slotIdx, titleY, titleH, "FX: INSTRUMENT EFFECTS", ACCENT, forceFull);
     for (int c = 0; c < INST_FX_COUNT; c++) {
-      int x = SX(6) + c * SX(62);
-      int w = SX(60);
-      int gapW = (c + 1 < INST_FX_COUNT) ? SX(2) : 0;
-      uint8_t v = getFxField(p.fx, c);
+      int x = SX(6) + (c * SX(266)) / 6;
+      int nextX = (c + 1 < INST_FX_COUNT) ? (SX(6) + ((c + 1) * SX(266)) / 6) : SX(314);
+      int w = SX(42);
+      int gapW = max(0, nextX - (x + w));
+      uint8_t v = getInstFxColVal(instIdx, p, c);
       char val[12];
       snprintf(val, sizeof(val), "%u%%", (unsigned)v);
       drawFmParamCell(cacheSlot, rowIdx, c, x, cellY, w, cellH, gapW,
@@ -2019,8 +2025,8 @@ FLASHMEM static void instEditOnOptAdjust(int dx, int dy, int delta) {
     setEnvField(p.flt, fmEditCol, (uint8_t)constrain(cur + step, 0, (int)INST_ENV_MAX));
     saveSessionWhenIdle();
   } else if (fmEditRow == genBase + 2) {
-    int cur = (int)getFxField(p.fx, fmEditCol);
-    setFxField(p.fx, fmEditCol, (uint8_t)constrain(cur + step, 0, (int)INST_FX_MAX));
+    int cur = (int)getInstFxColVal(instIdx, p, fmEditCol);
+    setInstFxColVal(instIdx, p, fmEditCol, (uint8_t)constrain(cur + step, 0, (int)INST_FX_MAX));
     saveSessionWhenIdle();
   } else if (fmEditRow == genBase + 3) {
     int cur = (int)instPatchLevel(p);
@@ -2213,7 +2219,8 @@ FLASHMEM static void instEditOnResetParam() {
   } else if (fmEditRow == genBase + 1) {
     setEnvField(p.flt, fmEditCol, getEnvField(def.flt, fmEditCol));
   } else if (fmEditRow == genBase + 2) {
-    setFxField(p.fx, fmEditCol, getFxField(def.fx, fmEditCol));
+    uint8_t defVal = (fmEditCol < INST_FX_TAPE) ? getInstFxColVal(instIdx, def, fmEditCol) : 0u;
+    setInstFxColVal(instIdx, p, fmEditCol, defVal);
   } else if (fmEditRow == genBase + 3) {
     setInstPatchLevel(p, instPatchLevel(def));
   } else if (iType == InstType::Sampler) {

@@ -46,7 +46,9 @@ enum InstFxCol : int {
   INST_FX_DELAY  = 2,
   INST_FX_DFB    = 3,
   INST_FX_REVERB = 4,
-  INST_FX_COUNT  = 5
+  INST_FX_TAPE   = 5,
+  INST_FX_COMP   = 6,
+  INST_FX_COUNT  = 7
 };
 
 // General Instrument View Envelope parameter block (5 bytes, all 0..127)
@@ -210,6 +212,10 @@ void fmSynthResetToDefault(int instIdx, bool keepName = true);
 // Patch accessors
 FmPatch &fmSynthPatch(int instIdx);
 const FmPatch &fmSynthDefaultPatch(InstType type);
+uint8_t instGetTape(int instIdx);
+void instSetTape(int instIdx, int pct);
+uint8_t instGetComp(int instIdx);
+void instSetComp(int instIdx, int pct);
 
 // Real-time MIDI / Note control (ISR-safe & loop-safe via lock-free SynthEvent queue)
 bool fmSynthNoteOn(int instIdx, uint8_t note, uint8_t velocity, uint8_t sampleOffset = 0,
@@ -230,7 +236,8 @@ bool fmSynthHasActiveOutput();
 
 // Audio ISR block renderer (called from LooperEngine::update() at 44.1 kHz, 128 samples)
 bool fmSynthRenderBlock(int32_t *outL, int32_t *outR, int numFrames,
-                        int captureMidiTrack = -1, int32_t *capOutL = nullptr, int32_t *capOutR = nullptr);
+                        int captureMidiTrack = -1, int32_t *capOutL = nullptr, int32_t *capOutR = nullptr,
+                        uint32_t *instAuxOut = nullptr, bool *outHasInstAux = nullptr);
 
 // SD Card Persistence: Song instruments (`INST.DAT`) and individual `.FMI` files
 bool fmSynthSaveSong(FsFile &f);

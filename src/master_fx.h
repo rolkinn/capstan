@@ -15,6 +15,27 @@ enum MasterFxCol : int {
   MASTER_FX_COUNT = 6
 };
 
+enum AudioTrackFxSlot : uint8_t {
+  AUD_FX_DRIVE = 0,
+  AUD_FX_CHOR  = 1,
+  AUD_FX_DLAY  = 2,
+  AUD_FX_DFB   = 3,
+  AUD_FX_RVRB  = 4,
+  AUD_FX_TAPE  = 5,
+  AUD_FX_COMP  = 6,
+  AUD_FX_COUNT = 7
+};
+
+struct AudioTrackFxParams {
+  uint8_t drive = 0;         // 0..100%
+  uint8_t chorus = 0;        // 0..100%
+  uint8_t delay = 0;         // 0..100%
+  uint8_t delayFeedback = 0; // 0..100%
+  uint8_t reverb = 0;        // 0..100%
+  uint8_t tape = 0;          // 0..100%
+  uint8_t comp = 0;          // 0..100%
+};
+
 // Modular Stereo Effect Unit Descriptor
 struct MasterFxOps {
   MasterFxCol id;
@@ -63,11 +84,11 @@ struct LookaheadMonitorLimiter {
     ONE_Q24, ONE_Q24, ONE_Q24, ONE_Q24, ONE_Q24, ONE_Q24, ONE_Q24, ONE_Q24
   };
   uint32_t boxSum = FULL_BOX;
-  uint32_t dqIdx[DQ_MASK + 1] = {};
+  uint16_t dqIdx[DQ_MASK + 1] = {};
   float dqVal[DQ_MASK + 1] = {};
   uint32_t dqHead = 0;
   uint32_t dqTail = 0;
-  uint32_t sampleTick = 0;
+  uint16_t sampleTick = 0;
   uint32_t pos = 0;
   float relGain = 1.0f;
   float slowGain = 1.0f;
@@ -80,14 +101,74 @@ struct LookaheadMonitorLimiter {
   float run(float inL, float inR, float &outL, float &outR);
 };
 
-// Shared Instrument FX Bus (Drive -> Chorus -> Delay -> Reverb)
-// Uses the exact same Chorus, Delay, Delay Feedback, and Reverb implementations as Master FX,
+// Shared Instrument FX Bus (Drive -> Chorus -> Delay -> Reverb -> Tape -> Comp)
+// Uses the exact same Chorus, Delay, Delay Feedback, Reverb, Tape, and Comp implementations as Master FX,
 // plus per-instrument warm oversaturated Drive distortion.
 void resetInstFxState();
 void resetInstDriveState(int instIdx);
 float processInstDriveSample(int instIdx, uint8_t drivePct, float x);
-void setInstFxParams(uint8_t chorusPct, uint8_t delayPct, uint8_t delayFbPct, uint8_t reverbPct);
+float processInstDriveChannelSample(int instIdx, int ch, uint8_t drivePct, float x);
+void setInstFxParams(uint8_t chorusPct, uint8_t delayPct, uint8_t delayFbPct, uint8_t reverbPct,
+                     uint8_t tapePct = 0, uint8_t compPct = 0);
 bool isInstFxChainEnabled();
+bool instNeedsSharedAuxSend();
 void processInstFxSample(float &xL, float &xR);
+
+// Per-Audio-Track FX Chain (Drive -> Chorus -> Delay -> Reverb -> Tape -> Comp):
+// - Independent per-track Drive, Tape, and Comp inserts (Stereo on A1..A4, Mono on A5..A8)
+// - Pure-wet Aux Send/Return routing into Chorus -> Delay -> Reverb
+struct AudioTrackFxBlockCtx {
+  uint8_t insertMask;
+  uint8_t auxSendMask;
+  bool runChorAux;
+  bool runDlyAux;
+  bool runVerbAux;
+  bool hasInstAux;
+  float instChorSend;
+  float instDlySend;
+  float instVerbSend;
+  float dryTrim[NUM_AUDIO_TRACKS];
+  float chorSend[NUM_AUDIO_TRACKS];
+  float dlySend[NUM_AUDIO_TRACKS];
+  float verbSend[NUM_AUDIO_TRACKS];
+  float chorToDly;
+  float chorToVerb;
+  float dlyToVerb;
+};
+
+struct AudioInputFxBlockCtx {
+  bool inlineChor;
+  bool inlineDly;
+  bool inlineVerb;
+  bool hasAuxSend;
+  bool usbTailActive;
+  float dryTrim;
+  float chorSend;
+  float dlySend;
+  float verbSend;
+};
+
+void resetAudioInputFxState();
+void syncAudioInputFxParams(const AudioTrackFxParams &fx);
+void setAudioInputOutGain(uint8_t volStep, float targetGain, bool snap = false);
+void updateAudioInputFxTargets(bool inputBusEnabled);
+void processAudioInputFxBlock(AudioInputFxBlockCtx &inCtx,
+                              bool inputBusEnabled,
+                              bool lineActive, int16_t *lineBufL, int16_t *lineBufR,
+                              bool usbStreamActive, bool usbWanted, uint32_t *usbFrames,
+                              bool preferUsbInline);
+
+void resetAudioTrackFxState(int trackIdx);
+void resetAllAudioTrackFxState();
+void syncAudioTrackFxParams(int trackIdx, const AudioTrackFxParams &fx);
+bool anyAudioTrackDelayOrReverbActive();
+void prepareAudioTrackFxBlock(AudioTrackFxBlockCtx &ctx, uint8_t processTrackMask, uint8_t audibleTrackMask,
+                              bool instAuxAvailable, AudioInputFxBlockCtx *inCtx = nullptr);
+void processAudioTrackInsertSample(int trackIdx, bool stereo, float &sl, float &sr);
+void processAudioTrackAuxSample(const AudioTrackFxBlockCtx &ctx, uint32_t instPackedSample,
+                                float chorInL, float chorInR,
+                                float dlyInL, float dlyInR,
+                                float verbInL, float verbInR,
+                                float &wetOutL, float &wetOutR);
 
 } // namespace looper

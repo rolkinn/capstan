@@ -30,11 +30,31 @@ static uint64_t prevTunerNeedleKey  = 0;
 static uint64_t prevTunerStrobeKey  = 0;
 static uint64_t prevTunerMeterKey   = 0;
 
+// Audio Input FX subview UI state & per-box dirty cache keys
+static constexpr int INPUT_FX_BOX_COUNT = AUD_FX_COUNT + 1; // 8: DRIVE..COMP + OUT VOL
+static constexpr int INPUT_FX_VOL_IDX   = AUD_FX_COUNT;     // 7
+static bool songInputFxActive = false;
+static int inputFxCursor = 0; // 0..7 (AUD_FX_DRIVE .. AUD_FX_COMP, INPUT_FX_VOL_IDX)
+static uint64_t prevInputFxHdrKey = 0;
+static uint64_t prevInputFxBoxKey[INPUT_FX_BOX_COUNT] = {};
+
+PROGMEM static const char *const INPUT_FX_BOX_LABELS[INPUT_FX_BOX_COUNT] = {
+  "DRIVE",
+  "CHORUS",
+  "DELAY",
+  "D.FB",
+  "REVERB",
+  "TAPE",
+  "COMP",
+  "OUT VOL"
+};
+
 PROGMEM static const char *const SONG_SET_LABELS[PSET_COUNT] = {
+  "LINE IN GAIN",
+  "AUDIO INPUT FX",
+  "REC TRIG THRESH",
   "RECORD LINE/USB",
   "MONITOR LINE/USB",
-  "LINE IN GAIN",
-  "REC TRIG THRESH",
   "CHROMATIC TUNER",
   "MIDI CLOCK OUT",
   "MIDI CLOCK SOURCE",
@@ -48,6 +68,31 @@ PROGMEM static const char *const SONG_SET_LABELS[PSET_COUNT] = {
 PROGMEM static const char *const TUNER_NOTE_NAMES[12] = {
   "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"
 };
+
+FLASHMEM static void invalidateInputFxCache() {
+  prevInputFxHdrKey = 0;
+  memset(prevInputFxBoxKey, 0, sizeof(prevInputFxBoxKey));
+}
+
+FLASHMEM bool isSongInputFxOpen() {
+  return songInputFxActive;
+}
+
+FLASHMEM static void openSongInputFx() {
+  closeSongTuner();
+  songInputFxActive = true;
+  inputFxCursor = constrain(inputFxCursor, 0, INPUT_FX_BOX_COUNT - 1);
+  invalidateInputFxCache();
+  uiForceRedraw();
+}
+
+FLASHMEM void closeSongInputFx() {
+  if (!songInputFxActive) return;
+  songInputFxActive = false;
+  memset(prevSongSettingsKey, 0, sizeof(prevSongSettingsKey));
+  invalidateInputFxCache();
+  uiForceRedraw();
+}
 
 FLASHMEM static void invalidateTunerCache() {
   memset(prevTunerCtrlKey, 0, sizeof(prevTunerCtrlKey));
@@ -64,6 +109,7 @@ FLASHMEM bool isSongTunerOpen() {
 }
 
 FLASHMEM static void openSongTuner() {
+  closeSongInputFx();
   songTunerActive = true;
   tunerCol = constrain(tunerCol, 0, 2);
   tunerMuteOut = false;
@@ -512,19 +558,122 @@ FLASHMEM static void drawSongTunerView(bool full) {
   keepStreaming();
 }
 
+FLASHMEM static void drawInputFxParamBox(int x, int y, int w, int h,
+                                         const char *label, uint8_t val, bool isVol,
+                                         bool sel, uint64_t &cacheKey, bool full) {
+  char valStr[10];
+  if (isVol) {
+    if (val == 0) {
+      snprintf(valStr, sizeof(valStr), "OFF");
+    } else {
+      snprintf(valStr, sizeof(valStr), "%02u", (unsigned)val);
+    }
+  } else {
+    snprintf(valStr, sizeof(valStr), "%u%%", (unsigned)val);
+  }
+
+  uint16_t bg = sel ? DARK : PANEL;
+  uint16_t border = sel ? ACCENT : MID;
+  uint16_t lblCol = sel ? INK : LIGHT;
+  uint16_t valCol = sel ? ACCENT : (val > 0 ? LIGHT : DIM);
+
+  uint64_t k = hashStr(hashInit(), label);
+  k = hashStr(k, valStr);
+  k = hashMix(k, (uint64_t)val | ((uint64_t)sel << 8) | ((uint64_t)isVol << 12) |
+                     ((uint64_t)bg << 16) | ((uint64_t)border << 32));
+  if (!full && k == cacheKey) return;
+  cacheKey = k;
+
+  Surface s(w, h);
+  s.drawBox(bg, border);
+  int lw = textWidth(label);
+  s.drawText(max(PX + 1, (w - lw) / 2), SY(7), label, lblCol);
+  int vw = textWidth(valStr);
+  s.drawText(max(PX + 1, (w - vw) / 2), SY(21), valStr, valCol);
+
+  const int barX = SX(6);
+  const int barW = max(2, w - 2 * barX);
+  const int barH = max(2, SY(4));
+  const int barY = h - barH - SY(5);
+  s.fillRect(barX, barY, barW, barH, sel ? BG : DARK);
+  if (val > 0) {
+    int fillW = max(1, (barW * (int)val) / 100);
+    s.fillRect(barX, barY, fillW, barH, ACCENT);
+  }
+  if (isVol) {
+    int uX = barX + (barW * VOLUME_UNITY) / 100;
+    s.fillRect(uX, barY - 1, 1, barH + 2, sel ? INK : LIGHT);
+  }
+  s.blit(x, y);
+}
+
+FLASHMEM static void drawSongInputFxView(bool full) {
+  inputFxCursor = constrain(inputFxCursor, 0, INPUT_FX_BOX_COUNT - 1);
+
+  // Top banner: "AUDIO INPUT FX  (LINE + USB)"
+  {
+    const int bx = SX(6), by = SY(32), bw = SX(308), bh = SY(22);
+    uint64_t hk = hashMix(hashInit(), 0x494E4658u);
+    if (full || hk != prevInputFxHdrKey) {
+      prevInputFxHdrKey = hk;
+      Surface s(bw, bh);
+      s.drawBox(PANEL, MID);
+      const char *hdrTxt = "AUDIO INPUT FX  (LINE + USB)";
+      s.drawText(max(SX(6), (bw - textWidth(hdrTxt)) / 2), TY(bh), hdrTxt, LIGHT);
+      s.blit(bx, by);
+
+      Surface sHint(bw, SY(18));
+      sHint.fillRect(0, 0, bw, SY(18), BG);
+      sHint.drawText(SX(2), TY(SY(18)), "PRE-MONITOR & PRE-RECORD", DIM);
+      const char *backTxt = "OPT: BACK";
+      sHint.drawText(bw - SX(2) - textWidth(backTxt), TY(SY(18)), backTxt, DIM);
+      sHint.blit(bx, SY(188));
+    }
+  }
+  keepStreaming();
+
+  // Row 0: [ DRIVE ] [ CHORUS ] [ DELAY ] [ D.FB ] (4 boxes across SX(308))
+  const int boxH = SY(48);
+  const int boxW = SX(74), boxPitch = SX(78);
+  const int r0Y = SY(68);
+  for (int c = 0; c < 4; c++) {
+    uint8_t pct = getAudioInputFx((AudioTrackFxSlot)c);
+    drawInputFxParamBox(SX(6) + c * boxPitch, r0Y, boxW, boxH,
+                        INPUT_FX_BOX_LABELS[c], pct, false, inputFxCursor == c,
+                        prevInputFxBoxKey[c], full);
+  }
+  keepStreaming();
+
+  // Row 1: [ REVERB ] [ TAPE ] [ COMP ] [ OUT VOL ] (4 boxes across SX(308))
+  const int r1Y = SY(124);
+  for (int c = 4; c < INPUT_FX_BOX_COUNT; c++) {
+    const bool isVol = (c == INPUT_FX_VOL_IDX);
+    uint8_t val = isVol ? getAudioInputVolume() : getAudioInputFx((AudioTrackFxSlot)c);
+    drawInputFxParamBox(SX(6) + (c - 4) * boxPitch, r1Y, boxW, boxH,
+                        INPUT_FX_BOX_LABELS[c], val, isVol, inputFxCursor == c,
+                        prevInputFxBoxKey[c], full);
+  }
+  keepStreaming();
+}
+
 FLASHMEM static const char *songSettingsHeaderTitle() {
-  return songTunerActive ? "TUNER" : "SONG";
+  return songInputFxActive ? "IN FX" : (songTunerActive ? "TUNER" : "SONG");
 }
 
 FLASHMEM static void songSettingsInvalidateCache() {
   memset(prevSongSettingsKey, 0, sizeof(prevSongSettingsKey));
   invalidateTunerCache();
+  invalidateInputFxCache();
   invalidateSysPresetsModalCache();
 }
 
 FLASHMEM static void songSettingsDrawPage(bool full) {
   if (isSysPresetsModalOpen()) {
     drawSysPresetsModal(full);
+    return;
+  }
+  if (songInputFxActive) {
+    drawSongInputFxView(full);
     return;
   }
   if (songTunerActive) {
@@ -601,6 +750,7 @@ FLASHMEM static void songSettingsDrawPage(bool full) {
         snprintf(val, sizeof(val), "%d DB", (int)ps.defaultThreshDb);
         break;
       case PSET_TUNER:
+      case PSET_AUDIO_INPUT_FX:
         isPill = true;
         snprintf(val, sizeof(val), "OPEN");
         break;
@@ -685,6 +835,19 @@ FLASHMEM static void songSettingsDrawPage(bool full) {
 }
 
 FLASHMEM static void songSettingsOnShiftNavigate(uint8_t dir) {
+  if (songInputFxActive) {
+    if (dir & BTN_LEFT) {
+      closeSongInputFx();
+      inputSwallowModalKeys();
+    } else if (dir & BTN_RIGHT) {
+      closeSongInputFx();
+      setPage(Page::Main);
+    } else if (dir & BTN_DOWN) {
+      closeSongInputFx();
+      setPage(lastRow2Page());
+    }
+    return;
+  }
   if (songTunerActive) {
     if (dir & BTN_LEFT) {
       closeSongTuner();
@@ -712,6 +875,29 @@ FLASHMEM static void stepTunerSource(int step) {
 }
 
 FLASHMEM static void songSettingsOnOptAdjust(int dx, int dy, int delta) {
+  if (songInputFxActive) {
+    int step = (dx != 0) ? dx : (dy != 0 ? dy * 5 : delta * 5);
+    int idx = constrain(inputFxCursor, 0, INPUT_FX_BOX_COUNT - 1);
+    if (idx == INPUT_FX_VOL_IDX) {
+      int cur = (int)getAudioInputVolume();
+      int next = constrain(cur + step, 0, VOLUME_MAX);
+      if (next != cur) {
+        setAudioInputVolume(next);
+        saveSessionWhenIdle();
+        uiForceRedraw();
+      }
+    } else {
+      AudioTrackFxSlot slot = (AudioTrackFxSlot)idx;
+      int cur = (int)getAudioInputFx(slot);
+      int next = constrain(cur + step, 0, 100);
+      if (next != cur) {
+        setAudioInputFx(slot, next);
+        saveSessionWhenIdle();
+        uiForceRedraw();
+      }
+    }
+    return;
+  }
   if (songTunerActive) {
     if (tunerCol == 0) {
       int step = (dx != 0) ? dx : dy;
@@ -805,6 +991,7 @@ FLASHMEM static void songSettingsOnOptAdjust(int dx, int dy, int delta) {
       saveSessionWhenIdle();
       break;
     case PSET_TUNER:
+    case PSET_AUDIO_INPUT_FX:
     case PSET_SAVED_INST:
     case PSET_EXPORT_MIDI:
     case PSET_EXPORT_AUDIO:
@@ -815,6 +1002,22 @@ FLASHMEM static void songSettingsOnOptAdjust(int dx, int dy, int delta) {
 
 FLASHMEM static void songSettingsOnCursorMove(int dx, int dy, uint8_t dir) {
   (void)dir;
+  if (songInputFxActive) {
+    int next = constrain(inputFxCursor, 0, INPUT_FX_BOX_COUNT - 1);
+    if (dy > 0 && next < 4) {
+      next += 4;
+    } else if (dy < 0 && next >= 4) {
+      next -= 4;
+    }
+    if (dx != 0) {
+      next = constrain(next + dx, 0, INPUT_FX_BOX_COUNT - 1);
+    }
+    if (next != inputFxCursor) {
+      inputFxCursor = next;
+      uiForceRedraw();
+    }
+    return;
+  }
   if (songTunerActive) {
     if (dx != 0) {
       int nextCol = constrain(tunerCol + dx, 0, 2);
@@ -849,6 +1052,9 @@ FLASHMEM static void songSettingsOnCursorMove(int dx, int dy, uint8_t dir) {
 }
 
 FLASHMEM static void songSettingsOnEditPress(bool shiftHeld) {
+  if (songInputFxActive) {
+    return;
+  }
   if (songTunerActive) {
     if (shiftHeld) {
       uint16_t matched = DEFAULT_TUNER_REF_TENTHS;
@@ -880,6 +1086,9 @@ FLASHMEM static void songSettingsOnEditPress(bool shiftHeld) {
 
   if (songSetRow == PSET_TUNER) {
     openSongTuner();
+    inputSwallowModalKeys();
+  } else if (songSetRow == PSET_AUDIO_INPUT_FX) {
+    openSongInputFx();
     inputSwallowModalKeys();
   } else if (songSetRow == PSET_SAVED_INST) {
     openSysPresetsModal(true);
@@ -915,6 +1124,24 @@ FLASHMEM static void songSettingsOnEditPress(bool shiftHeld) {
 }
 
 FLASHMEM static void songSettingsOnResetParam() {
+  if (songInputFxActive) {
+    int idx = constrain(inputFxCursor, 0, INPUT_FX_BOX_COUNT - 1);
+    if (idx == INPUT_FX_VOL_IDX) {
+      if (getAudioInputVolume() != VOLUME_UNITY) {
+        setAudioInputVolume(VOLUME_UNITY);
+        saveSessionWhenIdle();
+        uiForceRedraw();
+      }
+    } else {
+      AudioTrackFxSlot slot = (AudioTrackFxSlot)idx;
+      if (getAudioInputFx(slot) != 0) {
+        setAudioInputFx(slot, 0);
+        saveSessionWhenIdle();
+        uiForceRedraw();
+      }
+    }
+    return;
+  }
   if (songTunerActive) {
     if (tunerCol == 0) {
       tunerSelSource = TunerSource::LineIn;
@@ -932,7 +1159,8 @@ FLASHMEM static void songSettingsOnResetParam() {
     return;
   }
 
-  if (songSetRow == PSET_TUNER || songSetRow == PSET_SAVED_INST ||
+  if (songSetRow == PSET_TUNER || songSetRow == PSET_AUDIO_INPUT_FX ||
+      songSetRow == PSET_SAVED_INST ||
       songSetRow == PSET_EXPORT_MIDI || songSetRow == PSET_EXPORT_AUDIO) {
     return;
   }

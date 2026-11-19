@@ -10,10 +10,10 @@ namespace looper {
 
 enum class InstType : uint8_t;
 
-// Per-Instrument MIDI CC Mapping slot layout (up to 16 Engine-specific + 16 Shared AMP/FLT/FX/OUT = 32 slots)
+// Per-Instrument MIDI CC Mapping slot layout (up to 16 Engine-specific + 18 Shared AMP/FLT/FX/OUT = 34 slots)
 static constexpr int INST_MIDI_MAP_ENGINE_SLOTS = 16;
-static constexpr int INST_MIDI_MAP_SHARED_SLOTS = 16;
-static constexpr int INST_MIDI_MAP_TOTAL_SLOTS  = INST_MIDI_MAP_ENGINE_SLOTS + INST_MIDI_MAP_SHARED_SLOTS; // 32
+static constexpr int INST_MIDI_MAP_SHARED_SLOTS = 18;
+static constexpr int INST_MIDI_MAP_TOTAL_SLOTS  = INST_MIDI_MAP_ENGINE_SLOTS + INST_MIDI_MAP_SHARED_SLOTS; // 34
 
 // Categories shown in the System Settings -> MIDI MAPPINGS modal
 enum MidiMapCategory : uint8_t {
@@ -74,7 +74,16 @@ enum MidiTargetId : uint8_t {
   MIDI_TGT_SET_LOOP_START = 91,
   MIDI_TGT_SET_LOOP_END   = 92,
 
-  MIDI_TARGET_COUNT       = 93
+  // Extended Per-Audio-Track FX Targets (appended at 93..148 to preserve stable IDs 0..92; shown in CAT: AUDIO TRK)
+  // 8 tracks x 7 FX controls (DRIVE, CHORUS, DELAY, D.FB, REVERB, TAPE, COMP) = 56 targets
+  MIDI_TGT_AUD_FX_BASE    = 93,
+  MIDI_TGT_AUD_FX_PER_TRK = 7,
+
+  // Extended Audio Input FX Targets (appended at 149..156; shown in CAT: AUDIO TRK)
+  MIDI_TGT_IN_FX_BASE     = MIDI_TGT_AUD_FX_BASE + NUM_AUDIO_TRACKS * MIDI_TGT_AUD_FX_PER_TRK, // 149
+  MIDI_TGT_IN_FX_COUNT    = 8,
+
+  MIDI_TARGET_COUNT       = MIDI_TGT_IN_FX_BASE + MIDI_TGT_IN_FX_COUNT // 157
 };
 
 static constexpr int MIDI_NAV_TARGET_COUNT = 7;

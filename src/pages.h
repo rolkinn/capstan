@@ -44,14 +44,7 @@ struct Surface {
         w(constrain(width, 1, SCREEN_W)),
         h(constrain(height, 1, CELL_BUF_MAX / max(1, constrain(width, 1, SCREEN_W)))) {}
 
-  inline void fillRect(int x, int y, int rw, int rh, uint16_t c) {
-    int x0 = max(0, x), y0 = max(0, y);
-    int x1 = min(w, x + rw), y1 = min(h, y + rh);
-    for (int py = y0; py < y1; py++) {
-      uint16_t *row = px + py * w;
-      for (int cx = x0; cx < x1; cx++) row[cx] = c;
-    }
-  }
+  void fillRect(int x, int y, int rw, int rh, uint16_t c);
 
   inline void drawPixel(int x, int y, uint16_t c) {
     if (x >= 0 && x < w && y >= 0 && y < h) px[y * w + x] = c;

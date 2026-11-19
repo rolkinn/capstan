@@ -71,6 +71,15 @@ enum AudioCell : int {
   AUD_CELL_COUNT = 6
 };
 
+enum AudioParamMode : uint8_t {
+  AUD_PMODE_MIX      = 0, // [VOL, BAL/PAN]
+  AUD_PMODE_DRV_CHOR = 1, // [DRIVE, CHORUS]
+  AUD_PMODE_DLY_DFB  = 2, // [DELAY, DELAY FEEDBACK]
+  AUD_PMODE_RVB_TAPE = 3, // [REVERB, TAPE]
+  AUD_PMODE_COMP     = 4, // [COMP]
+  AUD_PMODE_COUNT    = 5
+};
+
 enum MidiCell : int {
   MID_CELL_ARM   = 0,
   MID_CELL_TRIG  = 1,
@@ -91,19 +100,20 @@ enum TransportCell : int {
 };
 
 enum SongSettingItem : int {
-  PSET_REC_SRC      = 0,
-  PSET_MONITOR      = 1,
-  PSET_LINE_IN_GAIN = 2,
-  PSET_DEF_THRESH   = 3,
-  PSET_TUNER        = 4,
-  PSET_CLOCK_OUT    = 5,
-  PSET_CLOCK        = 6,
-  PSET_TRANSPORT_IN = 7,
-  PSET_MIDI_THRU    = 8,
-  PSET_SAVED_INST   = 9,
-  PSET_EXPORT_MIDI  = 10,
-  PSET_EXPORT_AUDIO = 11,
-  PSET_COUNT        = 12
+  PSET_LINE_IN_GAIN   = 0,
+  PSET_AUDIO_INPUT_FX = 1,
+  PSET_DEF_THRESH     = 2,
+  PSET_REC_SRC        = 3,
+  PSET_MONITOR        = 4,
+  PSET_TUNER          = 5,
+  PSET_CLOCK_OUT      = 6,
+  PSET_CLOCK          = 7,
+  PSET_TRANSPORT_IN   = 8,
+  PSET_MIDI_THRU      = 9,
+  PSET_SAVED_INST     = 10,
+  PSET_EXPORT_MIDI    = 11,
+  PSET_EXPORT_AUDIO   = 12,
+  PSET_COUNT          = 13
 };
 
 enum SysSettingItem : int {
@@ -252,6 +262,10 @@ void syncAudioScroll();
 void syncMidiScroll();
 extern uint8_t timelineZoom;
 void cycleTimelineZoom();
+AudioParamMode audioParamMode();
+void setAudioParamMode(AudioParamMode mode);
+void cycleAudioParamMode();
+void noteAudioParamCursorCol(int cell);
 bool isHeaderRowSelected();
 bool isPunchOrLoopWindowActive();
 bool isPunchBarBeatMode();

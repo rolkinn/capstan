@@ -915,13 +915,20 @@ FLASHMEM static void resetSongToDefaults() {
     tr.recordedFrames = 0;
     memset(tr.wavePeaks, 0, sizeof(tr.wavePeaks));
     tr.overviewVersion++;
+    tr.fx = AudioTrackFxParams{};
+    syncAudioTrackFxParams(t, tr.fx);
     setTrackMix(t, VOLUME_UNITY, 0);
   }
+  resetAllAudioTrackFxState();
+  setAllAudioInputFx(AudioTrackFxParams{});
+  resetAudioInputFxState();
   midiSeqClearAll();
   fmSynthResetAll();
   trackEditReset();
   closeSongTuner();
+  closeSongInputFx();
   setTunerRefTenths(DEFAULT_TUNER_REF_TENTHS);
+  setAudioParamMode(AUD_PMODE_MIX);
   audioRow = 0;
   audioScroll = 0;
   audioCell = AUD_CELL_WAVE;
@@ -1216,6 +1223,26 @@ FLASHMEM bool saveSongAs(const char *newName) {
     dp.audio[t].recordedFrames = tr.recordedFrames;
     dp.audio[t].overview[0] = (uint8_t)tr.recSrc;
     dp.audio[t].overview[1] = 0xCA;
+    dp.audio[t].overview[2] = 0xF1;
+    dp.audio[t].overview[3] = tr.fx.drive;
+    dp.audio[t].overview[4] = tr.fx.chorus;
+    dp.audio[t].overview[5] = tr.fx.delay;
+    dp.audio[t].overview[6] = tr.fx.delayFeedback;
+    dp.audio[t].overview[7] = tr.fx.reverb;
+    dp.audio[t].overview[8] = tr.fx.tape;
+    dp.audio[t].overview[9] = tr.fx.comp;
+  }
+  {
+    const AudioTrackFxParams &inFx = audioInputFxParams();
+    dp.audio[0].overview[10] = 0xF2;
+    dp.audio[0].overview[11] = inFx.drive;
+    dp.audio[0].overview[12] = inFx.chorus;
+    dp.audio[0].overview[13] = inFx.delay;
+    dp.audio[0].overview[14] = inFx.delayFeedback;
+    dp.audio[0].overview[15] = inFx.reverb;
+    dp.audio[0].overview[16] = inFx.tape;
+    dp.audio[0].overview[17] = inFx.comp;
+    dp.audio[0].overview[18] = (uint8_t)(constrain((int)getAudioInputVolume(), 0, VOLUME_MAX) + 1);
   }
   bool ok = (pf.write(chunk, sizeof(DiskSong)) == (int)sizeof(DiskSong));
   pf.truncate();
@@ -1336,8 +1363,35 @@ FLASHMEM bool loadSongByName(const char *name) {
       tr.solo = (dp.audio[t].solo != 0);
       tr.recordedFrames = min(dp.audio[t].recordedFrames, MAX_REC_FRAMES);
       tr.overviewVersion++;
+      if (dp.audio[t].overview[2] == 0xF1) {
+        tr.fx.drive         = (uint8_t)constrain((int)dp.audio[t].overview[3], 0, 100);
+        tr.fx.chorus        = (uint8_t)constrain((int)dp.audio[t].overview[4], 0, 100);
+        tr.fx.delay         = (uint8_t)constrain((int)dp.audio[t].overview[5], 0, 100);
+        tr.fx.delayFeedback = (uint8_t)constrain((int)dp.audio[t].overview[6], 0, 100);
+        tr.fx.reverb        = (uint8_t)constrain((int)dp.audio[t].overview[7], 0, 100);
+        tr.fx.tape          = (uint8_t)constrain((int)dp.audio[t].overview[8], 0, 100);
+        tr.fx.comp          = (uint8_t)constrain((int)dp.audio[t].overview[9], 0, 100);
+      } else {
+        tr.fx = AudioTrackFxParams{};
+      }
+      syncAudioTrackFxParams(t, tr.fx);
       setTrackMix(t, dp.audio[t].volume, dp.audio[t].balance);
       mutedFlags[t] = (dp.audio[t].muted != 0);
+    }
+    if (dp.audio[0].overview[10] == 0xF2) {
+      AudioTrackFxParams inFx;
+      inFx.drive         = dp.audio[0].overview[11];
+      inFx.chorus        = dp.audio[0].overview[12];
+      inFx.delay         = dp.audio[0].overview[13];
+      inFx.delayFeedback = dp.audio[0].overview[14];
+      inFx.reverb        = dp.audio[0].overview[15];
+      inFx.tape          = dp.audio[0].overview[16];
+      inFx.comp          = dp.audio[0].overview[17];
+      uint8_t volEnc     = dp.audio[0].overview[18];
+      int inVol = (volEnc == 0) ? VOLUME_UNITY : constrain((int)volEnc - 1, 0, VOLUME_MAX);
+      setAllAudioInputFx(inFx, inVol);
+    } else {
+      setAllAudioInputFx(AudioTrackFxParams{}, VOLUME_UNITY);
     }
   }
 
@@ -1571,6 +1625,7 @@ FLASHMEM void clearAudioTrack(int t) {
   tr.peakR = 0.0f;
   memset(tr.curMix, 0, sizeof(tr.curMix));
   interrupts();
+  resetAudioTrackFxState(t);
   tr.fileFrame = transport.tapeFrame;
 
   if (tr.file.isOpen()) {
@@ -3244,6 +3299,8 @@ FLASHMEM MasterExportResult storageExportMasterAudioWav() {
   fmSynthSetExportTailPhase(false);
   fmSynthAllNotesOff();
   resetMasterFxState();
+  resetAllAudioTrackFxState();
+  resetAudioInputFxState();
 
   transport.speedQuarter = DEFAULT_SPEED_QUARTER;
   transport.loopEnabled = false;
@@ -3305,7 +3362,8 @@ FLASHMEM MasterExportResult storageExportMasterAudioWav() {
       exportReadNow += n;
 
       const SongSettings &ps = songSettings();
-      const bool hasDelayOrVerb = (ps.masterDelay > 0 || ps.masterReverb > 0 || fmSynthHasActiveOutput());
+      const bool hasDelayOrVerb = (ps.masterDelay > 0 || ps.masterReverb > 0 ||
+                                   anyAudioTrackDelayOrReverbActive() || fmSynthHasActiveOutput());
       const uint32_t reqSilent = hasDelayOrVerb ? 16384u : 2048u;
       uint32_t framesToKeep = n;
       bool doneNow = false;
@@ -3352,6 +3410,8 @@ FLASHMEM MasterExportResult storageExportMasterAudioWav() {
   storageStopTransport();
   fmSynthAllNotesOff();
   resetMasterFxState();
+  resetAllAudioTrackFxState();
+  resetAudioInputFxState();
 
   for (int t = 0; t < NUM_AUDIO_TRACKS; t++) {
     tracks[t].armMode = prevAudioArm[t];

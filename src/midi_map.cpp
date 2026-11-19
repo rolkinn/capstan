@@ -46,9 +46,9 @@ static bool midiMapDirty = false;
 static uint32_t midiMapDirtyAtMs = 0;
 
 // Per-target last seen CC value (0xFF = none seen yet) and last trigger timestamp (ms)
-// for clean momentary/trigger edge detection on button targets
+// for clean momentary/trigger edge detection on button targets (IDs < MIDI_TGT_AUD_FX_BASE)
 static uint8_t lastSeenVal[MIDI_TARGET_COUNT] = {};
-static uint32_t lastTrigMs[MIDI_TARGET_COUNT] = {};
+static uint32_t lastTrigMs[MIDI_TGT_AUD_FX_BASE] = {};
 
 // MIDI Learn state & 1-second post-learn recognition delay
 static volatile bool learningActive = false;
@@ -164,6 +164,18 @@ PROGMEM static const char *const AUD_OFFSET_NAMES[MIDI_TGT_AUD_PER_TRK] = {
   "VOL",
   "BAL"
 };
+
+PROGMEM static const char *const AUD_FX_OFFSET_NAMES[MIDI_TGT_AUD_FX_PER_TRK] = {
+  "DRIVE",
+  "CHORUS",
+  "DELAY",
+  "D.FB",
+  "REVERB",
+  "TAPE",
+  "COMP"
+};
+
+static constexpr int AUD_CAT_PER_TRK = MIDI_TGT_AUD_PER_TRK + MIDI_TGT_AUD_FX_PER_TRK; // 12
 
 PROGMEM static const char *const MID_OFFSET_NAMES[MIDI_TGT_MID_PER_TRK] = {
   "ARM",
@@ -356,7 +368,7 @@ FLASHMEM void midiMapCategoryBounds(MidiMapCategory cat, int &outFirstTarget, in
       break;
     case MIDI_CAT_AUDIO:
       outFirstTarget = MIDI_TGT_AUD_BASE;
-      outCount = NUM_AUDIO_TRACKS * MIDI_TGT_AUD_PER_TRK; // 40
+      outCount = MIDI_TGT_IN_FX_COUNT + NUM_AUDIO_TRACKS * AUD_CAT_PER_TRK; // 7 Input FX + 96 Track = 103
       break;
     case MIDI_CAT_MIDI:
       outFirstTarget = MIDI_TGT_MID_BASE;
@@ -382,6 +394,18 @@ FLASHMEM int midiMapCategoryRowTarget(MidiMapCategory cat, int rowIdx) {
   if (cat == MIDI_CAT_TRANSPORT) {
     return TRANSPORT_ROW_TARGETS[idx];
   }
+  if (cat == MIDI_CAT_AUDIO) {
+    if (idx < MIDI_TGT_IN_FX_COUNT) {
+      return MIDI_TGT_IN_FX_BASE + idx;
+    }
+    int tIdx = idx - MIDI_TGT_IN_FX_COUNT;
+    int trk = tIdx / AUD_CAT_PER_TRK;
+    int col = tIdx % AUD_CAT_PER_TRK;
+    if (col < MIDI_TGT_AUD_PER_TRK) {
+      return MIDI_TGT_AUD_BASE + trk * MIDI_TGT_AUD_PER_TRK + col;
+    }
+    return MIDI_TGT_AUD_FX_BASE + trk * MIDI_TGT_AUD_FX_PER_TRK + (col - MIDI_TGT_AUD_PER_TRK);
+  }
   return firstTarget + idx;
 }
 
@@ -389,6 +413,22 @@ FLASHMEM void midiMapFormatTargetName(int targetId, char *out, int outSz) {
   if (!out || outSz <= 0) return;
   if (targetId < 0 || targetId >= MIDI_TARGET_COUNT) {
     out[0] = '\0';
+    return;
+  }
+  if (targetId >= MIDI_TGT_IN_FX_BASE) {
+    int fxIdx = constrain(targetId - MIDI_TGT_IN_FX_BASE, 0, MIDI_TGT_IN_FX_COUNT - 1);
+    if (fxIdx < MIDI_TGT_AUD_FX_PER_TRK) {
+      snprintf(out, (size_t)outSz, "IN %s", AUD_FX_OFFSET_NAMES[fxIdx]);
+    } else {
+      snprintf(out, (size_t)outSz, "IN OUT VOL");
+    }
+    return;
+  }
+  if (targetId >= MIDI_TGT_AUD_FX_BASE) {
+    int rel = targetId - MIDI_TGT_AUD_FX_BASE;
+    int trk = constrain(rel / MIDI_TGT_AUD_FX_PER_TRK, 0, NUM_AUDIO_TRACKS - 1);
+    int fxIdx = rel % MIDI_TGT_AUD_FX_PER_TRK;
+    snprintf(out, (size_t)outSz, "AUD %02d %s", trk + 1, AUD_FX_OFFSET_NAMES[fxIdx]);
     return;
   }
   if (targetId == MIDI_TGT_SET_LOOP_START) {
@@ -431,6 +471,9 @@ FLASHMEM void midiMapFormatTargetName(int targetId, char *out, int outSz) {
 }
 
 FLASHMEM bool midiMapIsTriggerTarget(int targetId) {
+  if (targetId >= MIDI_TGT_AUD_FX_BASE) {
+    return false;
+  }
   if (targetId < MIDI_TGT_AUD_BASE) {
     return targetId != MIDI_TGT_PLAY_SPEED;
   }
@@ -475,6 +518,40 @@ bool midiMapIsCcIntercepted(uint8_t inCh1To16, uint8_t cc) {
 
 FLASHMEM static void executeTargetAction(int targetId, uint8_t val) {
   SongSettings &ps = songSettings();
+
+  if (targetId >= MIDI_TGT_IN_FX_BASE) {
+    int fxIdx = constrain(targetId - MIDI_TGT_IN_FX_BASE, 0, MIDI_TGT_IN_FX_COUNT - 1);
+    if (fxIdx < MIDI_TGT_AUD_FX_PER_TRK) {
+      AudioTrackFxSlot slot = (AudioTrackFxSlot)fxIdx;
+      uint8_t pct = (uint8_t)(((int)val * 100 + 63) / 127);
+      if (getAudioInputFx(slot) != pct) {
+        setAudioInputFx(slot, pct);
+        saveSessionWhenIdle();
+        requestContinuousCcUiRedraw();
+      }
+    } else {
+      int v = ((int)val * VOLUME_MAX + 63) / 127;
+      if (getAudioInputVolume() != (uint8_t)v) {
+        setAudioInputVolume(v);
+        saveSessionWhenIdle();
+        requestContinuousCcUiRedraw();
+      }
+    }
+    return;
+  }
+
+  if (targetId >= MIDI_TGT_AUD_FX_BASE) {
+    int rel = targetId - MIDI_TGT_AUD_FX_BASE;
+    int t = constrain(rel / MIDI_TGT_AUD_FX_PER_TRK, 0, NUM_AUDIO_TRACKS - 1);
+    AudioTrackFxSlot slot = (AudioTrackFxSlot)(rel % MIDI_TGT_AUD_FX_PER_TRK);
+    uint8_t pct = (uint8_t)(((int)val * 100 + 63) / 127);
+    if (getAudioTrackFx(t, slot) != pct) {
+      setAudioTrackFx(t, slot, pct);
+      saveSessionWhenIdle();
+      requestContinuousCcUiRedraw();
+    }
+    return;
+  }
 
   if (targetId == MIDI_TGT_SET_LOOP_START) {
     applyPunchInWithAutoOut(ps, transport.tapeFrame, isPunchBarBeatMode());
@@ -928,6 +1005,15 @@ FLASHMEM bool midiMapHandleCc(uint8_t inCh1To16, uint8_t cc, uint8_t val) {
         }
       } else {
         bool risingEdge = (prev == 0xFF || prev < 64);
+        bool repeatTrigger127 = midiEditIsDown && (prev >= 64) && (val == 127) &&
+                                ((uint32_t)(nowMs - lastTrigMs[i]) >= 60u);
+        if (repeatTrigger127) {
+          midiEditIsDown = false;
+          bool wasUsedAsMod = inputFinishMidiEditHold();
+          if (!wasUsedAsMod && !midiEditHoldStarted) {
+            inputTriggerMidiEditTap();
+          }
+        }
         bool singleShotTrigger = (!midiEditIsDown) && (val == 127) && ((uint32_t)(nowMs - lastTrigMs[i]) >= 60u);
         if (risingEdge || singleShotTrigger) {
           lastTrigMs[i] = nowMs;
@@ -1130,6 +1216,8 @@ PROGMEM static const char *const INST_MAP_SHARED_LABELS[INST_MIDI_MAP_SHARED_SLO
   "FX DELAY",
   "FX D.FB",
   "FX REVERB",
+  "FX TAPE",
+  "FX COMP",
   "OUT LEVEL"
 };
 
@@ -1204,6 +1292,10 @@ FLASHMEM int instMidiMapRowToSlot(InstType type, int rowIdx) {
   if (rowIdx < 0) return 0;
   if (rowIdx < eng) return rowIdx;
   int sharedIdx = constrain(rowIdx - eng, 0, INST_MIDI_MAP_SHARED_SLOTS - 1);
+  // Keep OUT LEVEL at legacy storage slot 15 while displaying FX TAPE (16) & FX COMP (17) above OUT LEVEL
+  if (sharedIdx == 15) return INST_MIDI_MAP_ENGINE_SLOTS + 16;
+  if (sharedIdx == 16) return INST_MIDI_MAP_ENGINE_SLOTS + 17;
+  if (sharedIdx == 17) return INST_MIDI_MAP_ENGINE_SLOTS + 15;
   return INST_MIDI_MAP_ENGINE_SLOTS + sharedIdx;
 }
 
@@ -1365,6 +1457,20 @@ FLASHMEM static bool applyInstPatchSlotCc(FmPatch &p, InstType iType, int slot, 
         uint8_t nextLvl = scaleCcTo100(val);
         if (instPatchLevel(p) == nextLvl) return false;
         setInstPatchLevel(p, nextLvl);
+        return true;
+      }
+      case 16: {
+        int instIdx = (int)(&p - &fmSynthPatch(0));
+        uint8_t nextPct = scaleCcTo100(val);
+        if (instGetTape(instIdx) == nextPct) return false;
+        instSetTape(instIdx, nextPct);
+        return true;
+      }
+      case 17: {
+        int instIdx = (int)(&p - &fmSynthPatch(0));
+        uint8_t nextPct = scaleCcTo100(val);
+        if (instGetComp(instIdx) == nextPct) return false;
+        instSetComp(instIdx, nextPct);
         return true;
       }
       default: return false;
@@ -1534,15 +1640,15 @@ FLASHMEM void instMidiMapApplyRoutedCc(int instIdx, uint8_t cc, uint8_t val) {
 struct DiskInstMidiMapChunk {
   char magic[4];     // "IMAP"
   uint16_t version;  // 1
-  uint16_t numSlots; // INST_MIDI_MAP_TOTAL_SLOTS (32)
+  uint16_t numSlots; // INST_MIDI_MAP_TOTAL_SLOTS (34)
   MidiCcMapEntry entries[NUM_INSTRUMENTS][INST_MIDI_MAP_TOTAL_SLOTS];
 };
-static_assert(sizeof(DiskInstMidiMapChunk) <= 544, "DiskInstMidiMapChunk size check");
+static_assert(sizeof(DiskInstMidiMapChunk) <= 576, "DiskInstMidiMapChunk size check");
 
 struct DiskSingleInstMidiMapChunk {
   char magic[4];     // "IM1P"
   uint16_t version;  // 1
-  uint16_t numSlots; // INST_MIDI_MAP_TOTAL_SLOTS (32)
+  uint16_t numSlots; // INST_MIDI_MAP_TOTAL_SLOTS (34)
   MidiCcMapEntry entries[INST_MIDI_MAP_TOTAL_SLOTS];
 };
 static_assert(sizeof(DiskSingleInstMidiMapChunk) <= 512, "DiskSingleInstMidiMapChunk must fit in one 512-byte sector");
@@ -1570,15 +1676,25 @@ FLASHMEM bool instMidiMapLoadSongData(FsFile &f) {
   instMidiMapRebuildMask();
   if (!f.isOpen()) return false;
 
+  uint64_t startPos = f.curPosition();
   DiskInstMidiMapChunk chunk{};
-  int rd = f.read(&chunk, sizeof(chunk));
-  if (rd < 8 || memcmp(chunk.magic, "IMAP", 4) != 0 || chunk.version != 1 || chunk.numSlots == 0) {
+  int hdrRd = f.read(&chunk, 8);
+  if (hdrRd < 8 || memcmp(chunk.magic, "IMAP", 4) != 0 || chunk.version != 1 || chunk.numSlots == 0) {
+    if (hdrRd > 0) f.seekSet(startPos);
     return true; // Songs saved before Instrument MIDI Map existed remain valid
   }
 
   const int fileSlots = (int)chunk.numSlots;
+  const size_t totalEntryBytes = (size_t)fileSlots * (size_t)NUM_INSTRUMENTS * sizeof(MidiCcMapEntry);
+  const size_t toRead = min(totalEntryBytes, sizeof(chunk.entries));
+  int bodyRd = (toRead > 0) ? f.read(chunk.entries, toRead) : 0;
+  if (bodyRd < 0) bodyRd = 0;
+  if (totalEntryBytes > toRead) {
+    f.seekSet(f.curPosition() + (uint64_t)(totalEntryBytes - toRead));
+  }
+
   const int copySlots = min(fileSlots, INST_MIDI_MAP_TOTAL_SLOTS);
-  const int availEntries = (rd - 8) / (int)sizeof(MidiCcMapEntry);
+  const int availEntries = bodyRd / (int)sizeof(MidiCcMapEntry);
   const MidiCcMapEntry *flat = &chunk.entries[0][0];
   for (int i = 0; i < NUM_INSTRUMENTS; i++) {
     for (int s = 0; s < copySlots; s++) {
@@ -1608,14 +1724,25 @@ FLASHMEM bool instMidiMapLoadSingleInstData(FsFile &f, int instIdx) {
   instMidiMapRebuildMask();
   if (!f.isOpen()) return false;
 
+  uint64_t startPos = f.curPosition();
   DiskSingleInstMidiMapChunk chunk{};
-  int rd = f.read(&chunk, sizeof(chunk));
-  if (rd < 8 || memcmp(chunk.magic, "IM1P", 4) != 0 || chunk.version != 1) {
+  int hdrRd = f.read(&chunk, 8);
+  if (hdrRd < 8 || memcmp(chunk.magic, "IM1P", 4) != 0 || chunk.version != 1) {
+    if (hdrRd > 0) f.seekSet(startPos);
     return true; // Presets saved before Instrument MIDI Map existed remain valid
   }
 
-  const int availEntries = (rd - 8) / (int)sizeof(MidiCcMapEntry);
-  int slots = min(min((int)chunk.numSlots, INST_MIDI_MAP_TOTAL_SLOTS), availEntries);
+  const int fileSlots = (int)chunk.numSlots;
+  const size_t totalEntryBytes = (size_t)fileSlots * sizeof(MidiCcMapEntry);
+  const size_t toRead = min(totalEntryBytes, sizeof(chunk.entries));
+  int bodyRd = (toRead > 0) ? f.read(chunk.entries, toRead) : 0;
+  if (bodyRd < 0) bodyRd = 0;
+  if (totalEntryBytes > toRead) {
+    f.seekSet(f.curPosition() + (uint64_t)(totalEntryBytes - toRead));
+  }
+
+  const int availEntries = bodyRd / (int)sizeof(MidiCcMapEntry);
+  int slots = min(min(fileSlots, INST_MIDI_MAP_TOTAL_SLOTS), availEntries);
   for (int s = 0; s < slots; s++) {
     instMap[instIdx][s] = chunk.entries[s];
     sanitizeLoadedMapEntry(instMap[instIdx][s]);

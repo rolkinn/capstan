@@ -78,6 +78,7 @@ uint32_t midiTicksToFrames(uint32_t ticks, float bpm) {
 // ---- Track Volume and Panning (Balance)
 FLASHMEM static float trackVolumeGain(int volStep) {
   if (volStep <= 0) return 0.0f;
+  if (volStep == VOLUME_UNITY) return 1.0f;
   float db = (volStep - VOLUME_UNITY) * VOLUME_STEP_DB;
   return powf(10.0f, db / 20.0f);
 }
@@ -117,6 +118,97 @@ FLASHMEM void setTrackMix(int t, int volume, int balance) {
   tr.mixRL = rl;
   tr.mixRR = rr;
   interrupts();
+}
+
+FLASHMEM uint8_t getAudioTrackFx(int t, AudioTrackFxSlot slot) {
+  if (t < 0 || t >= NUM_AUDIO_TRACKS) return 0;
+  const AudioTrackFxParams &fx = tracks[t].fx;
+  switch (slot) {
+    case AUD_FX_DRIVE: return fx.drive;
+    case AUD_FX_CHOR:  return fx.chorus;
+    case AUD_FX_DLAY:  return fx.delay;
+    case AUD_FX_DFB:   return fx.delayFeedback;
+    case AUD_FX_RVRB:  return fx.reverb;
+    case AUD_FX_TAPE:  return fx.tape;
+    case AUD_FX_COMP:  return fx.comp;
+    default:           return 0;
+  }
+}
+
+FLASHMEM void setAudioTrackFx(int t, AudioTrackFxSlot slot, int pct) {
+  if (t < 0 || t >= NUM_AUDIO_TRACKS) return;
+  uint8_t clamped = (uint8_t)constrain(pct, 0, 100);
+  AudioTrackFxParams &fx = tracks[t].fx;
+  switch (slot) {
+    case AUD_FX_DRIVE: if (fx.drive == clamped) return; fx.drive = clamped; break;
+    case AUD_FX_CHOR:  if (fx.chorus == clamped) return; fx.chorus = clamped; break;
+    case AUD_FX_DLAY:  if (fx.delay == clamped) return; fx.delay = clamped; break;
+    case AUD_FX_DFB:   if (fx.delayFeedback == clamped) return; fx.delayFeedback = clamped; break;
+    case AUD_FX_RVRB:  if (fx.reverb == clamped) return; fx.reverb = clamped; break;
+    case AUD_FX_TAPE:  if (fx.tape == clamped) return; fx.tape = clamped; break;
+    case AUD_FX_COMP:  if (fx.comp == clamped) return; fx.comp = clamped; break;
+    default:           return;
+  }
+  syncAudioTrackFxParams(t, fx);
+}
+
+static AudioTrackFxParams audioInputFx;
+static uint8_t audioInputVol = VOLUME_UNITY;
+
+FLASHMEM uint8_t getAudioInputFx(AudioTrackFxSlot slot) {
+  switch (slot) {
+    case AUD_FX_DRIVE: return audioInputFx.drive;
+    case AUD_FX_CHOR:  return audioInputFx.chorus;
+    case AUD_FX_DLAY:  return audioInputFx.delay;
+    case AUD_FX_DFB:   return audioInputFx.delayFeedback;
+    case AUD_FX_RVRB:  return audioInputFx.reverb;
+    case AUD_FX_TAPE:  return audioInputFx.tape;
+    case AUD_FX_COMP:  return audioInputFx.comp;
+    default:           return 0;
+  }
+}
+
+FLASHMEM void setAudioInputFx(AudioTrackFxSlot slot, int pct) {
+  uint8_t clamped = (uint8_t)constrain(pct, 0, 100);
+  switch (slot) {
+    case AUD_FX_DRIVE: if (audioInputFx.drive == clamped) return; audioInputFx.drive = clamped; break;
+    case AUD_FX_CHOR:  if (audioInputFx.chorus == clamped) return; audioInputFx.chorus = clamped; break;
+    case AUD_FX_DLAY:  if (audioInputFx.delay == clamped) return; audioInputFx.delay = clamped; break;
+    case AUD_FX_DFB:   if (audioInputFx.delayFeedback == clamped) return; audioInputFx.delayFeedback = clamped; break;
+    case AUD_FX_RVRB:  if (audioInputFx.reverb == clamped) return; audioInputFx.reverb = clamped; break;
+    case AUD_FX_TAPE:  if (audioInputFx.tape == clamped) return; audioInputFx.tape = clamped; break;
+    case AUD_FX_COMP:  if (audioInputFx.comp == clamped) return; audioInputFx.comp = clamped; break;
+    default:           return;
+  }
+  syncAudioInputFxParams(audioInputFx);
+}
+
+FLASHMEM uint8_t getAudioInputVolume() {
+  return audioInputVol;
+}
+
+FLASHMEM void setAudioInputVolume(int vol) {
+  uint8_t clamped = (uint8_t)constrain(vol, 0, VOLUME_MAX);
+  if (audioInputVol == clamped) return;
+  audioInputVol = clamped;
+  setAudioInputOutGain(clamped, trackVolumeGain(clamped), false);
+}
+
+FLASHMEM const AudioTrackFxParams &audioInputFxParams() {
+  return audioInputFx;
+}
+
+FLASHMEM void setAllAudioInputFx(const AudioTrackFxParams &fx, int volume) {
+  audioInputFx.drive         = (uint8_t)constrain((int)fx.drive, 0, 100);
+  audioInputFx.chorus        = (uint8_t)constrain((int)fx.chorus, 0, 100);
+  audioInputFx.delay         = (uint8_t)constrain((int)fx.delay, 0, 100);
+  audioInputFx.delayFeedback = (uint8_t)constrain((int)fx.delayFeedback, 0, 100);
+  audioInputFx.reverb        = (uint8_t)constrain((int)fx.reverb, 0, 100);
+  audioInputFx.tape          = (uint8_t)constrain((int)fx.tape, 0, 100);
+  audioInputFx.comp          = (uint8_t)constrain((int)fx.comp, 0, 100);
+  audioInputVol              = (uint8_t)constrain(volume, 0, VOLUME_MAX);
+  syncAudioInputFxParams(audioInputFx);
+  setAudioInputOutGain(audioInputVol, trackVolumeGain(audioInputVol), true);
 }
 
 FLASHMEM void takeTrackPeaks(int t, float &left, float &right) {
@@ -306,7 +398,7 @@ static constexpr uint32_t TRS_MSG_QUEUE = 512;
 static volatile uint8_t trsMsgQueue[TRS_MSG_QUEUE];
 static volatile uint32_t trsMsgHead = 0, trsMsgTail = 0;
 
-static constexpr uint32_t USB_PKT_QUEUE = 256;
+static constexpr uint32_t USB_PKT_QUEUE = 128;
 static volatile MidiPacket usbPktQueue[USB_PKT_QUEUE];
 static volatile uint32_t usbPktHead = 0, usbPktTail = 0;
 static volatile bool usbOut = false;
@@ -368,7 +460,7 @@ FLASHMEM void midiEnd() {
   midiInPollHook = nullptr;
 }
 
-void midiSendNow(uint8_t status, uint8_t portMask) {
+FLASHMEM void midiSendNow(uint8_t status, uint8_t portMask) {
   if (status >= 0xF8) {
     portMask &= midiActiveClockOutPorts();
   }
@@ -388,11 +480,11 @@ void midiSendNow(uint8_t status, uint8_t portMask) {
   restoreIrq(irq);
 }
 
-void midiSendClockNow(uint8_t status) {
+FLASHMEM void midiSendClockNow(uint8_t status) {
   midiSendNow(status, midiActiveClockOutPorts());
 }
 
-void midiSendMsg(uint8_t status, uint8_t d1, uint8_t d2, int len, uint8_t portMask) {
+FLASHMEM void midiSendMsg(uint8_t status, uint8_t d1, uint8_t d2, int len, uint8_t portMask) {
   if (!portMask || len <= 0) return;
   uint32_t irq = saveIrq();
   if ((portMask & MIDI_PORT_TRS) && midiPort) {
@@ -492,6 +584,72 @@ using PostFxLimiter = LookaheadMonitorLimiter;
 static PostFxLimiter postFxLimiter(29000.0f, 30800.0f, LIMIT_CEILING);
 static LookaheadMonitorLimiter monLimiter(30500.0f, 31600.0f, 32766.0f);
 
+FLASHMEM __attribute__((noinline)) static void pushTunerInputBlock(
+    TunerSource tSrc, const int16_t *lineBufL, const int16_t *lineBufR,
+    bool usbIn, const uint32_t *usbFrames) {
+  if (tSrc == TunerSource::LineIn) {
+    tunerPushStereo16(lineBufL, lineBufR, AUDIO_BLOCK_SAMPLES);
+  } else if (tSrc == TunerSource::UsbIn) {
+    if (usbIn) {
+      tunerPushPackedStereo16(usbFrames, AUDIO_BLOCK_SAMPLES);
+    } else {
+      tunerPushSilenceBlock(AUDIO_BLOCK_SAMPLES);
+    }
+  } else if (tSrc >= TunerSource::Inst1 && tSrc <= TunerSource::Inst8) {
+    if (!tunerInstPushedThisBlock) {
+      tunerPushSilenceBlock(AUDIO_BLOCK_SAMPLES);
+    }
+  }
+}
+
+FLASHMEM __attribute__((noinline)) static void checkWaitThresholdInputBlock(
+    int targetTrk, AudioRecSrc targetSrc, MonoInput targetMonoIn, int capMidiTrk,
+    const int16_t *lineBufL, const int16_t *lineBufR,
+    bool usbIn, const uint32_t *usbFrames,
+    const int32_t *midiCapL, const int32_t *midiCapR,
+    TransportMode &tMode) {
+  float trigPeak = 0.0f;
+  const bool tgtMono = isAudioTrackMono(targetTrk);
+  int16_t pkL = 0, pkR = 0, pkSum = 0;
+  if (targetSrc == AudioRecSrc::Line || targetSrc == AudioRecSrc::Usb || capMidiTrk >= 0) {
+    for (int i = 0; i < AUDIO_BLOCK_SAMPLES; i++) {
+      int32_t sL = 0, sR = 0;
+      if (targetSrc == AudioRecSrc::Line) {
+        sL = lineBufL[i];
+        sR = lineBufR[i];
+      } else if (targetSrc == AudioRecSrc::Usb) {
+        sL = usbIn ? (int16_t)(usbFrames[i] & 0xFFFF) : 0;
+        sR = usbIn ? (int16_t)(usbFrames[i] >> 16) : 0;
+      } else {
+        sL = constrain(midiCapL[i], -32768, 32767);
+        sR = constrain(midiCapR[i], -32768, 32767);
+      }
+      int16_t a = (int16_t)min((int32_t)32767, abs(sL));
+      int16_t b = (int16_t)min((int32_t)32767, abs(sR));
+      int16_t cSum = (int16_t)((sL + sR) >> 1);
+      int16_t sAbs = (int16_t)min((int32_t)32767, abs((int32_t)cSum));
+      if (a > pkL) pkL = a;
+      if (b > pkR) pkR = b;
+      if (sAbs > pkSum) pkSum = sAbs;
+    }
+    if (tgtMono) {
+      int16_t mPk = (targetMonoIn == MonoInput::Left)  ? pkL
+                  : (targetMonoIn == MonoInput::Right) ? pkR
+                                                       : pkSum;
+      trigPeak = mPk / 32768.0f;
+    } else {
+      trigPeak = max(pkL, pkR) / 32768.0f;
+    }
+  }
+  if (trigPeak >= transport.audioThreshLinear) {
+    tMode = TransportMode::Running;
+    transport.mode = TransportMode::Running;
+    transport.running = true;
+    transport.sampleInBeat = 0;
+    midiSendNow(0xFA); // MIDI Start
+  }
+}
+
 void LooperEngine::onBeat() {
   int32_t beat = transport.beat;
   tickInBeat_ = 0;
@@ -515,7 +673,7 @@ void LooperEngine::update() {
     return;
   }
 
-  static uint32_t usbFrames[AUDIO_BLOCK_SAMPLES];
+  uint32_t usbFrames[AUDIO_BLOCK_SAMPLES];
   const bool usbIn = usbAudioRead && (usbAudioRead(usbFrames) != 0);
   int16_t *usbOutBuf = usbAudioWrite ? usbAudioWrite() : nullptr;
 
@@ -538,14 +696,6 @@ void LooperEngine::update() {
   const int capMidiTrk = (targetSrc >= AudioRecSrc::Midi1 && targetSrc <= AudioRecSrc::Midi8)
                              ? ((int)targetSrc - (int)AudioRecSrc::Midi1)
                              : -1;
-  int32_t fmL[AUDIO_BLOCK_SAMPLES];
-  int32_t fmR[AUDIO_BLOCK_SAMPLES];
-  int32_t midiCapL[AUDIO_BLOCK_SAMPLES];
-  int32_t midiCapR[AUDIO_BLOCK_SAMPLES];
-  const bool hasFm = fmSynthRenderBlock(fmL, fmR, AUDIO_BLOCK_SAMPLES,
-                                        capMidiTrk,
-                                        (capMidiTrk >= 0) ? midiCapL : nullptr,
-                                        (capMidiTrk >= 0) ? midiCapR : nullptr);
 
   const AudioInputSource src = audioInputSource;
   const bool smpRec   = samplerRecActive;
@@ -570,17 +720,32 @@ void LooperEngine::update() {
 
   const MonitorMode lMon = lineMonitorMode;
   const MonitorMode uMon = usbMonitorMode;
-  const bool monLine  = ((lMon == MonitorMode::On) || (lMon == MonitorMode::Arm && audioArmed)) &&
-                        !(tMute && tSrc == TunerSource::LineIn);
-  const bool monUsb   = (((uMon == MonitorMode::On) || (uMon == MonitorMode::Arm && audioArmed)) && usbIn) &&
-                        !(tMute && tSrc == TunerSource::UsbIn);
+  const bool monLine     = ((lMon == MonitorMode::On) || (lMon == MonitorMode::Arm && audioArmed)) &&
+                           !(tMute && tSrc == TunerSource::LineIn);
+  const bool monUsbWant  = ((uMon == MonitorMode::On) || (uMon == MonitorMode::Arm && audioArmed)) &&
+                           !(tMute && tSrc == TunerSource::UsbIn);
+  const bool lineWanted  = useLine || monLine || (targetSrc == AudioRecSrc::Line);
+  const bool usbWanted   = !micMode && (useUsb || monUsbWant || (targetSrc == AudioRecSrc::Usb));
+  const bool inputBusOn  = !masterExportActive && (lineWanted || usbWanted);
+
+  // Sync Input FX Chor/Dly/Verb targets BEFORE fmSynthRenderBlock so Instrument & Input FX arbitrate cleanly
+  updateAudioInputFxTargets(inputBusOn);
+
+  int32_t fmL[AUDIO_BLOCK_SAMPLES];
+  int32_t fmR[AUDIO_BLOCK_SAMPLES];
+  int32_t midiCapL[AUDIO_BLOCK_SAMPLES];
+  int32_t midiCapR[AUDIO_BLOCK_SAMPLES];
+  uint32_t instAuxPacked[AUDIO_BLOCK_SAMPLES];
+  bool hasInstAuxSend = false;
+  const bool hasFm = fmSynthRenderBlock(fmL, fmR, AUDIO_BLOCK_SAMPLES,
+                                        capMidiTrk,
+                                        (capMidiTrk >= 0) ? midiCapL : nullptr,
+                                        (capMidiTrk >= 0) ? midiCapR : nullptr,
+                                        instAuxPacked, &hasInstAuxSend);
 
   const float liTrim = micMode ? 1.0f : lineInDigitalTrim;
   int16_t lineBufL[AUDIO_BLOCK_SAMPLES];
   int16_t lineBufR[AUDIO_BLOCK_SAMPLES];
-  int16_t recSampleL[AUDIO_BLOCK_SAMPLES];
-  int16_t recSampleR[AUDIO_BLOCK_SAMPLES];
-  int16_t inPeakL = 0, inPeakR = 0, inPeakSum = 0;
   for (int i = 0; i < AUDIO_BLOCK_SAMPLES; i++) {
     int32_t rawL = inL ? inL->data[i] : 0;
     int32_t rawR = inR ? inR->data[i] : 0;
@@ -588,44 +753,13 @@ void LooperEngine::update() {
       rawL = constrain((int32_t)((float)rawL * liTrim), -32768, 32767);
       rawR = constrain((int32_t)((float)rawR * liTrim), -32768, 32767);
     }
-    int16_t la = (int16_t)rawL;
-    int16_t lb = (int16_t)rawR;
-    lineBufL[i] = la;
-    lineBufR[i] = lb;
-
-    int32_t recL = (useLine ? (int32_t)la : 0)
-                 + ((useUsb && usbIn) ? (int32_t)(int16_t)(usbFrames[i] & 0xFFFF) : 0)
-                 + ((useSynth && hasFm) ? fmL[i] : 0);
-    int32_t recR = (useLine ? (int32_t)lb : 0)
-                 + ((useUsb && usbIn) ? (int32_t)(int16_t)(usbFrames[i] >> 16) : 0)
-                 + ((useSynth && hasFm) ? fmR[i] : 0);
-    int16_t clL = softClipToInt16(recL);
-    int16_t clR = softClipToInt16(recR);
-    recSampleL[i] = clL;
-    recSampleR[i] = clR;
-    int16_t a = (int16_t)min((int32_t)32767, abs(recL));
-    int16_t b = (int16_t)min((int32_t)32767, abs(recR));
-    int16_t cSum = (int16_t)(((int32_t)clL + (int32_t)clR) >> 1);
-    int16_t sAbs = (int16_t)min((int32_t)32767, abs((int32_t)cSum));
-    if (a > inPeakL) inPeakL = a;
-    if (b > inPeakR) inPeakR = b;
-    if (sAbs > inPeakSum) inPeakSum = sAbs;
+    lineBufL[i] = (int16_t)rawL;
+    lineBufR[i] = (int16_t)rawR;
   }
-  if (inPeakL / 32768.0f > inputMeterL) inputMeterL = inPeakL / 32768.0f;
-  if (inPeakR / 32768.0f > inputMeterR) inputMeterR = inPeakR / 32768.0f;
 
-  if (tSrc == TunerSource::LineIn) {
-    tunerPushStereo16(lineBufL, lineBufR, AUDIO_BLOCK_SAMPLES);
-  } else if (tSrc == TunerSource::UsbIn) {
-    if (usbIn) {
-      tunerPushPackedStereo16(usbFrames, AUDIO_BLOCK_SAMPLES);
-    } else {
-      tunerPushSilenceBlock(AUDIO_BLOCK_SAMPLES);
-    }
-  } else if (tSrc >= TunerSource::Inst1 && tSrc <= TunerSource::Inst8) {
-    if (!tunerInstPushedThisBlock) {
-      tunerPushSilenceBlock(AUDIO_BLOCK_SAMPLES);
-    }
+  // Tap Chromatic Tuner pre-Input-FX (clean dry Line In / USB In pitch detection)
+  if (tSrc != TunerSource::Off) {
+    pushTunerInputBlock(tSrc, lineBufL, lineBufR, usbIn, usbFrames);
   }
 
   uint32_t blockMicros = micros();
@@ -642,51 +776,6 @@ void LooperEngine::update() {
 
   uint32_t spb = transport.spb;
   TransportMode tMode = transport.mode;
-
-  // Check per-track recording source threshold trigger when waiting
-  if (tMode == TransportMode::WaitThreshold && transport.waitAudioThresh && targetTrk >= 0) {
-    float trigPeak = 0.0f;
-    const bool tgtMono = isAudioTrackMono(targetTrk);
-    int16_t pkL = 0, pkR = 0, pkSum = 0;
-    if (targetSrc == AudioRecSrc::Line || targetSrc == AudioRecSrc::Usb || capMidiTrk >= 0) {
-      for (int i = 0; i < AUDIO_BLOCK_SAMPLES; i++) {
-        int32_t sL = 0, sR = 0;
-        if (targetSrc == AudioRecSrc::Line) {
-          sL = lineBufL[i];
-          sR = lineBufR[i];
-        } else if (targetSrc == AudioRecSrc::Usb) {
-          sL = usbIn ? (int16_t)(usbFrames[i] & 0xFFFF) : 0;
-          sR = usbIn ? (int16_t)(usbFrames[i] >> 16) : 0;
-        } else {
-          sL = constrain(midiCapL[i], -32768, 32767);
-          sR = constrain(midiCapR[i], -32768, 32767);
-        }
-        int16_t a = (int16_t)min((int32_t)32767, abs(sL));
-        int16_t b = (int16_t)min((int32_t)32767, abs(sR));
-        int16_t cSum = (int16_t)((sL + sR) >> 1);
-        int16_t sAbs = (int16_t)min((int32_t)32767, abs((int32_t)cSum));
-        if (a > pkL) pkL = a;
-        if (b > pkR) pkR = b;
-        if (sAbs > pkSum) pkSum = sAbs;
-      }
-      if (tgtMono) {
-        int16_t mPk = (targetMonoIn == MonoInput::Left)  ? pkL
-                    : (targetMonoIn == MonoInput::Right) ? pkR
-                                                         : pkSum;
-        trigPeak = mPk / 32768.0f;
-      } else {
-        trigPeak = max(pkL, pkR) / 32768.0f;
-      }
-    }
-    if (trigPeak >= transport.audioThreshLinear) {
-      tMode = TransportMode::Running;
-      transport.mode = TransportMode::Running;
-      transport.running = true;
-      transport.sampleInBeat = 0;
-      midiSendNow(0xFA); // MIDI Start
-    }
-  }
-
   const bool anyAudioSolo = anyTrackSolo();
 
   float mix[NUM_AUDIO_TRACKS][4];
@@ -697,6 +786,8 @@ void LooperEngine::update() {
   const int srcAudioTrkBlock = (targetSrc >= AudioRecSrc::Audio1 && targetSrc <= AudioRecSrc::Audio8)
                                    ? ((int)targetSrc - (int)AudioRecSrc::Audio1)
                                    : -1;
+  uint8_t processTrackMask = 0;
+  uint8_t audibleTrackMask = 0;
   for (int t = 0; t < NUM_AUDIO_TRACKS; t++) {
     const Track &tr = tracks[t];
     bool audible = (tr.state == TrackState::Playing) && (!anyAudioSolo || tr.solo) &&
@@ -706,12 +797,70 @@ void LooperEngine::update() {
     mix[t][1] = g * tr.mixLR;
     mix[t][2] = g * tr.mixRL;
     mix[t][3] = g * tr.mixRR;
-    if (tr.live || t == recTrkBlock || t == srcAudioTrkBlock || t == tunerAudioTrk ||
-        (mix[t][0] + mix[t][1] + mix[t][2] + mix[t][3] +
-         tr.curMix[0] + tr.curMix[1] + tr.curMix[2] + tr.curMix[3]) > 1e-6f) {
+    const bool mixNonZero = (mix[t][0] + mix[t][1] + mix[t][2] + mix[t][3] +
+                             tr.curMix[0] + tr.curMix[1] + tr.curMix[2] + tr.curMix[3]) > 1e-6f;
+    if (audible) {
+      audibleTrackMask |= (uint8_t)(1u << t);
+    }
+    if (audible || mixNonZero || t == srcAudioTrkBlock) {
+      processTrackMask |= (uint8_t)(1u << t);
+    }
+    if (tr.live || t == recTrkBlock || t == srcAudioTrkBlock || t == tunerAudioTrk || mixNonZero) {
       activeTracks[numActiveTracks++] = (uint8_t)t;
     }
   }
+
+  AudioTrackFxBlockCtx fxCtx;
+  AudioInputFxBlockCtx inFxCtx;
+  prepareAudioTrackFxBlock(fxCtx,
+                           (tMode == TransportMode::Running) ? processTrackMask : 0u,
+                           (tMode == TransportMode::Running) ? audibleTrackMask : 0u,
+                           hasInstAuxSend, &inFxCtx);
+
+  // Process Audio Input FX chain (DRIVE -> CHORUS -> DELAY -> REVERB -> TAPE -> COMP) pre-monitor & pre-record
+  processAudioInputFxBlock(inFxCtx, inputBusOn,
+                           lineWanted, lineBufL, lineBufR,
+                           usbIn, usbWanted, usbFrames,
+                           targetSrc == AudioRecSrc::Usb);
+  const bool usbEffective = usbIn || inFxCtx.usbTailActive;
+  const bool monUsb = monUsbWant && usbEffective;
+
+  int16_t recSampleL[AUDIO_BLOCK_SAMPLES];
+  int16_t recSampleR[AUDIO_BLOCK_SAMPLES];
+  int16_t inPeakL = 0, inPeakR = 0, inPeakSum = 0;
+  for (int i = 0; i < AUDIO_BLOCK_SAMPLES; i++) {
+    int32_t recL = (useLine ? (int32_t)lineBufL[i] : 0)
+                 + ((useUsb && usbEffective) ? (int32_t)(int16_t)(usbFrames[i] & 0xFFFF) : 0)
+                 + ((useSynth && hasFm) ? fmL[i] : 0);
+    int32_t recR = (useLine ? (int32_t)lineBufR[i] : 0)
+                 + ((useUsb && usbEffective) ? (int32_t)(int16_t)(usbFrames[i] >> 16) : 0)
+                 + ((useSynth && hasFm) ? fmR[i] : 0);
+    int16_t clL = softClipToInt16(recL);
+    int16_t clR = softClipToInt16(recR);
+    recSampleL[i] = clL;
+    recSampleR[i] = clR;
+    int16_t a = (int16_t)min((int32_t)32767, abs(recL));
+    int16_t b = (int16_t)min((int32_t)32767, abs(recR));
+    int16_t cSum = (int16_t)(((int32_t)clL + (int32_t)clR) >> 1);
+    int16_t sAbs = (int16_t)min((int32_t)32767, abs((int32_t)cSum));
+    if (a > inPeakL) inPeakL = a;
+    if (b > inPeakR) inPeakR = b;
+    if (sAbs > inPeakSum) inPeakSum = sAbs;
+  }
+  if (inPeakL / 32768.0f > inputMeterL) inputMeterL = inPeakL / 32768.0f;
+  if (inPeakR / 32768.0f > inputMeterR) inputMeterR = inPeakR / 32768.0f;
+
+  // Check per-track recording source threshold trigger when waiting (sees post-Input-FX signal)
+  if (tMode == TransportMode::WaitThreshold && transport.waitAudioThresh && targetTrk >= 0) {
+    checkWaitThresholdInputBlock(targetTrk, targetSrc, targetMonoIn, capMidiTrk,
+                                 lineBufL, lineBufR, usbEffective, usbFrames, midiCapL, midiCapR, tMode);
+  }
+
+  const bool runAnyTrackAux = fxCtx.runChorAux || fxCtx.runDlyAux || fxCtx.runVerbAux ||
+                              fxCtx.auxSendMask != 0 || fxCtx.hasInstAux || inFxCtx.hasAuxSend;
+  const bool srcAudioGetsAuxWet = (srcAudioTrkBlock >= 0) &&
+                                  !fxCtx.hasInstAux && !inFxCtx.hasAuxSend &&
+                                  (fxCtx.auxSendMask == (uint8_t)(1u << srcAudioTrkBlock));
 
   int16_t tunerAudioMono[AUDIO_BLOCK_SAMPLES];
 
@@ -728,8 +877,8 @@ void LooperEngine::update() {
   for (int i = 0; i < AUDIO_BLOCK_SAMPLES; i++) {
     int32_t lineL = lineBufL[i];
     int32_t lineR = lineBufR[i];
-    int32_t uL = usbIn ? (int16_t)(usbFrames[i] & 0xFFFF) : 0;
-    int32_t uR = usbIn ? (int16_t)(usbFrames[i] >> 16) : 0;
+    int32_t uL = usbEffective ? (int16_t)(usbFrames[i] & 0xFFFF) : 0;
+    int32_t uR = usbEffective ? (int16_t)(usbFrames[i] >> 16) : 0;
     int32_t synL = hasFm ? fmL[i] : 0;
     int32_t synR = hasFm ? fmR[i] : 0;
 
@@ -743,8 +892,26 @@ void LooperEngine::update() {
 
     // Monitor bus for Master Out in floating-point with -3.0 dB mix-bus headroom matching Audio Tracks 1..8
     // (no pre-FX int16 hard clamp; excludes USB In to prevent DAW feedback)
-    const float monL = (float)(((monLine && !expOut) ? lineL : 0) + synL) * masterGain;
-    const float monR = (float)(((monLine && !expOut) ? lineR : 0) + synR) * masterGain;
+    float auxChorL = 0.0f, auxChorR = 0.0f;
+    float auxDlyL = 0.0f, auxDlyR = 0.0f;
+    float auxVerbL = 0.0f, auxVerbR = 0.0f;
+    float lineMonL = (monLine && !expOut) ? (float)lineL : 0.0f;
+    float lineMonR = (monLine && !expOut) ? (float)lineR : 0.0f;
+    if (inFxCtx.hasAuxSend && monLine && !expOut) {
+      const float inNorm = masterGain * (1.0f / 32768.0f);
+      const float sL = lineMonL * inNorm;
+      const float sR = lineMonR * inNorm;
+      auxChorL += inFxCtx.chorSend * sL;
+      auxChorR += inFxCtx.chorSend * sR;
+      auxDlyL  += inFxCtx.dlySend  * sL;
+      auxDlyR  += inFxCtx.dlySend  * sR;
+      auxVerbL += inFxCtx.verbSend * sL;
+      auxVerbR += inFxCtx.verbSend * sR;
+      lineMonL *= inFxCtx.dryTrim;
+      lineMonR *= inFxCtx.dryTrim;
+    }
+    const float monL = (lineMonL + (float)synL) * masterGain;
+    const float monR = (lineMonR + (float)synR) * masterGain;
     float mixL = 0.0f, mixR = 0.0f;
     int16_t *usbFrame = usbOutBuf ? usbOutBuf + i * USB_OUT_CHANNELS : nullptr;
 
@@ -927,6 +1094,11 @@ void LooperEngine::update() {
             sr = 0.0f;
           }
 
+          const uint8_t trBit = (uint8_t)(1u << t);
+          if (fxCtx.insertMask & trBit) {
+            processAudioTrackInsertSample(t, !isAudioTrackMono(t), sl, sr);
+          }
+
           const float *m = mix[t];
           float *c = tr.curMix;
           for (int k = 0; k < 4; k++) c[k] += (m[k] - c[k]) * GLIDE;
@@ -934,6 +1106,20 @@ void LooperEngine::update() {
           float orr = c[2] * sl + c[3] * sr;
           peakL[t] = max(peakL[t], fabsf(ol));
           peakR[t] = max(peakR[t], fabsf(orr));
+          if (fxCtx.auxSendMask & trBit) {
+            const float normScale = masterGain * (1.0f / 32768.0f);
+            const float sL = ol * normScale;
+            const float sR = orr * normScale;
+            auxChorL += fxCtx.chorSend[t] * sL;
+            auxChorR += fxCtx.chorSend[t] * sR;
+            auxDlyL  += fxCtx.dlySend[t]  * sL;
+            auxDlyR  += fxCtx.dlySend[t]  * sR;
+            auxVerbL += fxCtx.verbSend[t] * sL;
+            auxVerbR += fxCtx.verbSend[t] * sR;
+            const float dTrim = fxCtx.dryTrim[t];
+            ol *= dTrim;
+            orr *= dTrim;
+          }
           if (t == srcAudioTrkBlock) {
             srcAudioL = ol;
             srcAudioR = orr;
@@ -948,6 +1134,21 @@ void LooperEngine::update() {
 
     mixL += monL;
     mixR += monR;
+    if (runAnyTrackAux) {
+      float auxWetL = 0.0f, auxWetR = 0.0f;
+      processAudioTrackAuxSample(fxCtx, fxCtx.hasInstAux ? instAuxPacked[i] : 0u,
+                                 auxChorL, auxChorR,
+                                 auxDlyL, auxDlyR,
+                                 auxVerbL, auxVerbR,
+                                 auxWetL, auxWetR);
+      mixL += auxWetL;
+      mixR += auxWetR;
+      if (srcAudioGetsAuxWet) {
+        const float invMg = 1.0f / masterGain;
+        srcAudioL += auxWetL * invMg;
+        srcAudioR += auxWetR * invMg;
+      }
+    }
     const float preFxL = mixL;
     const float preFxR = mixR;
     processMasterFx(mixL, mixR);
