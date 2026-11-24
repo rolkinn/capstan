@@ -22,7 +22,8 @@ enum class SamplerPressMode : uint8_t {
 enum class SharedStreamKind : uint8_t {
   WavSampler    = 0,
   Sf2Mono16     = 1, // ring holds 2048 int16_t mono frames
-  Sf2StereoLink = 2  // ring holds 1024 packed uint32_t (L | R<<16) stereo frames
+  Sf2StereoLink = 2, // ring holds 1024 packed uint32_t (L | R<<16) stereo frames
+  WavPreview    = 3  // Dry WAV file browser preview (Audio Clip / Sampler browser)
 };
 
 static constexpr int SHARED_NUM_STREAMS = 8;
@@ -156,5 +157,15 @@ void openSamplerBrowser(int instIdx, int keyIdx);
 void closeSamplerBrowser();
 void samplerBrowserMove(int dy, int pageDelta = 0);
 bool samplerBrowserConfirm(); // returns true if a sample was assigned and browser closed
+void samplerBrowserTogglePreview();
+void samplerBrowserStartPreview();
+bool samplerBrowserMatchesMidiNote(uint8_t midiNote);
+
+// Dry WAV file browser preview (reuses shared SD stream pool, zero DMAMEM overhead)
+bool wavPreviewIsActive();
+bool wavPreviewToggle(const char *fullPath, bool toggleIfSame = true);
+void wavPreviewStop();
+bool samplerHasActivePreview();
+void samplerRenderPreviewBlock(int32_t *outL, int32_t *outR, int numFrames);
 
 }  // namespace looper

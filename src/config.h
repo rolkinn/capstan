@@ -29,6 +29,7 @@ constexpr const char *SONGS_DIR = "/Capstan/SONGS";
 constexpr const char *PLAYLISTS_DIR = "/Capstan/PLAYLISTS";
 constexpr const char *INST_PRESETS_DIR = "/Capstan/INSTRUMENT_PRESETS";
 constexpr const char *SOUNDFONTS_DIR = "/Capstan/SOUNDFONTS";
+constexpr const char *SAMPLES_DIR = "/Capstan/SAMPLES";
 constexpr int MAX_SONGS = 64;                      // Max named song folders listed from SD card
 constexpr int MAX_SONG_NAME_LEN = 12;              // Max characters in a song folder name
 constexpr int MAX_PLAYLISTS = 64;                  // Max .plst files listed from /Capstan/PLAYLISTS

@@ -247,6 +247,18 @@ bool fmSynthSaveInstrumentToSong(int instIdx);
 bool fmSynthSaveInstrumentPreset(int instIdx);
 bool fmSynthLoadInstrumentFile(int instIdx, const char *fullPath);
 
+// On-demand `.FMI` / `.sf2` / `.wav` browser preview control
+uint8_t instPreviewModalMode(); // 0 = none, 1 = FMI/SF2 preset modal, 2 = Sampler WAV browser
+void instPreviewSetSf2PresetModal(bool active);
+void instPreviewSetSamplerBrowserModal(bool active);
+void instPreviewClearPlayHold();
+bool instPreviewGetReadySlot(int &outSlot, InstType &outType);
+bool instPreviewEnsureLoaded();
+void instPreviewPlayPress();
+void instPreviewPlayRelease();
+void instPreviewCancelAndRestore();
+void instPreviewRemoveTempFile();
+
 // SD Card Instrument File Browser Modal (`.FMI` files)
 constexpr int INST_BROWSER_VISIBLE_ROWS = 7;
 constexpr int INST_BROWSER_DIR_MAX = 96;

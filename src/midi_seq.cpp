@@ -3,6 +3,7 @@
 #include "midi_in.h"
 #include "midi_map.h"
 #include "instruments.h"
+#include "inst_sampler.h"
 #include "storage.h"
 #include "paged_dir_scanner.h"
 #include "tuner.h"
@@ -442,6 +443,31 @@ FLASHMEM void midiSeqClearAll() {
   midiSeqAllNotesOff();
 }
 
+FLASHMEM __attribute__((noinline)) static bool midiSeqPreviewInputIsr(
+    uint8_t prevMode, uint8_t type, uint8_t d1, uint8_t d2, uint8_t sampleOffset, uint32_t &thruSentMask) {
+  if (prevMode == 2u) {
+    return (type == 0x90 || type == 0x80) && samplerBrowserMatchesMidiNote(d1);
+  }
+  if (prevMode != 1u) return false;
+  int slot = -1;
+  InstType iType = InstType::None;
+  if (!instPreviewGetReadySlot(slot, iType)) {
+    return true;
+  }
+  uint8_t instDest = (uint8_t)(17 + slot);
+  uint32_t bit = 1u << (instDest - 1);
+  bool needMainNoteOn = (type == 0x90 && d2 > 0) &&
+                        (iType == InstType::Sampler || iType == InstType::SoundFont);
+  if (!needMainNoteOn &&
+      (type == 0x90 || type == 0x80 || type == 0xB0 || type == 0xE0) &&
+      !(thruSentMask & bit)) {
+    if (sendMidiOut(type, instDest, d1, d2, MIDI_PORT_BOTH, sampleOffset, false)) {
+      thruSentMask |= bit;
+    }
+  }
+  return true;
+}
+
 void midiSeqInputEvent(uint8_t status, uint8_t d1, uint8_t d2, uint8_t fromSource) {
   if (midiInIsSuspended()) return;
   uint8_t type = status & 0xF0;
@@ -473,7 +499,8 @@ void midiSeqInputEvent(uint8_t status, uint8_t d1, uint8_t d2, uint8_t fromSourc
   // Check if transport is waiting for MIDI Input Threshold trigger
   bool triggeredStart = false;
   bool ccIntercepted = (type == 0xB0) && midiMapIsCcIntercepted(inCh1To16, d1);
-  if (tm == TransportMode::WaitThreshold && transport.waitMidiThresh) {
+  const uint8_t prevMode = instPreviewModalMode();
+  if (tm == TransportMode::WaitThreshold && transport.waitMidiThresh && prevMode == 0u) {
     // Note Off and mapped/learning CCs do not trigger start; Note On (vel > 0), unmapped CC, or Pitch Bend does
     bool isTriggerMsg = (type == 0x90 && d2 > 0) ||
                         (type == 0xB0 && !ccIntercepted) ||
@@ -527,55 +554,59 @@ void midiSeqInputEvent(uint8_t status, uint8_t d1, uint8_t d2, uint8_t fromSourc
   // Immediate 250 us ISR Live MIDI Thru & Internal Synth dispatch for non-intercepted messages
   uint32_t thruSentMask = 0;
   if (!ccIntercepted) {
-    const bool running = (tm == TransportMode::Running);
-    const int selectedMidiTrack = midiSeqFocusedTrack();
-    const int audioRecMidiTrack = midiSeqAudioRecTargetTrack();
-    const bool anySoloNow = anyTrackSolo();
-    const Page pg = currentPage();
-    const int auditionInst = liveAuditionInstIdx(pg);
-    const uint8_t thruPortMask = (fromSource == 1) ? MIDI_PORT_TRS : MIDI_PORT_BOTH;
+    if (prevMode != 0u && midiSeqPreviewInputIsr(prevMode, type, d1, d2, sampleOffset, thruSentMask)) {
+      // Consumed by preset or sampler-key preview
+    } else {
+      const bool running = (tm == TransportMode::Running);
+      const int selectedMidiTrack = midiSeqFocusedTrack();
+      const int audioRecMidiTrack = midiSeqAudioRecTargetTrack();
+      const bool anySoloNow = anyTrackSolo();
+      const Page pg = currentPage();
+      const int auditionInst = liveAuditionInstIdx(pg);
+      const uint8_t thruPortMask = (fromSource == 1) ? MIDI_PORT_TRS : MIDI_PORT_BOTH;
 
-    for (int t = 0; t < NUM_MIDI_TRACKS; t++) {
-      const MidiTrack &mt = midiTracks[t];
-      bool chMatch = (mt.inChannel != MIDI_IN_OFF) && (mt.inChannel == 0 || mt.inChannel == inCh1To16);
-      if (!chMatch) continue;
+      for (int t = 0; t < NUM_MIDI_TRACKS; t++) {
+        const MidiTrack &mt = midiTracks[t];
+        bool chMatch = (mt.inChannel != MIDI_IN_OFF) && (mt.inChannel == 0 || mt.inChannel == inCh1To16);
+        if (!chMatch) continue;
 
-      bool isArmed = (mt.armMode != ArmMode::Off);
-      bool isSelected = (t == selectedMidiTrack);
-      bool isAudioRecTarget = (t == audioRecMidiTrack) && !mt.muted && (!anySoloNow || mt.solo);
-      if (auditionInst >= 0 && !running) {
-        isArmed = false;
-        isSelected = false;
-        isAudioRecTarget = false;
-      }
+        bool isArmed = (mt.armMode != ArmMode::Off);
+        bool isSelected = (t == selectedMidiTrack);
+        bool isAudioRecTarget = (t == audioRecMidiTrack) && !mt.muted && (!anySoloNow || mt.solo);
+        if (auditionInst >= 0 && !running) {
+          isArmed = false;
+          isSelected = false;
+          isAudioRecTarget = false;
+        }
 
-      if ((isArmed || isSelected || isAudioRecTarget) && mt.outChannel > 0) {
-        uint8_t outCh = min(mt.outChannel, (uint8_t)MAX_MIDI_OUT_CHAN);
-        uint32_t bit = 1u << (outCh - 1);
-        bool allowLiveOut = (outCh >= 17) || songSettings().midiThru;
-        if (allowLiveOut && !(thruSentMask & bit)) {
-          uint8_t tagTrk = (uint8_t)t;
-          if (audioRecMidiTrack >= 0 && audioRecMidiTrack < NUM_MIDI_TRACKS && audioRecMidiTrack != t) {
-            const MidiTrack &rmt = midiTracks[audioRecMidiTrack];
-            bool rChMatch = (rmt.inChannel != MIDI_IN_OFF) && (rmt.inChannel == 0 || rmt.inChannel == inCh1To16);
-            if (rChMatch && !rmt.muted && (!anySoloNow || rmt.solo) &&
-                min(rmt.outChannel, (uint8_t)MAX_MIDI_OUT_CHAN) == outCh) {
-              tagTrk = (uint8_t)audioRecMidiTrack;
+        if ((isArmed || isSelected || isAudioRecTarget) && mt.outChannel > 0) {
+          uint8_t outCh = min(mt.outChannel, (uint8_t)MAX_MIDI_OUT_CHAN);
+          uint32_t bit = 1u << (outCh - 1);
+          bool allowLiveOut = (outCh >= 17) || songSettings().midiThru;
+          if (allowLiveOut && !(thruSentMask & bit)) {
+            uint8_t tagTrk = (uint8_t)t;
+            if (audioRecMidiTrack >= 0 && audioRecMidiTrack < NUM_MIDI_TRACKS && audioRecMidiTrack != t) {
+              const MidiTrack &rmt = midiTracks[audioRecMidiTrack];
+              bool rChMatch = (rmt.inChannel != MIDI_IN_OFF) && (rmt.inChannel == 0 || rmt.inChannel == inCh1To16);
+              if (rChMatch && !rmt.muted && (!anySoloNow || rmt.solo) &&
+                  min(rmt.outChannel, (uint8_t)MAX_MIDI_OUT_CHAN) == outCh) {
+                tagTrk = (uint8_t)audioRecMidiTrack;
+              }
             }
-          }
-          if (sendMidiOut(type, outCh, d1, d2, thruPortMask, sampleOffset, false, tagTrk)) {
-            thruSentMask |= bit;
+            if (sendMidiOut(type, outCh, d1, d2, thruPortMask, sampleOffset, false, tagTrk)) {
+              thruSentMask |= bit;
+            }
           }
         }
       }
-    }
 
-    if (auditionInst >= 0) {
-      uint8_t instDest = (uint8_t)(17 + auditionInst);
-      uint32_t bit = 1u << (instDest - 1);
-      if (!(thruSentMask & bit)) {
-        if (sendMidiOut(type, instDest, d1, d2, MIDI_PORT_BOTH, sampleOffset, false)) {
-          thruSentMask |= bit;
+      if (auditionInst >= 0) {
+        uint8_t instDest = (uint8_t)(17 + auditionInst);
+        uint32_t bit = 1u << (instDest - 1);
+        if (!(thruSentMask & bit)) {
+          if (sendMidiOut(type, instDest, d1, d2, MIDI_PORT_BOTH, sampleOffset, false)) {
+            thruSentMask |= bit;
+          }
         }
       }
     }
@@ -1179,6 +1210,34 @@ FLASHMEM static void drainMidiInputRing(float curBpm, int selectedMidiTrack, boo
     if (typeHi == 0xB0 && midiMapHandleCc(inCh1To16, m.d1, m.d2)) {
       continue;
     }
+
+    const uint8_t prevMode = instPreviewModalMode();
+    if (prevMode == 1u) {
+      int pSlot = -1;
+      InstType pType = InstType::None;
+      bool ready = instPreviewGetReadySlot(pSlot, pType);
+      if (typeHi == 0x90 && m.d2 > 0 && !ready) {
+        instPreviewEnsureLoaded();
+        ready = instPreviewGetReadySlot(pSlot, pType);
+      }
+      if (ready) {
+        uint8_t instDest = (uint8_t)(17 + pSlot);
+        uint32_t bit = 1u << (instDest - 1);
+        if (!(m.thruSentMask & bit) &&
+            (typeHi == 0x90 || typeHi == 0x80 || typeHi == 0xB0 || typeHi == 0xE0)) {
+          sendMidiOut(typeHi, instDest, m.d1, m.d2, MIDI_PORT_BOTH, m.sampleOffset, true);
+        }
+      }
+      continue;
+    } else if (prevMode == 2u) {
+      if ((typeHi == 0x90 || typeHi == 0x80) && samplerBrowserMatchesMidiNote(m.d1)) {
+        if (typeHi == 0x90 && m.d2 > 0) {
+          samplerBrowserStartPreview();
+        }
+        continue;
+      }
+    }
+
     uint32_t msgTick = framesToMidiTicks(m.tapeFrame, curBpm);
     if (msgTick > maxAllowedTick) msgTick = maxAllowedTick;
     uint32_t nowMs = millis();
@@ -2922,6 +2981,7 @@ FLASHMEM void openAudioClipBrowser(int track, uint32_t startFrame) {
 }
 
 FLASHMEM void closeMidiClipBrowser() {
+  wavPreviewStop();
   if (midiBrowserOpen) {
     midiBrowserDir[0] = '\0';
   }
@@ -2933,12 +2993,34 @@ FLASHMEM void midiClipBrowserMove(int dy, int pageDelta) {
   if (!midiBrowserOpen || midiBrowserCount <= 0) return;
   int step = dy + pageDelta * MIDI_BROWSER_VISIBLE_ROWS;
   if (step == 0) return;
+  wavPreviewStop();
   midiBrowserCur = constrain(midiBrowserCur + step, 0, midiBrowserCount - 1);
   syncMidiBrowserScroll();
 }
 
+FLASHMEM void midiClipBrowserTogglePreview() {
+  if (!midiBrowserOpen || !midiBrowserAudioMode || midiBrowserCount <= 0) {
+    wavPreviewStop();
+    return;
+  }
+  const int idx = constrain(midiBrowserCur, 0, midiBrowserCount - 1);
+  const MidiBrowserEntry *ent = midiClipBrowserEntryAt(idx);
+  if (!ent || ent->isDir != 0) {
+    wavPreviewStop();
+    return;
+  }
+  char fullPath[168];
+  if (strcmp(midiBrowserDir, "/") == 0) {
+    snprintf(fullPath, sizeof(fullPath), "/%.62s", ent->name);
+  } else {
+    snprintf(fullPath, sizeof(fullPath), "%.95s/%.62s", midiBrowserDir, ent->name);
+  }
+  wavPreviewToggle(fullPath);
+}
+
 FLASHMEM bool midiClipBrowserConfirm(float curBpm) {
   if (!midiBrowserOpen || midiBrowserCount <= 0) return false;
+  wavPreviewStop();
   const int idx = constrain(midiBrowserCur, 0, midiBrowserCount - 1);
   const MidiBrowserEntry *ent = midiClipBrowserEntryAt(idx);
   if (!ent) return false;

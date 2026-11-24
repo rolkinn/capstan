@@ -966,6 +966,10 @@ FLASHMEM void pollKeys() {
       int dx = ((activeDir & BTN_RIGHT) ? 1 : 0) - ((activeDir & BTN_LEFT) ? 1 : 0);
       samplerBrowserMove(dy, dx);
     }
+    if (pressed & BTN_PLAY) {
+      samplerBrowserTogglePreview();
+      playUsedAsModifier = true;
+    }
     if (pressed & BTN_EDIT) {
       confirmSamplerBrowserSelection();
       editUsedAsModifier = true;
@@ -988,6 +992,14 @@ FLASHMEM void pollKeys() {
       int dx = ((activeDir & BTN_RIGHT) ? 1 : 0) - ((activeDir & BTN_LEFT) ? 1 : 0);
       sf2BrowserMove(dy, dx);
       uiForceRedraw();
+    }
+    if (pressed & BTN_PLAY) {
+      if (sf2BrowserMode() == Sf2BrowserMode::PresetList) {
+        instPreviewPlayPress();
+      }
+      playUsedAsModifier = true;
+    } else if (!(now & BTN_PLAY) && sf2BrowserMode() == Sf2BrowserMode::PresetList) {
+      instPreviewPlayRelease();
     }
     if (pressed & BTN_EDIT) {
       confirmSf2BrowserSelection();
@@ -1012,6 +1024,12 @@ FLASHMEM void pollKeys() {
       int dx = ((activeDir & BTN_RIGHT) ? 1 : 0) - ((activeDir & BTN_LEFT) ? 1 : 0);
       instBrowserMove(dy, dx);
       uiForceRedraw();
+    }
+    if (pressed & BTN_PLAY) {
+      instPreviewPlayPress();
+      playUsedAsModifier = true;
+    } else if (!(now & BTN_PLAY)) {
+      instPreviewPlayRelease();
     }
     if (pressed & BTN_EDIT) {
       confirmInstBrowserSelection();
@@ -1096,6 +1114,12 @@ FLASHMEM void pollKeys() {
       int dx = ((activeDir & BTN_RIGHT) ? 1 : 0) - ((activeDir & BTN_LEFT) ? 1 : 0);
       sysPresetsMove(dy, dx);
       uiForceRedraw();
+    }
+    if ((pressed & BTN_PLAY) && !(now & BTN_SHIFT)) {
+      instPreviewPlayPress();
+      playUsedAsModifier = true;
+    } else if (!(now & BTN_PLAY)) {
+      instPreviewPlayRelease();
     }
     if ((pressed & BTN_EDIT) && !(now & BTN_SHIFT)) {
       sysPresetsRequestDelete();
@@ -1182,6 +1206,12 @@ FLASHMEM void pollKeys() {
       typePresetModalMove(dy, dx);
       uiForceRedraw();
     }
+    if ((pressed & BTN_PLAY) && !(now & BTN_SHIFT)) {
+      instPreviewPlayPress();
+      playUsedAsModifier = true;
+    } else if (!(now & BTN_PLAY)) {
+      instPreviewPlayRelease();
+    }
     if ((pressed & BTN_EDIT) && !(now & BTN_SHIFT)) {
       confirmTypePresetSelection();
       editUsedAsModifier = true;
@@ -1220,6 +1250,12 @@ FLASHMEM void pollKeys() {
       int dx = ((activeDir & BTN_RIGHT) ? 1 : 0) - ((activeDir & BTN_LEFT) ? 1 : 0);
       midiClipBrowserMove(dy, dx);
       uiForceRedraw();
+    }
+    if (pressed & BTN_PLAY) {
+      if (isAudioClipBrowserMode()) {
+        midiClipBrowserTogglePreview();
+      }
+      playUsedAsModifier = true;
     }
     if (pressed & BTN_EDIT) {
       confirmMidiClipBrowserSelection();

@@ -142,6 +142,26 @@ static bool typePresetModalOpen = false;
 static bool typePresetIsGlobal = false;
 static char instBrowserDir[INST_BROWSER_DIR_MAX] = "";
 
+// On-demand `.FMI` preset browser preview state (small RAM1 only, zero DMAMEM)
+static constexpr const char *PREV_INST_TMP_PATH = "/Capstan/_PREVINST.TMP";
+static volatile uint8_t previewModalFlags = 0; // bit 0 = FMI modal, bit 1 = SF2 Preset modal, bit 2 = Sampler browser
+static bool instPreviewBackupActive = false;
+static bool instPreviewBackupOnSd = false;
+static int8_t instPreviewBackupSlot = -1;
+static int8_t instPreviewSysSlot = -1;
+static FmPatch instPreviewBackupPatch = {};
+static uint8_t instPreviewBackupTape = 0;
+static uint8_t instPreviewBackupComp = 0;
+static MidiCcMapEntry instPreviewBackupMap[INST_MIDI_MAP_TOTAL_SLOTS] = {};
+static char instPreviewLoadedPath[144] = "";
+static volatile bool instPreviewCursorReady = false;
+static volatile int8_t instPreviewSlot = -1;
+static bool instPreviewPlayHeld = false;
+static bool instPreviewPlayReleasePending = false;
+static uint32_t instPreviewPlayMinOffMs = 0;
+static int8_t instPreviewPlaySlot = -1;
+static uint8_t instPreviewPlayNote = 60;
+
 FLASHMEM void *sharedBrowserPoolBuf() {
   return sharedBrowserPool;
 }
@@ -152,7 +172,7 @@ FLASHMEM void *sharedBrowserPoolBuf() {
 //   1. Create src/inst_<name>.h and src/inst_<name>.cpp exporting an InstEngineOps
 //   2. Add its enum value to InstType, increment NUM_INST_TYPES, and list it here.
 // ============================================================================
-const InstEngineOps *instEngineAt(int typeIdx) {
+FLASHMEM const InstEngineOps *instEngineAt(int typeIdx) {
   switch (constrain(typeIdx, 0, NUM_INST_TYPES - 1)) {
     case 0:
     default:
@@ -522,6 +542,20 @@ FLASHMEM void fmSynthResetAll() {
   sysPresetsModalOpen = false;
   sysPresetDelConfirmOpen = false;
   typePresetModalOpen = false;
+  previewModalFlags = 0;
+  instPreviewPlayHeld = false;
+  instPreviewPlayReleasePending = false;
+  instPreviewPlaySlot = -1;
+  noInterrupts();
+  instPreviewCursorReady = false;
+  instPreviewSlot = -1;
+  interrupts();
+  instPreviewLoadedPath[0] = '\0';
+  instPreviewBackupActive = false;
+  instPreviewBackupOnSd = false;
+  instPreviewBackupSlot = -1;
+  instPreviewSysSlot = -1;
+  instPreviewRemoveTempFile();
   fmSynthAllNotesOff();
   samplerResetAll();
   sf2ResetAll();
@@ -1265,6 +1299,23 @@ FLASHMEM void fmSynthService() {
     }
   }
 
+  if (instPreviewPlayReleasePending && !instPreviewPlayHeld &&
+      (int32_t)(millis() - instPreviewPlayMinOffMs) >= 0) {
+    if (instPreviewPlaySlot >= 0 && instPreviewPlaySlot < NUM_INSTRUMENTS) {
+      int pSlot = instPreviewPlaySlot;
+      const FmPatch &pp = patches[pSlot];
+      if ((InstType)pp.type == InstType::NoiseDrone &&
+          pp.algorithm == (uint8_t)NdTrigMode::Auto &&
+          transport.mode != TransportMode::Running) {
+        fmSynthSilenceInst(pSlot);
+      } else {
+        fmSynthNoteOff(pSlot, instPreviewPlayNote);
+      }
+    }
+    instPreviewPlaySlot = -1;
+    instPreviewPlayReleasePending = false;
+  }
+
   const bool running = (transport.mode == TransportMode::Running);
   for (int inst = 0; inst < NUM_INSTRUMENTS; inst++) {
     const uint8_t bit = (uint8_t)(1u << inst);
@@ -1650,7 +1701,8 @@ bool fmSynthRenderBlock(int32_t *outL, int32_t *outR, int numFrames,
       break;
     }
   }
-  if (!anyActive && instFxTailFrames <= 0 && instLimTailFrames <= 0 && !isInstFxChainEnabled()) {
+  const bool hasWavPreview = samplerHasActivePreview();
+  if (!anyActive && !hasWavPreview && instFxTailFrames <= 0 && instLimTailFrames <= 0 && !isInstFxChainEnabled()) {
     lastInstWantCap = false;
     lastCapFxShare = 0.0f;
     return false;
@@ -1833,10 +1885,14 @@ bool fmSynthRenderBlock(int32_t *outL, int32_t *outR, int numFrames,
     instFxCurOutLvl = fxOutTarget;
   }
 
+  if (hasWavPreview) {
+    samplerRenderPreviewBlock(outL, outR, numFrames);
+  }
+
   // Zero-overshoot 32-sample (0.73 ms) lookahead linear peak guard on the summed
   // internal instrument bus (and M01..M08 capture bus) so dense polyphonic chords
   // never flat-top or hit downstream waveshapers even at LEVEL = 100 or across 32 voices.
-  if (anyActive || anyFxSend || instFxTailFrames > 0 || isInstFxChainEnabled()) {
+  if (anyActive || hasWavPreview || anyFxSend || instFxTailFrames > 0 || isInstFxChainEnabled()) {
     instLimTailFrames = (int32_t)LookaheadMonitorLimiter::LOOKAHEAD;
   } else {
     instLimTailFrames = max((int32_t)0, instLimTailFrames - (int32_t)numFrames);
@@ -1885,7 +1941,7 @@ bool fmSynthRenderBlock(int32_t *outL, int32_t *outR, int numFrames,
     }
   }
   lastInstWantCap = wantCap;
-  if (!anyActive && instFxTailFrames <= 0 && instLimTailFrames <= 0) {
+  if (!anyActive && !hasWavPreview && instFxTailFrames <= 0 && instLimTailFrames <= 0) {
     instBusLimiter.reset();
     lastInstWantCap = false;
     lastCapFxShare = 0.0f;
@@ -2095,25 +2151,9 @@ struct SingleInstDisk {
   FmPatch patch;
 };
 
-FLASHMEM static bool saveInstrumentFileToDir(int instIdx, const char *dirPath) {
-  if (instIdx < 0 || instIdx >= NUM_INSTRUMENTS || !dirPath || !dirPath[0]) return false;
-  if (fmSynthIsSlotEmpty(instIdx)) return false;
-
-  if (!SD.sdfs.exists(ROOT_DIR)) {
-    SD.sdfs.mkdir(ROOT_DIR);
-  }
-  if (!SD.sdfs.exists(dirPath)) {
-    SD.sdfs.mkdir(dirPath);
-  }
-
-  InstType iType = (InstType)patches[instIdx].type;
-  char clean[MAX_SONG_NAME_LEN + 1];
-  sanitizeInstName(patches[instIdx].name, clean, sizeof(clean), instIdx, iType);
-  snprintf(patches[instIdx].name, sizeof(patches[instIdx].name), "%s", clean);
-
-  char path[128];
-  snprintf(path, sizeof(path), "%s/%s.FMI", dirPath, clean);
-  FsFile f = SD.sdfs.open(path, O_RDWR | O_CREAT | O_TRUNC);
+FLASHMEM static bool saveInstrumentFileToPath(int instIdx, const char *fullPath, bool syncCard) {
+  if (instIdx < 0 || instIdx >= NUM_INSTRUMENTS || !fullPath || !fullPath[0]) return false;
+  FsFile f = SD.sdfs.open(fullPath, O_RDWR | O_CREAT | O_TRUNC);
   if (!f.isOpen()) return false;
 
   // Stage in RAM1 stack struct for DMA_SDIO cache safety
@@ -2143,10 +2183,31 @@ FLASHMEM static bool saveInstrumentFileToDir(int instIdx, const char *dirPath) {
   f.truncate();
   f.sync();
   f.close();
-  if (SD.sdfs.card()) {
+  if (syncCard && SD.sdfs.card()) {
     SD.sdfs.card()->syncDevice();
   }
   return ok;
+}
+
+FLASHMEM static bool saveInstrumentFileToDir(int instIdx, const char *dirPath) {
+  if (instIdx < 0 || instIdx >= NUM_INSTRUMENTS || !dirPath || !dirPath[0]) return false;
+  if (fmSynthIsSlotEmpty(instIdx)) return false;
+
+  if (!SD.sdfs.exists(ROOT_DIR)) {
+    SD.sdfs.mkdir(ROOT_DIR);
+  }
+  if (!SD.sdfs.exists(dirPath)) {
+    SD.sdfs.mkdir(dirPath);
+  }
+
+  InstType iType = (InstType)patches[instIdx].type;
+  char clean[MAX_SONG_NAME_LEN + 1];
+  sanitizeInstName(patches[instIdx].name, clean, sizeof(clean), instIdx, iType);
+  snprintf(patches[instIdx].name, sizeof(patches[instIdx].name), "%s", clean);
+
+  char path[128];
+  snprintf(path, sizeof(path), "%s/%s.FMI", dirPath, clean);
+  return saveInstrumentFileToPath(instIdx, path, true);
 }
 
 FLASHMEM bool fmSynthSaveInstrumentToSong(int instIdx) {
@@ -2231,7 +2292,7 @@ FLASHMEM static bool acceptFmiBrowserFile(const char *name, uint64_t fSize) {
   return hasFmiExtension(name) && fSize >= sizeof(SingleInstDisk);
 }
 
-static inline bool instPresetEntryComesBefore(const InstBrowserEntry &a, const InstBrowserEntry &b) {
+FLASHMEM static bool instPresetEntryComesBefore(const InstBrowserEntry &a, const InstBrowserEntry &b) {
   int cmp = strcasecmp(a.instName, b.instName);
   if (cmp != 0) return cmp < 0;
   cmp = strcasecmp(a.name, b.name);
@@ -2269,6 +2330,304 @@ FLASHMEM static void getSongInstrumentsDir(char *outDir, size_t outCap) {
   const char *song = currentSongName();
   if (!song || !song[0]) song = "INIT";
   snprintf(outDir, outCap, "%s/%s/INSTRUMENTS", SONGS_DIR, song);
+}
+
+// ============================================================================
+// On-Demand `.FMI` / `.sf2` / `.wav` Browser Preview Engine
+// ============================================================================
+uint8_t instPreviewModalMode() {
+  uint8_t f = previewModalFlags;
+  if (f & 0x03u) return 1u;
+  if (f & 0x04u) return 2u;
+  return 0u;
+}
+
+FLASHMEM static void syncFmiPreviewModalFlag() {
+  bool fmi = instBrowserModalOpen || typePresetModalOpen ||
+             (sysPresetsModalOpen && !sysPresetDelConfirmOpen);
+  noInterrupts();
+  if (fmi) previewModalFlags |= 0x01u;
+  else previewModalFlags &= (uint8_t)~0x01u;
+  interrupts();
+}
+
+FLASHMEM void instPreviewSetSf2PresetModal(bool active) {
+  noInterrupts();
+  if (active) previewModalFlags |= 0x02u;
+  else previewModalFlags &= (uint8_t)~0x02u;
+  interrupts();
+}
+
+FLASHMEM void instPreviewSetSamplerBrowserModal(bool active) {
+  noInterrupts();
+  if (active) previewModalFlags |= 0x04u;
+  else previewModalFlags &= (uint8_t)~0x04u;
+  interrupts();
+}
+
+FLASHMEM void instPreviewClearPlayHold() {
+  instPreviewPlayHeld = false;
+  instPreviewPlayReleasePending = false;
+  instPreviewPlaySlot = -1;
+}
+
+FLASHMEM bool instPreviewGetReadySlot(int &outSlot, InstType &outType) {
+  if ((previewModalFlags & 0x02u) != 0) {
+    if (!sf2PreviewGetReadySlot(outSlot)) return false;
+    outType = InstType::SoundFont;
+    return true;
+  }
+  if (!instPreviewCursorReady || instPreviewSlot < 0 || instPreviewSlot >= NUM_INSTRUMENTS) {
+    return false;
+  }
+  outSlot = (int)instPreviewSlot;
+  outType = (InstType)patches[outSlot].type;
+  return true;
+}
+
+FLASHMEM void instPreviewRemoveTempFile() {
+  if (SD.sdfs.exists(PREV_INST_TMP_PATH)) {
+    SD.sdfs.remove(PREV_INST_TMP_PATH);
+  }
+}
+
+FLASHMEM static void instPreviewStopActiveNotes() {
+  instPreviewPlayHeld = false;
+  instPreviewPlayReleasePending = false;
+  instPreviewPlaySlot = -1;
+  int8_t s = instPreviewSlot;
+  if (s >= 0 && s < NUM_INSTRUMENTS) {
+    fmSynthSilenceInst(s);
+  }
+}
+
+FLASHMEM static void instPreviewOnCursorChanged() {
+  instPreviewStopActiveNotes();
+  noInterrupts();
+  instPreviewCursorReady = false;
+  interrupts();
+  instPreviewLoadedPath[0] = '\0';
+}
+
+FLASHMEM static int instPreviewResolveTargetSlot() {
+  if (instBrowserModalOpen) {
+    return constrain(instBrowserSlot, 0, NUM_INSTRUMENTS - 1);
+  }
+  if (typePresetModalOpen) {
+    return constrain(instListCursor, 0, NUM_INSTRUMENTS - 1);
+  }
+  if (sysPresetsModalOpen && !sysPresetDelConfirmOpen) {
+    if (instPreviewSysSlot < 0 || instPreviewSysSlot >= NUM_INSTRUMENTS) {
+      int chosen = 0;
+      for (int i = 0; i < NUM_INSTRUMENTS; i++) {
+        if (fmSynthIsSlotEmpty(i)) {
+          chosen = i;
+          break;
+        }
+      }
+      instPreviewSysSlot = (int8_t)chosen;
+    }
+    return (int)instPreviewSysSlot;
+  }
+  return -1;
+}
+
+FLASHMEM static bool instPreviewCurrentCursorPath(char *out, size_t sz) {
+  if ((previewModalFlags & 0x01u) == 0 || instBrowserCount <= 0 || !out || sz == 0) return false;
+  const int idx = constrain(instBrowserCur, 0, instBrowserCount - 1);
+  const InstBrowserEntry *ent = instBrowserEntryAt(idx);
+  if (!ent || ent->isDir != 0) return false;
+
+  if (instBrowserModalOpen) {
+    if (strcmp(instBrowserDir, "/") == 0) {
+      snprintf(out, sz, "/%.42s", ent->name);
+    } else {
+      snprintf(out, sz, "%.95s/%.42s", instBrowserDir, ent->name);
+    }
+  } else if (typePresetModalOpen) {
+    if (typePresetIsGlobal) {
+      snprintf(out, sz, "%s/%.42s", INST_PRESETS_DIR, ent->name);
+    } else {
+      char songInstDir[80];
+      getSongInstrumentsDir(songInstDir, sizeof(songInstDir));
+      snprintf(out, sz, "%s/%.42s", songInstDir, ent->name);
+    }
+  } else {
+    if (sysPresetsSongMode) {
+      char songInstDir[80];
+      getSongInstrumentsDir(songInstDir, sizeof(songInstDir));
+      snprintf(out, sz, "%s/%.42s", songInstDir, ent->name);
+    } else {
+      snprintf(out, sz, "%s/%.42s", INST_PRESETS_DIR, ent->name);
+    }
+  }
+  return out[0] != '\0';
+}
+
+FLASHMEM static bool instPreviewCaptureBackup(int slot) {
+  if (instPreviewBackupActive) return true;
+  if (slot < 0 || slot >= NUM_INSTRUMENTS) return false;
+  InstType origType = (InstType)patches[slot].type;
+  if (origType == InstType::Sampler || origType == InstType::SoundFont) {
+    if (!saveInstrumentFileToPath(slot, PREV_INST_TMP_PATH, false)) {
+      return false;
+    }
+    instPreviewBackupOnSd = true;
+  } else {
+    instPreviewBackupPatch = patches[slot];
+    instPreviewBackupTape = instTapePct[slot];
+    instPreviewBackupComp = instCompPct[slot];
+    instMidiMapSnapshotInst(slot, instPreviewBackupMap);
+    instPreviewBackupOnSd = false;
+  }
+  instPreviewBackupSlot = (int8_t)slot;
+  instPreviewBackupActive = true;
+  return true;
+}
+
+FLASHMEM bool instPreviewEnsureLoaded() {
+  if ((previewModalFlags & 0x02u) != 0) {
+    return sf2PreviewEnsureLoaded();
+  }
+  int slot = instPreviewResolveTargetSlot();
+  char path[144];
+  if (slot < 0 || !instPreviewCurrentCursorPath(path, sizeof(path))) return false;
+  if (instPreviewCursorReady && instPreviewSlot == slot && strcasecmp(instPreviewLoadedPath, path) == 0) {
+    return true;
+  }
+
+  instPreviewStopActiveNotes();
+  noInterrupts();
+  instPreviewCursorReady = false;
+  interrupts();
+
+  if (!instPreviewCaptureBackup(slot)) return false;
+  if (!fmSynthLoadInstrumentFile(slot, path)) {
+    instPreviewLoadedPath[0] = '\0';
+    return false;
+  }
+  fmSynthRefreshEnvelopeRates(slot);
+  snprintf(instPreviewLoadedPath, sizeof(instPreviewLoadedPath), "%s", path);
+  noInterrupts();
+  instPreviewSlot = (int8_t)slot;
+  instPreviewCursorReady = true;
+  interrupts();
+  return true;
+}
+
+FLASHMEM void instPreviewCancelAndRestore() {
+  instPreviewStopActiveNotes();
+  noInterrupts();
+  instPreviewCursorReady = false;
+  instPreviewSlot = -1;
+  interrupts();
+  instPreviewLoadedPath[0] = '\0';
+
+  if (instPreviewBackupActive) {
+    int slot = instPreviewBackupSlot;
+    instPreviewBackupActive = false;
+    instPreviewBackupSlot = -1;
+    if (slot >= 0 && slot < NUM_INSTRUMENTS) {
+      fmSynthSilenceInst(slot);
+      if (instPreviewBackupOnSd) {
+        fmSynthLoadInstrumentFile(slot, PREV_INST_TMP_PATH);
+        fmSynthRefreshEnvelopeRates(slot);
+        instPreviewRemoveTempFile();
+      } else {
+        samplerClearSlot(slot);
+        sf2ClearSlot(slot);
+        resetInstDriveState(slot);
+        patches[slot] = instPreviewBackupPatch;
+        syncInstCurLevel(slot);
+        instTapePct[slot] = instPreviewBackupTape;
+        instCompPct[slot] = instPreviewBackupComp;
+        instMidiMapRestoreInst(slot, instPreviewBackupMap);
+        fmSynthRefreshEnvelopeRates(slot);
+      }
+    }
+    instPreviewBackupOnSd = false;
+  }
+  instPreviewSysSlot = -1;
+}
+
+FLASHMEM static void instPreviewCommit() {
+  instPreviewStopActiveNotes();
+  noInterrupts();
+  instPreviewCursorReady = false;
+  instPreviewSlot = -1;
+  interrupts();
+  instPreviewLoadedPath[0] = '\0';
+  if (instPreviewBackupOnSd) {
+    instPreviewRemoveTempFile();
+  }
+  instPreviewBackupActive = false;
+  instPreviewBackupOnSd = false;
+  instPreviewBackupSlot = -1;
+  instPreviewSysSlot = -1;
+}
+
+FLASHMEM static uint8_t instPreviewPickNote(int slot) {
+  if ((InstType)patches[slot].type == InstType::Sampler) {
+    if (samplerHasSample(slot, 12)) return (uint8_t)(SAMPLER_BASE_NOTE + 12); // "C4" on Capstan Sampler
+    if (samplerHasSample(slot, 24)) return (uint8_t)(SAMPLER_BASE_NOTE + 24); // "C5" (MIDI 60) fallback
+    uint64_t mask = samplerKeyMask(slot);
+    if (mask == 0) return 0xFFu;
+    return (uint8_t)(SAMPLER_BASE_NOTE + __builtin_ctzll(mask));
+  }
+  return 60u;
+}
+
+FLASHMEM void instPreviewPlayPress() {
+  if (!instPreviewEnsureLoaded()) return;
+  int slot = -1;
+  InstType iType = InstType::None;
+  if (!instPreviewGetReadySlot(slot, iType)) return;
+
+  if (instPreviewPlayHeld || instPreviewPlayReleasePending) {
+    if (instPreviewPlaySlot >= 0 && instPreviewPlaySlot < NUM_INSTRUMENTS) {
+      fmSynthNoteOff(instPreviewPlaySlot, instPreviewPlayNote);
+    }
+    instPreviewPlayHeld = false;
+    instPreviewPlayReleasePending = false;
+    instPreviewPlaySlot = -1;
+  }
+
+  const FmPatch &p = patches[slot];
+  if ((InstType)p.type == InstType::NoiseDrone && p.algorithm == (uint8_t)NdTrigMode::Latch) {
+    fmSynthNoteOn(slot, 60, 104, 0, true);
+    return;
+  }
+
+  uint8_t note = instPreviewPickNote(slot);
+  if (note == 0xFFu) return;
+  if (!fmSynthNoteOn(slot, note, 104, 0, true)) return;
+  instPreviewPlaySlot = (int8_t)slot;
+  instPreviewPlayNote = note;
+  instPreviewPlayHeld = true;
+  instPreviewPlayReleasePending = false;
+  instPreviewPlayMinOffMs = millis() + 350u;
+}
+
+FLASHMEM void instPreviewPlayRelease() {
+  if (!instPreviewPlayHeld) return;
+  instPreviewPlayHeld = false;
+  if ((int32_t)(millis() - instPreviewPlayMinOffMs) >= 0) {
+    if (instPreviewPlaySlot >= 0 && instPreviewPlaySlot < NUM_INSTRUMENTS) {
+      int s = instPreviewPlaySlot;
+      const FmPatch &p = patches[s];
+      if ((InstType)p.type == InstType::NoiseDrone &&
+          p.algorithm == (uint8_t)NdTrigMode::Auto &&
+          transport.mode != TransportMode::Running) {
+        fmSynthSilenceInst(s);
+      } else {
+        fmSynthNoteOff(s, instPreviewPlayNote);
+      }
+    }
+    instPreviewPlaySlot = -1;
+    instPreviewPlayReleasePending = false;
+  } else {
+    instPreviewPlayReleasePending = true;
+  }
 }
 
 FLASHMEM static void scanPresetsDirectoryWindow(const char *dirPath, bool createIfMissing,
@@ -2414,6 +2773,7 @@ FLASHMEM const InstBrowserEntry *instBrowserEntryAt(int idx) {
 }
 
 FLASHMEM void openInstBrowser(int instIdx) {
+  instPreviewCancelAndRestore();
   closeSf2Browser();
   instBrowserSlot = constrain(instIdx, 0, NUM_INSTRUMENTS - 1);
 
@@ -2478,16 +2838,20 @@ FLASHMEM void openInstBrowser(int instIdx) {
   }
   syncInstBrowserScroll();
   instBrowserModalOpen = true;
+  syncFmiPreviewModalFlag();
 }
 
 FLASHMEM void closeInstBrowser() {
+  instPreviewCancelAndRestore();
   instBrowserModalOpen = false;
+  syncFmiPreviewModalFlag();
 }
 
 FLASHMEM void instBrowserMove(int dy, int pageDelta) {
   if (!instBrowserModalOpen || instBrowserCount <= 0) return;
   int step = dy + pageDelta * INST_BROWSER_VISIBLE_ROWS;
   if (step == 0) return;
+  instPreviewOnCursorChanged();
   instBrowserCur = constrain(instBrowserCur + step, 0, instBrowserCount - 1);
   syncInstBrowserScroll();
 }
@@ -2503,6 +2867,7 @@ FLASHMEM bool instBrowserConfirm() {
   entName[sizeof(entName) - 1] = '\0';
 
   if (isDir) {
+    instPreviewOnCursorChanged();
     if (!pagedStepBrowserDir(instBrowserDir, sizeof(instBrowserDir), entName)) return false;
     scanInstBrowserDirectory();
     if (instBrowserCount > 1 && instBrowserWinCount > 0 && strcmp(instBrowserEntries[0].name, "..") == 0) {
@@ -2519,10 +2884,20 @@ FLASHMEM bool instBrowserConfirm() {
   } else {
     snprintf(fullPath, sizeof(fullPath), "%.95s/%.42s", instBrowserDir, entName);
   }
+  if (instPreviewCursorReady && instPreviewSlot == instBrowserSlot &&
+      strcasecmp(instPreviewLoadedPath, fullPath) == 0) {
+    instPreviewCommit();
+    instBrowserModalOpen = false;
+    syncFmiPreviewModalFlag();
+    return true;
+  }
+  instPreviewOnCursorChanged();
   if (!fmSynthLoadInstrumentFile(instBrowserSlot, fullPath)) {
     return false;
   }
+  instPreviewCommit();
   instBrowserModalOpen = false;
+  syncFmiPreviewModalFlag();
   return true;
 }
 
@@ -2570,6 +2945,7 @@ FLASHMEM int sysPresetDeleteConfirmCursor() {
 }
 
 FLASHMEM void openSysPresetsModal(bool songMode) {
+  instPreviewCancelAndRestore();
   closeSf2Browser();
   instBrowserModalOpen = false;
   typePresetModalOpen = false;
@@ -2586,30 +2962,37 @@ FLASHMEM void openSysPresetsModal(bool songMode) {
     scanPresetsInDirectory(INST_PRESETS_DIR, true);
   }
   sysPresetsModalOpen = true;
+  syncFmiPreviewModalFlag();
 }
 
 FLASHMEM void closeSysPresetsModal() {
+  instPreviewCancelAndRestore();
   sysPresetsModalOpen = false;
   sysPresetsSongMode = false;
   sysPresetDelConfirmOpen = false;
+  syncFmiPreviewModalFlag();
 }
 
 FLASHMEM void closeSysPresetDeleteConfirm() {
   sysPresetDelConfirmOpen = false;
+  syncFmiPreviewModalFlag();
 }
 
 FLASHMEM void sysPresetsMove(int dy, int pageDelta) {
   if (!sysPresetsModalOpen || sysPresetDelConfirmOpen || instBrowserCount <= 0) return;
   int step = dy + pageDelta * INST_BROWSER_VISIBLE_ROWS;
   if (step == 0) return;
+  instPreviewOnCursorChanged();
   instBrowserCur = constrain(instBrowserCur + step, 0, instBrowserCount - 1);
   syncInstBrowserScroll();
 }
 
 FLASHMEM void sysPresetsRequestDelete() {
   if (!sysPresetsModalOpen || instBrowserCount <= 0) return;
+  instPreviewCancelAndRestore();
   sysPresetDelConfirmCur = 0; // Default to YES
   sysPresetDelConfirmOpen = true;
+  syncFmiPreviewModalFlag();
 }
 
 FLASHMEM void sysPresetDeleteConfirmMove(int delta) {
@@ -2621,9 +3004,11 @@ FLASHMEM bool sysPresetDeleteConfirmCommit() {
   if (!sysPresetDelConfirmOpen) return false;
   if (sysPresetDelConfirmCur != 0) {
     sysPresetDelConfirmOpen = false;
+    syncFmiPreviewModalFlag();
     return false;
   }
   sysPresetDelConfirmOpen = false;
+  syncFmiPreviewModalFlag();
   if (instBrowserCount <= 0) return false;
 
   int idx = constrain(instBrowserCur, 0, instBrowserCount - 1);
@@ -2670,6 +3055,7 @@ FLASHMEM bool isTypePresetGlobal() {
 }
 
 FLASHMEM void openTypePresetModal(bool globalPresets) {
+  instPreviewCancelAndRestore();
   closeSf2Browser();
   instBrowserModalOpen = false;
   sysPresetsModalOpen = false;
@@ -2685,16 +3071,20 @@ FLASHMEM void openTypePresetModal(bool globalPresets) {
     scanPresetsInDirectory(songInstDir, false);
   }
   typePresetModalOpen = true;
+  syncFmiPreviewModalFlag();
 }
 
 FLASHMEM void closeTypePresetModal() {
+  instPreviewCancelAndRestore();
   typePresetModalOpen = false;
+  syncFmiPreviewModalFlag();
 }
 
 FLASHMEM void typePresetModalMove(int dy, int pageDelta) {
   if (!typePresetModalOpen || instBrowserCount <= 0) return;
   int step = dy + pageDelta * INST_BROWSER_VISIBLE_ROWS;
   if (step == 0) return;
+  instPreviewOnCursorChanged();
   instBrowserCur = constrain(instBrowserCur + step, 0, instBrowserCount - 1);
   syncInstBrowserScroll();
 }
@@ -2716,10 +3106,20 @@ FLASHMEM bool typePresetModalConfirm(int targetSlot) {
     getSongInstrumentsDir(songInstDir, sizeof(songInstDir));
     snprintf(fullPath, sizeof(fullPath), "%s/%s", songInstDir, fName);
   }
+  if (instPreviewCursorReady && instPreviewSlot == targetSlot &&
+      strcasecmp(instPreviewLoadedPath, fullPath) == 0) {
+    instPreviewCommit();
+    typePresetModalOpen = false;
+    syncFmiPreviewModalFlag();
+    return true;
+  }
+  instPreviewOnCursorChanged();
   if (!fmSynthLoadInstrumentFile(targetSlot, fullPath)) {
     return false;
   }
+  instPreviewCommit();
   typePresetModalOpen = false;
+  syncFmiPreviewModalFlag();
   return true;
 }
 

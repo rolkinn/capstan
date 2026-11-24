@@ -11,7 +11,6 @@
 
 namespace looper {
 
-static constexpr const char *SAMPLES_DIR = "/Capstan/SAMPLES";
 static constexpr size_t SAMPLES_DIR_PREFIX_LEN = 17; // strlen("/Capstan/SAMPLES/")
 static constexpr int NUM_SAMPLER_DIRS = 12;
 
@@ -68,6 +67,13 @@ static constexpr uint32_t SAMPLER_RING_MASK = SAMPLER_RING_FRAMES - 1;
 static SamplerStream samplerStreams[NUM_SAMPLER_STREAMS];
 static uint32_t streamGenCounter = 1;
 static volatile int8_t fillingStreamIdx = -1;
+
+// Dry WAV file browser preview state (reuses samplerStreams[] and storageSharedChunkBuf())
+static volatile int8_t wavPreviewStreamIdx = -1;
+static volatile int16_t wavPreviewDeclickL = 0;
+static volatile int16_t wavPreviewDeclickR = 0;
+static volatile uint8_t wavPreviewDeclickRem = 0;
+static char wavPreviewPath[168] = "";
 
 SamplerStream *samplerStreamSlot(uint32_t streamIdx) {
   return (streamIdx < (uint32_t)NUM_SAMPLER_STREAMS) ? &samplerStreams[streamIdx] : nullptr;
@@ -286,6 +292,7 @@ FLASHMEM static void invalidateCachedStreamsForKey(int instIdx, int keyIdx) {
 FLASHMEM void samplerInvalidateSf2Tag(uint16_t sf2FileTag) {
   for (int s = 0; s < NUM_SAMPLER_STREAMS; s++) {
     SamplerStream &st = samplerStreams[s];
+    if (st.streamKind == (uint8_t)SharedStreamKind::WavPreview) continue;
     if (st.streamKind == (uint8_t)SharedStreamKind::WavSampler && st.cachedSf2Tag == 0) continue;
     if (sf2FileTag != 0 && st.cachedSf2Tag != sf2FileTag) continue;
     noInterrupts();
@@ -611,7 +618,8 @@ FLASHMEM static void fillSf2Stream(SamplerStream &st, int maxPasses, bool forceH
 }
 
 FLASHMEM static void fillSamplerStream(SamplerStream &st, int maxPasses, bool forceHeld = false, bool topUp = false) {
-  if (st.streamKind != (uint8_t)SharedStreamKind::WavSampler) {
+  if (st.streamKind != (uint8_t)SharedStreamKind::WavSampler &&
+      st.streamKind != (uint8_t)SharedStreamKind::WavPreview) {
     fillSf2Stream(st, maxPasses, forceHeld, topUp);
     return;
   }
@@ -632,6 +640,10 @@ FLASHMEM static void fillSamplerStream(SamplerStream &st, int maxPasses, bool fo
     if (queued + minFree > SAMPLER_RING_FRAMES) break;
 
     if (st.fileFrame >= st.totalFrames) {
+      if (st.streamKind == (uint8_t)SharedStreamKind::WavPreview) {
+        st.eofReached = true;
+        break;
+      }
       const FmPatch &p = fmSynthPatch(st.instIdx);
       SamplerPressMode mode = (SamplerPressMode)constrain((int)p.algorithm, 0, NUM_SAMPLER_PRESS_MODES - 1);
       const FmVoice *v = fmSynthVoiceAt(st.voiceIdx);
@@ -706,6 +718,7 @@ FLASHMEM static void reapOrphanedActiveStreams() {
   for (int s = 0; s < NUM_SAMPLER_STREAMS; s++) {
     SamplerStream &st = samplerStreams[s];
     if (!st.active) continue;
+    if (st.streamKind == (uint8_t)SharedStreamKind::WavPreview) continue;
     const FmVoice *v = fmSynthVoiceAt(st.voiceIdx);
     if (!v || !v->active || v->opPhase[0] != (uint32_t)s || v->opPhase[1] != st.generation) {
       st.active = false;
@@ -1074,6 +1087,34 @@ FLASHMEM void samplerServiceActiveStreams(bool topUp) {
         continue;
       }
 
+      if (st.streamKind == (uint8_t)SharedStreamKind::WavPreview) {
+        if (!st.active) {
+          if (st.file.isOpen()) {
+            st.file.close();
+          }
+          st.streamKind = (uint8_t)SharedStreamKind::WavSampler;
+          st.cachedInstIdx = -1;
+          st.cachedKeyIdx = -1;
+          st.cachedSf2Tag = 0;
+          if (wavPreviewStreamIdx < 0) {
+            wavPreviewPath[0] = '\0';
+          }
+          servicedMask |= (uint8_t)(1u << s);
+          continue;
+        }
+        if (st.eofReached) {
+          servicedMask |= (uint8_t)(1u << s);
+          continue;
+        }
+        uint32_t queued = st.head - st.tail;
+        if (tier == 0 && queued >= urgentThresh) continue;
+        servicedMask |= (uint8_t)(1u << s);
+        fillingStreamIdx = (int8_t)s;
+        fillSamplerStream(st, 2, false, topUp);
+        fillingStreamIdx = -1;
+        continue;
+      }
+
       if (!st.active) {
         servicedMask |= (uint8_t)(1u << s);
         continue;
@@ -1209,6 +1250,7 @@ FLASHMEM void samplerServiceStreams() {
 
 FLASHMEM void samplerSilenceInst(int instIdx) {
   for (int s = 0; s < NUM_SAMPLER_STREAMS; s++) {
+    if (samplerStreams[s].streamKind == (uint8_t)SharedStreamKind::WavPreview) continue;
     if ((int)samplerStreams[s].instIdx == instIdx &&
         (samplerStreams[s].active || samplerStreams[s].pendingVoice)) {
       samplerStreams[s].active = false;
@@ -1222,6 +1264,11 @@ FLASHMEM void samplerSilenceInst(int instIdx) {
 }
 
 FLASHMEM void samplerStopAllStreams() {
+  noInterrupts();
+  wavPreviewStreamIdx = -1;
+  wavPreviewDeclickL = 0;
+  wavPreviewDeclickR = 0;
+  wavPreviewDeclickRem = 0;
   for (int s = 0; s < NUM_SAMPLER_STREAMS; s++) {
     samplerStreams[s].active = false;
     samplerStreams[s].pendingVoice = false;
@@ -1229,7 +1276,24 @@ FLASHMEM void samplerStopAllStreams() {
     samplerStreams[s].prevOutL = 0;
     samplerStreams[s].prevOutR = 0;
     samplerStreams[s].declickRem = 0;
+    if (samplerStreams[s].streamKind == (uint8_t)SharedStreamKind::WavPreview) {
+      samplerStreams[s].eofReached = true;
+      samplerStreams[s].head = 0;
+      samplerStreams[s].tail = 0;
+      samplerStreams[s].streamKind = (uint8_t)SharedStreamKind::WavSampler;
+      samplerStreams[s].cachedInstIdx = -1;
+      samplerStreams[s].cachedKeyIdx = -1;
+      samplerStreams[s].cachedSf2Tag = 0;
+    }
   }
+  interrupts();
+  for (int s = 0; s < NUM_SAMPLER_STREAMS; s++) {
+    if (!samplerStreams[s].active && samplerStreams[s].cachedInstIdx < 0 &&
+        samplerStreams[s].cachedSf2Tag == 0 && samplerStreams[s].file.isOpen()) {
+      samplerStreams[s].file.close();
+    }
+  }
+  wavPreviewPath[0] = '\0';
 }
 
 // ============================================================================
@@ -1325,6 +1389,7 @@ FLASHMEM void samplerRemoveClipboardFile() {
 }
 
 FLASHMEM void samplerResetAll() {
+  instPreviewSetSamplerBrowserModal(false);
   browserOpen = false;
   invalidateCachedStreamsForKey(-1, -1);
   memset(samplerDirs, 0, sizeof(samplerDirs));
@@ -1695,8 +1760,10 @@ FLASHMEM static void syncBrowserScroll() {
 }
 
 FLASHMEM void openSamplerBrowser(int instIdx, int keyIdx) {
+  wavPreviewStop();
   browserInstIdx = constrain(instIdx, 0, NUM_INSTRUMENTS - 1);
   browserKeyIdx = constrain(keyIdx, 0, SAMPLER_NUM_KEYS - 1);
+  fmSynthNoteOff(browserInstIdx, (uint8_t)(SAMPLER_BASE_NOTE + browserKeyIdx));
 
   if (!SD.sdfs.exists(ROOT_DIR)) {
     SD.sdfs.mkdir(ROOT_DIR);
@@ -1746,22 +1813,59 @@ FLASHMEM void openSamplerBrowser(int instIdx, int keyIdx) {
   }
   syncBrowserScroll();
   browserOpen = true;
+  instPreviewSetSamplerBrowserModal(true);
 }
 
 FLASHMEM void closeSamplerBrowser() {
+  wavPreviewStop();
   browserOpen = false;
+  instPreviewSetSamplerBrowserModal(false);
 }
 
 FLASHMEM void samplerBrowserMove(int dy, int pageDelta) {
   if (!browserOpen || browserEntryCount <= 0) return;
   int step = dy + pageDelta * SAMPLER_BROWSER_VISIBLE_ROWS;
   if (step == 0) return;
+  wavPreviewStop();
   browserCursor = constrain(browserCursor + step, 0, browserEntryCount - 1);
   syncBrowserScroll();
 }
 
+FLASHMEM static void samplerBrowserPreviewImpl(bool toggleIfSame) {
+  if (!browserOpen || browserEntryCount <= 0) {
+    wavPreviewStop();
+    return;
+  }
+  const int idx = constrain(browserCursor, 0, browserEntryCount - 1);
+  const SamplerBrowserEntry *ent = samplerBrowserEntryAt(idx);
+  if (!ent || ent->isDir != 0) {
+    wavPreviewStop();
+    return;
+  }
+  char fullPath[SAMPLER_PATH_MAX];
+  if (strcmp(browserDir, "/") == 0) {
+    snprintf(fullPath, sizeof(fullPath), "/%.42s", ent->name);
+  } else {
+    snprintf(fullPath, sizeof(fullPath), "%.95s/%.42s", browserDir, ent->name);
+  }
+  wavPreviewToggle(fullPath, toggleIfSame);
+}
+
+FLASHMEM void samplerBrowserTogglePreview() {
+  samplerBrowserPreviewImpl(true);
+}
+
+FLASHMEM void samplerBrowserStartPreview() {
+  samplerBrowserPreviewImpl(false);
+}
+
+FLASHMEM bool samplerBrowserMatchesMidiNote(uint8_t midiNote) {
+  return browserOpen && (samplerNoteToKeyForInst(browserInstIdx, midiNote) == browserKeyIdx);
+}
+
 FLASHMEM bool samplerBrowserConfirm() {
   if (!browserOpen || browserEntryCount <= 0) return false;
+  wavPreviewStop();
   const int idx = constrain(browserCursor, 0, browserEntryCount - 1);
   const SamplerBrowserEntry *ent = samplerBrowserEntryAt(idx);
   if (!ent) return false;
@@ -1791,7 +1895,228 @@ FLASHMEM bool samplerBrowserConfirm() {
     return false;
   }
   browserOpen = false;
+  instPreviewSetSamplerBrowserModal(false);
   return true;
+}
+
+// ============================================================================
+// Dry WAV File Browser Preview (Audio Clip & Sampler Browsers)
+// ============================================================================
+FLASHMEM bool wavPreviewIsActive() {
+  return wavPreviewStreamIdx >= 0;
+}
+
+bool samplerHasActivePreview() {
+  return (wavPreviewStreamIdx >= 0) || (wavPreviewDeclickRem > 0);
+}
+
+FLASHMEM void wavPreviewStop() {
+  noInterrupts();
+  int8_t idx = wavPreviewStreamIdx;
+  if (idx >= 0 && idx < NUM_SAMPLER_STREAMS) {
+    SamplerStream &st = samplerStreams[idx];
+    if (st.streamKind == (uint8_t)SharedStreamKind::WavPreview) {
+      wavPreviewDeclickL = st.prevOutL;
+      wavPreviewDeclickR = st.prevOutR;
+      wavPreviewDeclickRem = (st.prevOutL != 0 || st.prevOutR != 0) ? 32u : 0u;
+    }
+    st.active = false;
+    st.pendingVoice = false;
+    st.prewarmed = false;
+    st.eofReached = true;
+    st.loopLockedInRing = false;
+    st.generation = nextSharedStreamGen();
+    st.head = 0;
+    st.tail = 0;
+    st.prevOutL = 0;
+    st.prevOutR = 0;
+    st.declickRem = 0;
+    st.streamKind = (uint8_t)SharedStreamKind::WavSampler;
+    st.cachedInstIdx = -1;
+    st.cachedKeyIdx = -1;
+    st.cachedSf2Tag = 0;
+  }
+  wavPreviewStreamIdx = -1;
+  interrupts();
+
+  if (idx >= 0 && idx < NUM_SAMPLER_STREAMS && samplerStreams[idx].file.isOpen()) {
+    samplerStreams[idx].file.close();
+  }
+  wavPreviewPath[0] = '\0';
+}
+
+FLASHMEM bool wavPreviewToggle(const char *fullPath, bool toggleIfSame) {
+  if (!fullPath || !fullPath[0]) {
+    wavPreviewStop();
+    return false;
+  }
+  if (toggleIfSame && wavPreviewStreamIdx >= 0 && strcasecmp(wavPreviewPath, fullPath) == 0) {
+    wavPreviewStop();
+    return false;
+  }
+
+  wavPreviewStop();
+  reapOrphanedActiveStreams();
+
+  int chosen = -1;
+  for (int s = 0; s < NUM_SAMPLER_STREAMS; s++) {
+    if (!samplerStreams[s].active && !samplerStreams[s].pendingVoice &&
+        !samplerStreams[s].file.isOpen()) {
+      chosen = s;
+      break;
+    }
+  }
+  if (chosen < 0) {
+    for (int s = 0; s < NUM_SAMPLER_STREAMS; s++) {
+      if (!samplerStreams[s].active && !samplerStreams[s].pendingVoice) {
+        chosen = s;
+        break;
+      }
+    }
+  }
+  if (chosen < 0) {
+    chosen = pickOldestStreamSlot();
+  }
+
+  SamplerStream &st = samplerStreams[chosen];
+  fillingStreamIdx = (int8_t)chosen;
+  noInterrupts();
+  st.active = false;
+  st.pendingVoice = false;
+  st.prewarmed = false;
+  st.loopLockedInRing = false;
+  st.prevOutL = 0;
+  st.prevOutR = 0;
+  st.declickRem = 0;
+  interrupts();
+
+  if (st.file.isOpen()) {
+    st.file.close();
+  }
+  st.cachedInstIdx = -1;
+  st.cachedKeyIdx = -1;
+  st.cachedSf2Tag = 0;
+  st.file = SD.sdfs.open(fullPath, O_RDONLY);
+  if (!st.file.isOpen() || !parseStreamWavHeader(st)) {
+    if (st.file.isOpen()) st.file.close();
+    st.streamKind = (uint8_t)SharedStreamKind::WavSampler;
+    fillingStreamIdx = -1;
+    return false;
+  }
+
+  noInterrupts();
+  st.streamKind = (uint8_t)SharedStreamKind::WavPreview;
+  st.sf2LoopMode = 0;
+  st.instIdx = 0;
+  st.keyIdx = 0;
+  st.voiceIdx = 0;
+  st.generation = nextSharedStreamGen();
+  st.head = 0;
+  st.tail = 0;
+  st.ringLoopStart = 0;
+  st.ringLoopLen = 0;
+  st.fileFrame = 0;
+  st.fracFp = 0;
+  st.lastL = 0;
+  st.lastR = 0;
+  st.prevOutL = 0;
+  st.prevOutR = 0;
+  st.eofReached = false;
+  st.loopLockedInRing = false;
+  interrupts();
+
+  fillSamplerStream(st, 4, true);
+  if (st.head == 0 && !st.eofReached) {
+    if (st.file.isOpen()) st.file.close();
+    st.streamKind = (uint8_t)SharedStreamKind::WavSampler;
+    fillingStreamIdx = -1;
+    return false;
+  }
+
+  noInterrupts();
+  st.active = true;
+  wavPreviewStreamIdx = (int8_t)chosen;
+  interrupts();
+
+  snprintf(wavPreviewPath, sizeof(wavPreviewPath), "%s", fullPath);
+  fillingStreamIdx = -1;
+  return true;
+}
+
+FLASHMEM __attribute__((noinline)) void samplerRenderPreviewBlock(int32_t *outL, int32_t *outR, int numFrames) {
+  const int8_t idx = wavPreviewStreamIdx;
+  SamplerStream *st = (idx >= 0 && idx < NUM_SAMPLER_STREAMS) ? &samplerStreams[idx] : nullptr;
+  bool streamOn = (st != nullptr && st->active &&
+                   st->streamKind == (uint8_t)SharedStreamKind::WavPreview);
+  if (!streamOn && wavPreviewDeclickRem == 0) {
+    return;
+  }
+
+  for (int i = 0; i < numFrames; i++) {
+    int32_t sampleL = 0;
+    int32_t sampleR = 0;
+
+    if (streamOn) {
+      uint32_t t = st->tail;
+      uint32_t h = st->head;
+      uint32_t avail = h - t;
+
+      if (avail == 0) {
+        if (st->eofReached) {
+          st->active = false;
+          st->prevOutL = 0;
+          st->prevOutR = 0;
+          wavPreviewStreamIdx = -1;
+          streamOn = false;
+        } else {
+          sampleL = ((int32_t)st->lastL) >> 1;
+          sampleR = ((int32_t)st->lastR) >> 1;
+        }
+      } else {
+        uint32_t pk0 = st->ring[t & SAMPLER_RING_MASK];
+        int32_t s0L = (int16_t)(pk0 & 0xFFFFu);
+        int32_t s0R = (int16_t)(pk0 >> 16);
+        int32_t s1L = s0L;
+        int32_t s1R = s0R;
+        if (avail >= 2) {
+          uint32_t pk1 = st->ring[(t + 1u) & SAMPLER_RING_MASK];
+          s1L = (int16_t)(pk1 & 0xFFFFu);
+          s1R = (int16_t)(pk1 >> 16);
+        }
+        int32_t frac = (int32_t)(st->fracFp & 0xFFFFu);
+        int32_t interpL = s0L + (((s1L - s0L) * frac) >> 16);
+        int32_t interpR = s0R + (((s1R - s0R) * frac) >> 16);
+        st->lastL = (int16_t)interpL;
+        st->lastR = (int16_t)interpR;
+        sampleL = interpL >> 1;
+        sampleR = interpR >> 1;
+
+        st->fracFp += st->baseStepFp;
+        uint32_t adv = st->fracFp >> 16;
+        st->fracFp &= 0xFFFFu;
+        if (adv > avail) adv = avail;
+        st->tail = t + adv;
+      }
+
+      if (streamOn) {
+        st->prevOutL = (int16_t)constrain(sampleL, -32768, 32767);
+        st->prevOutR = (int16_t)constrain(sampleR, -32768, 32767);
+      }
+    }
+
+    if (wavPreviewDeclickRem > 0) {
+      int32_t w = (int32_t)wavPreviewDeclickRem;
+      sampleL += ((int32_t)wavPreviewDeclickL * w) >> 5;
+      sampleR += ((int32_t)wavPreviewDeclickR * w) >> 5;
+      wavPreviewDeclickRem = (uint8_t)(w - 1);
+    }
+
+    outL[i] += sampleL;
+    outR[i] += sampleR;
+    if (!streamOn && wavPreviewDeclickRem == 0) {
+      break;
+    }
+  }
 }
 
 // ============================================================================

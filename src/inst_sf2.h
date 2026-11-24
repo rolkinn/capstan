@@ -127,5 +127,7 @@ bool openSf2PresetBrowser(int instIdx);
 void closeSf2Browser();
 void sf2BrowserMove(int dy, int pageDelta = 0);
 bool sf2BrowserConfirm(); // returns true if file/preset was loaded and modal closed
+bool sf2PreviewGetReadySlot(int &outSlot);
+bool sf2PreviewEnsureLoaded();
 
 } // namespace looper

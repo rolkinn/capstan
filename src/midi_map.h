@@ -163,6 +163,8 @@ void instMidiMapResetAll();
 void instMidiMapClearInst(int instIdx);
 void instMidiMapCopyInst(int srcInstIdx);
 void instMidiMapPasteInst(int dstInstIdx);
+void instMidiMapSnapshotInst(int instIdx, MidiCcMapEntry *outSlots);
+void instMidiMapRestoreInst(int instIdx, const MidiCcMapEntry *inSlots);
 
 int instMidiMapRowCount(InstType type);
 int instMidiMapRowToSlot(InstType type, int rowIdx);

@@ -2700,11 +2700,18 @@ FLASHMEM bool sf2StepPreset(int instIdx, int delta) {
   return sf2SelectPresetByIndex(instIdx, nextIdx);
 }
 
+static bool sf2PreviewModified = false;
+static uint16_t sf2PreviewOrigBank = 0;
+static uint16_t sf2PreviewOrigPreset = 0;
+static bool sf2PreviewCursorReady = false;
+
 FLASHMEM void sf2Init() {
   sf2ResetAll();
 }
 
 FLASHMEM void sf2ResetAll() {
+  sf2PreviewModified = false;
+  sf2PreviewCursorReady = false;
   closeSf2Browser();
   samplerInvalidateSf2Tag(0);
   for (size_t w = 0; w < sizeof(freeZoneBits) / sizeof(freeZoneBits[0]); w++) {
@@ -3959,7 +3966,7 @@ FLASHMEM static bool acceptSf2BrowserFile(const char *name, uint64_t) {
   return hasSf2Extension(name);
 }
 
-static inline bool sf2PresetEntryLess(const Sf2PoolEntry &a, const Sf2PoolEntry &b) {
+FLASHMEM static bool sf2PresetEntryLess(const Sf2PoolEntry &a, const Sf2PoolEntry &b) {
   return phdrItemLess(a.bank, a.preset, a.phdrIdx, b.bank, b.preset, b.phdrIdx);
 }
 
@@ -4145,12 +4152,14 @@ FLASHMEM bool sf2BrowserRowAt(int idx, Sf2BrowserRowInfo &outRow) {
 }
 
 FLASHMEM void openSf2FileBrowser(int instIdx) {
+  closeSf2Browser();
   closeSamplerBrowser();
   closeInstBrowser();
   closeSysPresetsModal();
   closeTypePresetModal();
   sf2BrInstIdx = constrain(instIdx, 0, NUM_INSTRUMENTS - 1);
   sf2BrMode = Sf2BrowserMode::FileSelect;
+  instPreviewSetSf2PresetModal(false);
 
   if (!SD.sdfs.exists(ROOT_DIR)) SD.sdfs.mkdir(ROOT_DIR);
   if (!SD.sdfs.exists(SOUNDFONTS_DIR)) SD.sdfs.mkdir(SOUNDFONTS_DIR);
@@ -4231,17 +4240,90 @@ FLASHMEM bool openSf2PresetBrowser(int instIdx) {
     }
   }
   syncSf2BrowserScroll();
+  sf2PreviewOrigBank = sf2Slots[instIdx].curBank;
+  sf2PreviewOrigPreset = sf2Slots[instIdx].curPresetNum;
+  sf2PreviewModified = false;
+  sf2PreviewCursorReady = (matchedIdx >= 0);
+  instPreviewSetSf2PresetModal(true);
   return true;
 }
 
+FLASHMEM bool sf2PreviewGetReadySlot(int &outSlot) {
+  if (sf2BrMode != Sf2BrowserMode::PresetList || !sf2PreviewCursorReady ||
+      sf2BrInstIdx < 0 || sf2BrInstIdx >= NUM_INSTRUMENTS) {
+    return false;
+  }
+  outSlot = sf2BrInstIdx;
+  return true;
+}
+
+FLASHMEM bool sf2PreviewEnsureLoaded() {
+  if (sf2BrMode != Sf2BrowserMode::PresetList || sf2BrTotalCount <= 0) return false;
+  if (sf2BrInstIdx < 0 || sf2BrInstIdx >= NUM_INSTRUMENTS || !sf2Slots[sf2BrInstIdx].valid) return false;
+  const int idx = constrain(sf2BrCursor, 0, sf2BrTotalCount - 1);
+  if (idx < sf2BrWinStart || idx >= sf2BrWinStart + sf2BrWinCount) return false;
+  const Sf2PoolEntry &ent = sf2BrowserWin[idx - sf2BrWinStart];
+
+  if (sf2Slots[sf2BrInstIdx].curBank == ent.bank &&
+      sf2Slots[sf2BrInstIdx].curPresetNum == ent.preset) {
+    sf2PreviewCursorReady = true;
+    return true;
+  }
+
+  char fullPath[SAMPLER_PATH_MAX];
+  resolveSf2FullPath(sf2BrInstIdx, fullPath, sizeof(fullPath));
+  FsFile f = SD.sdfs.open(fullPath, O_RDONLY);
+  if (!f.isOpen()) {
+    sf2PreviewCursorReady = false;
+    return false;
+  }
+  fmSynthSilenceInst(sf2BrInstIdx);
+  bool ok = loadSf2PresetForSlot(sf2BrInstIdx, f, (int)ent.bank, (int)ent.preset, -1);
+  f.close();
+  if (ok) {
+    samplerPrewarmSf2File(fullPath, sf2Slots[sf2BrInstIdx].fileTag);
+    sf2PreviewModified = true;
+    sf2PreviewCursorReady = true;
+    return true;
+  }
+  sf2PreviewCursorReady = false;
+  return false;
+}
+
 FLASHMEM void closeSf2Browser() {
+  if (sf2BrMode == Sf2BrowserMode::PresetList) {
+    instPreviewClearPlayHold();
+    fmSynthSilenceInst(sf2BrInstIdx);
+    if (sf2PreviewModified && sf2BrInstIdx >= 0 && sf2BrInstIdx < NUM_INSTRUMENTS &&
+        sf2Slots[sf2BrInstIdx].valid &&
+        (sf2Slots[sf2BrInstIdx].curBank != sf2PreviewOrigBank ||
+         sf2Slots[sf2BrInstIdx].curPresetNum != sf2PreviewOrigPreset)) {
+      char fullPath[SAMPLER_PATH_MAX];
+      resolveSf2FullPath(sf2BrInstIdx, fullPath, sizeof(fullPath));
+      FsFile f = SD.sdfs.open(fullPath, O_RDONLY);
+      if (f.isOpen()) {
+        if (loadSf2PresetForSlot(sf2BrInstIdx, f, (int)sf2PreviewOrigBank, (int)sf2PreviewOrigPreset, -1)) {
+          samplerPrewarmSf2File(fullPath, sf2Slots[sf2BrInstIdx].fileTag);
+        }
+        f.close();
+      }
+    }
+  }
+  sf2PreviewModified = false;
+  sf2PreviewCursorReady = false;
   sf2BrMode = Sf2BrowserMode::Closed;
+  instPreviewSetSf2PresetModal(false);
 }
 
 FLASHMEM void sf2BrowserMove(int dy, int pageDelta) {
   if (sf2BrMode == Sf2BrowserMode::Closed || sf2BrTotalCount <= 0) return;
   int step = dy + pageDelta * SF2_BROWSER_VISIBLE_ROWS;
   if (step == 0) return;
+  if (sf2BrMode == Sf2BrowserMode::PresetList) {
+    instPreviewClearPlayHold();
+    fmSynthSilenceInst(sf2BrInstIdx);
+    sf2PreviewCursorReady = false;
+  }
   sf2BrCursor = constrain(sf2BrCursor + step, 0, sf2BrTotalCount - 1);
   syncSf2BrowserScroll();
 }
@@ -4253,6 +4335,17 @@ FLASHMEM bool sf2BrowserConfirm() {
   const Sf2PoolEntry ent = sf2BrowserWin[idx - sf2BrWinStart];
 
   if (sf2BrMode == Sf2BrowserMode::PresetList) {
+    instPreviewClearPlayHold();
+    if (sf2Slots[sf2BrInstIdx].valid &&
+        sf2Slots[sf2BrInstIdx].curBank == ent.bank &&
+        sf2Slots[sf2BrInstIdx].curPresetNum == ent.preset) {
+      fmSynthSilenceInst(sf2BrInstIdx);
+      sf2PreviewModified = false;
+      sf2PreviewCursorReady = false;
+      sf2BrMode = Sf2BrowserMode::Closed;
+      instPreviewSetSf2PresetModal(false);
+      return true;
+    }
     char fullPath[SAMPLER_PATH_MAX];
     resolveSf2FullPath(sf2BrInstIdx, fullPath, sizeof(fullPath));
     FsFile f = SD.sdfs.open(fullPath, O_RDONLY);
@@ -4262,7 +4355,10 @@ FLASHMEM bool sf2BrowserConfirm() {
     f.close();
     if (ok) {
       samplerPrewarmSf2File(fullPath, sf2Slots[sf2BrInstIdx].fileTag);
+      sf2PreviewModified = false;
+      sf2PreviewCursorReady = false;
       sf2BrMode = Sf2BrowserMode::Closed;
+      instPreviewSetSf2PresetModal(false);
     }
     return ok;
   }

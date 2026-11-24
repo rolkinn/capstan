@@ -92,6 +92,10 @@ Capstan stores all system settings, songs, playlists, and presets inside `/Capst
 │   └── <PLAYLIST>.plst               # Ordered song setlists for album-style playback
 ├── INSTRUMENT_PRESETS/
 │   └── <PRESET>.FMI                  # Global instrument patches
+├── SAMPLES/
+│   └── *.wav                         # User WAV samples & audio clips
+├── SOUNDFONTS/
+│   └── *.sf2                         # SoundFont 2.x instrument banks
 └── SONGS/
     └── <SONG_NAME>/
         ├── SONG.DAT                  # Tempo, Punch/Loop window, Master FX, 8-track mixer settings

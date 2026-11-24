@@ -389,6 +389,8 @@ FLASHMEM void setPage(Page p) {
   closeSongTuner();
   closeSongInputFx();
   trackEditReset();
+  wavPreviewStop();
+  instPreviewCancelAndRestore();
   if (p == Page::SystemSettings || p == Page::SongSettings || p == Page::Main) {
     prevRow1Page = p;
   } else if (p == Page::Audio || p == Page::Midi || p == Page::Instruments ||

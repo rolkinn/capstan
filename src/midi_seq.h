@@ -136,5 +136,6 @@ void openAudioClipBrowser(int track, uint32_t startFrame);
 void closeMidiClipBrowser();
 void midiClipBrowserMove(int dy, int pageDelta = 0);
 bool midiClipBrowserConfirm(float bpm); // returns true if a .mid file was loaded and browser closed
+void midiClipBrowserTogglePreview();
 
 }  // namespace looper

@@ -419,6 +419,9 @@ FLASHMEM bool saveSystemSettings() {
   if (!SD.sdfs.exists(SOUNDFONTS_DIR)) {
     SD.sdfs.mkdir(SOUNDFONTS_DIR);
   }
+  if (!SD.sdfs.exists(SAMPLES_DIR)) {
+    SD.sdfs.mkdir(SAMPLES_DIR);
+  }
   char path[32];
   snprintf(path, sizeof(path), "%s/SYSTEM.DAT", ROOT_DIR);
   FsFile f = SD.sdfs.open(path, O_RDWR | O_CREAT | O_TRUNC);
@@ -3747,6 +3750,10 @@ static bool lastSessionWasSaved = true;
 
 FLASHMEM void flushHeaders() {
   // Manual save only: stop transport and close open files cleanly without overwriting SONG.DAT / MIDI.DAT
+  wavPreviewStop();
+  closeSf2Browser();
+  instPreviewCancelAndRestore();
+  instPreviewRemoveTempFile();
   storageCancelSamplerKeyRecord();
   storageStopTransport();
   trackEditReset();
@@ -3772,10 +3779,14 @@ FLASHMEM bool storageBegin(void (*progress)(const char *)) {
   if (!SD.sdfs.exists(SOUNDFONTS_DIR)) {
     SD.sdfs.mkdir(SOUNDFONTS_DIR);
   }
+  if (!SD.sdfs.exists(SAMPLES_DIR)) {
+    SD.sdfs.mkdir(SAMPLES_DIR);
+  }
   midiSeqInit();
   midiMapInit();
   fmSynthInit();
   storageRemoveClipboardFiles();
+  instPreviewRemoveTempFile();
   songSaved = true; // allow boot scan to clean up any orphaned unsaved folders
   loadSystemSettingsFromDisk();
   scanSongFolders();

@@ -1324,6 +1324,17 @@ FLASHMEM void instMidiMapPasteInst(int dstInstIdx) {
   instMidiMapRebuildMask();
 }
 
+FLASHMEM void instMidiMapSnapshotInst(int instIdx, MidiCcMapEntry *outSlots) {
+  if (instIdx < 0 || instIdx >= NUM_INSTRUMENTS || !outSlots) return;
+  memcpy(outSlots, instMap[instIdx], sizeof(instMap[0]));
+}
+
+FLASHMEM void instMidiMapRestoreInst(int instIdx, const MidiCcMapEntry *inSlots) {
+  if (instIdx < 0 || instIdx >= NUM_INSTRUMENTS || !inSlots) return;
+  memcpy(instMap[instIdx], inSlots, sizeof(instMap[0]));
+  instMidiMapRebuildMask();
+}
+
 FLASHMEM int instMidiMapRowCount(InstType type) {
   int eng = instEngineParamCount(type);
   if (eng <= 0) return INST_MIDI_MAP_SHARED_SLOTS;
