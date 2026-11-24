@@ -1,6 +1,12 @@
 // config.h — constants for Capstan: 8-Track Audio + 8-Track MIDI Tape Recorder
 #pragma once
 #include <stdint.h>
+#include <stdio.h>
+
+#if defined(__GNUC__) && !defined(__clang__) && defined(ARDUINO)
+#undef snprintf
+#define snprintf sniprintf
+#endif
 
 #ifndef FLASHMEM
 #define FLASHMEM
@@ -8,7 +14,7 @@
 
 // Firmware version formatted as "x.y" (updated only when explicitly requested)
 #ifndef CAPSTAN_VERSION
-#define CAPSTAN_VERSION "1.4"
+#define CAPSTAN_VERSION "1.5"
 #endif
 
 // Compile-time debug flag (0 in normal/release builds, 1 via `python build_all.py --debug`)

@@ -34,6 +34,7 @@ void usb_audio_tx_written(void);
 // 1, or 0 when none (not streaming, or not enough yet).
 int usb_audio_rx_block(uint32_t *frames);
 
+#if defined(CAPSTAN_DEBUG) && CAPSTAN_DEBUG
 struct usb_audio_l7_stats {
 	uint32_t txUnderruns, txDropped;           // to the computer: starved packets; blocks with no room
 	uint32_t rxUnderruns, rxOverruns;          // from it: blocks short; frames with no room
@@ -41,6 +42,7 @@ struct usb_audio_l7_stats {
 	float txRate, rxRate;                      // the rates asked for (frames per host second)
 };
 void usb_audio_l7_get_stats(struct usb_audio_l7_stats *s);
+#endif
 #ifdef __cplusplus
 }
 #endif

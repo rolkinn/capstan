@@ -11,6 +11,7 @@ using namespace looper;
 
 static uint64_t prevAudioTrackKey[VISIBLE_TRACK_ROWS][AUD_CELL_COUNT] = {};
 static uint64_t prevAudioMeterKey[VISIBLE_TRACK_ROWS] = {};
+static uint16_t prevAudioWaveBorder[VISIBLE_TRACK_ROWS] = {};
 static uint8_t prevAudioRowParamMode[VISIBLE_TRACK_ROWS] = {};
 static float trSmooth[NUM_AUDIO_TRACKS] = {};
 static int lastAudioTrackRow = 0;
@@ -61,6 +62,7 @@ FLASHMEM static const char *audioHeaderTitle() {
 FLASHMEM static void audioInvalidateCache() {
   memset(prevAudioTrackKey, 0, sizeof(prevAudioTrackKey));
   memset(prevAudioMeterKey, 0, sizeof(prevAudioMeterKey));
+  memset(prevAudioWaveBorder, 0, sizeof(prevAudioWaveBorder));
   memset(prevAudioRowParamMode, 0xFF, sizeof(prevAudioRowParamMode));
 }
 
@@ -113,9 +115,13 @@ FLASHMEM static void drawAudioTrackRow(int visSlot, int t, const TimelineFrameCt
     const uint16_t meterFg = (tr.state == TrackState::Muted) ? DIM : ACCENT;
     const uint64_t meterKey = ((uint64_t)(uint32_t)t << 32) | ((uint64_t)(uint16_t)mw << 16) | (uint64_t)meterFg;
 
+#if defined(ARDUINO_TEENSY_MICROMOD)
+    const bool rrDue = (visSlot == (int)uiTimelineRrSlot());
+#else
+    const bool rrDue = ((visSlot >> 1) == (int)uiTimelineRrSlot());
+#endif
     const bool waveDue = full || (prevAudioTrackKey[visSlot][AUD_CELL_WAVE] == 0) ||
-                         uiIsImmediateFrame() || (transport.mode != TransportMode::Running) ||
-                         ((visSlot >> 1) == (int)uiTimelineRrSlot());
+                         uiIsImmediateFrame() || (transport.mode != TransportMode::Running) || rrDue;
 
     bool drewFullWave = false;
     if (waveDue) {
@@ -153,7 +159,7 @@ FLASHMEM static void drawAudioTrackRow(int visSlot, int t, const TimelineFrameCt
       k = hashMix(k, ctx.scrollStep);
       k = hashMix(k, zoom);
       k = hashMix(k, ctx.bpmKey);
-      k = hashMix(k, tr.recordedFrames);
+      k = hashMix(k, (transport.mode == TransportMode::Running) ? recTenths : tr.recordedFrames);
       k = hashMix(k, punchOn ? ((uint64_t)(uint32_t)(punchX0 + 10000) | ((uint64_t)(uint32_t)(punchX1 + 10000) << 32)) : 0ULL);
       k = hashMix(k, (uint32_t)waveColor | ((uint32_t)phColor << 16));
       k = hashMix(k, tr.overviewVersion);
@@ -165,20 +171,29 @@ FLASHMEM static void drawAudioTrackRow(int visSlot, int t, const TimelineFrameCt
                               : 0ULL);
 
       if (full || k != prevAudioTrackKey[visSlot][AUD_CELL_WAVE]) {
+        const bool needFullBox = full || (prevAudioTrackKey[visSlot][AUD_CELL_WAVE] == 0) ||
+                                 (prevAudioWaveBorder[visSlot] != border);
         prevAudioTrackKey[visSlot][AUD_CELL_WAVE] = k;
-        prevAudioMeterKey[visSlot] = meterKey;
-        drewFullWave = true;
-        Surface s(cw, h);
-        s.drawBox(BG, border);
+        prevAudioWaveBorder[visSlot] = border;
+        const int offX = needFullBox ? innerX : 0;
+        const int offY = needFullBox ? innerY : 0;
+        Surface s(needFullBox ? cw : innerW, needFullBox ? h : innerH);
+        if (needFullBox) {
+          prevAudioMeterKey[visSlot] = meterKey;
+          drewFullWave = true;
+          s.drawBox(BG, border);
+        } else {
+          s.fillRect(0, 0, innerW, innerH, BG);
+        }
 
-        const int midY = innerY + innerH / 2;
+        const int midY = offY + innerH / 2;
         const uint16_t hlFill = blend565(ACCENT, BG, 56);
 
         if (punchOn) {
           int px0 = max(0, punchX0);
           int px1 = min(innerW - 1, punchX1);
           if (px0 <= px1) {
-            s.fillRect(innerX + px0, innerY, px1 - px0 + 1, innerH, GREY_12);
+            s.fillRect(offX + px0, offY, px1 - px0 + 1, innerH, GREY_12);
           }
         }
         if (hlActive) {
@@ -186,22 +201,22 @@ FLASHMEM static void drawAudioTrackRow(int visSlot, int t, const TimelineFrameCt
           int hx1 = min(innerW - 1, hlX1);
           if (hx0 <= hx1) {
             int hw = hx1 - hx0 + 1;
-            s.fillRect(innerX + hx0, innerY, hw, innerH, hlFill);
-            s.fillRect(innerX + hx0, innerY, hw, 1, ACCENT);
-            s.fillRect(innerX + hx0, innerY + innerH - 1, hw, 1, ACCENT);
+            s.fillRect(offX + hx0, offY, hw, innerH, hlFill);
+            s.fillRect(offX + hx0, offY, hw, 1, ACCENT);
+            s.fillRect(offX + hx0, offY + innerH - 1, hw, 1, ACCENT);
           }
         }
 
-        drawTimelineTicksInWindow(s, innerX, innerY, innerW, innerH, curFrame, playCol, winFrames, bpm, zoom);
+        drawTimelineTicksInWindow(s, offX, offY, innerW, innerH, curFrame, playCol, winFrames, bpm, zoom);
 
         if (tr.recordedFrames == 0) {
           int zeroCol = max(0, timelineFrameToCol(0, curFrame, playCol, innerW, winFrames));
           if (zeroCol < innerW) {
-            s.fillRect(innerX + zeroCol, midY, innerW - zeroCol, 1, DARK);
+            s.fillRect(offX + zeroCol, midY, innerW - zeroCol, 1, DARK);
           }
         } else {
           for (int col = 0; col < innerW; col++) {
-            int px = innerX + col;
+            int px = offX + col;
             int64_t f0 = curFrame + ((int64_t)(col - playCol) * (int64_t)winFrames) / innerW;
             int64_t f1 = curFrame + ((int64_t)(col + 1 - playCol) * (int64_t)winFrames) / innerW;
             if (f1 <= f0) f1 = f0 + 1;
@@ -229,37 +244,42 @@ FLASHMEM static void drawAudioTrackRow(int visSlot, int t, const TimelineFrameCt
         }
 
         if (punchOn) {
-          if (punchX0 >= 0 && punchX0 < innerW) s.drawDottedVLine(innerX + punchX0, innerY, innerH, COLOR_PUNCH);
-          if (punchX1 >= 0 && punchX1 < innerW) s.drawDottedVLine(innerX + punchX1, innerY, innerH, COLOR_PUNCH);
+          if (punchX0 >= 0 && punchX0 < innerW) s.drawDottedVLine(offX + punchX0, offY, innerH, COLOR_PUNCH);
+          if (punchX1 >= 0 && punchX1 < innerW) s.drawDottedVLine(offX + punchX1, offY, innerH, COLOR_PUNCH);
         }
         if (hlActive) {
           if (hlX0 >= 0 && hlX0 < innerW) {
             bool isActiveEdge = (trackEditPhase() == TrackEditPhase::SelectRegion) ? !hlEditEnd : true;
-            s.fillRect(innerX + hlX0, innerY, 1, innerH, isActiveEdge ? COLOR_WARN : ACCENT);
+            s.fillRect(offX + hlX0, offY, 1, innerH, isActiveEdge ? COLOR_WARN : ACCENT);
           }
           if (hlX1 >= 0 && hlX1 < innerW) {
             bool isActiveEdge = (trackEditPhase() == TrackEditPhase::SelectRegion) ? hlEditEnd : true;
-            s.fillRect(innerX + hlX1, innerY, 1, innerH, isActiveEdge ? COLOR_WARN : ACCENT);
+            s.fillRect(offX + hlX1, offY, 1, innerH, isActiveEdge ? COLOR_WARN : ACCENT);
           }
         }
-        s.fillRect(innerX + playCol, innerY, 1, innerH, phColor);
+        s.fillRect(offX + playCol, offY, 1, innerH, phColor);
 
         if (tr.state == TrackState::Empty) {
-          s.drawText(SX(6), SY(8), "EMPTY", DIM, BG);
+          s.drawText(SX(6) - (innerX - offX), SY(8) - (innerY - offY), "EMPTY", DIM, BG);
         } else if (tr.state == TrackState::Muted) {
-          s.drawText(SX(6), SY(8), "MUTED", DIM, BG);
+          s.drawText(SX(6) - (innerX - offX), SY(8) - (innerY - offY), "MUTED", DIM, BG);
         }
 
-        // Bottom stereo level meter bar
-        s.fillRect(innerX, meterY, innerW, meterH, DARK);
-        if (mw > 0) {
-          s.fillRect(innerX, meterY, mw, meterH, meterFg);
+        if (needFullBox) {
+          // Bottom stereo level meter bar
+          s.fillRect(innerX, meterY, innerW, meterH, DARK);
+          if (mw > 0) {
+            s.fillRect(innerX, meterY, mw, meterH, meterFg);
+          }
+          s.blit(cx, y);
+        } else {
+          s.blit(cx + innerX, y + innerY);
         }
-        s.blit(cx, y);
       }
     }
 
-    if (!drewFullWave && meterKey != prevAudioMeterKey[visSlot]) {
+    if (!drewFullWave && (prevAudioMeterKey[visSlot] == 0 || uiTierDue(METER_TIER_PERIOD)) &&
+        meterKey != prevAudioMeterKey[visSlot]) {
       prevAudioMeterKey[visSlot] = meterKey;
       Surface ms(innerW, meterH);
       ms.fillRect(0, 0, innerW, meterH, DARK);

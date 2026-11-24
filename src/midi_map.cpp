@@ -4,6 +4,7 @@
 #include "ui.h"
 #include "input.h"
 #include "page_midi.h"
+#include "page_system_settings.h"
 #include "master_fx.h"
 #include "midi_in.h"
 #include "track_edit.h"
@@ -32,6 +33,17 @@ static uint32_t instMappedCcMask[NUM_INSTRUMENTS][4] = {};
 static volatile bool instMapParamDirty = false;
 static uint32_t lastCcUiRedrawMs = 0;
 
+struct RoutedCcEvent {
+  uint8_t instIdx;
+  uint8_t cc;
+  uint8_t val;
+};
+static constexpr uint32_t ROUTED_CC_RING_SIZE = 32;
+static constexpr uint32_t ROUTED_CC_RING_MASK = ROUTED_CC_RING_SIZE - 1u;
+static volatile RoutedCcEvent routedCcRing[ROUTED_CC_RING_SIZE] = {};
+static volatile uint32_t routedCcHead = 0;
+static volatile uint32_t routedCcTail = 0;
+
 static inline void requestContinuousCcUiRedraw() {
   uint32_t now = millis();
   if (lastCcUiRedrawMs == 0 || (uint32_t)(now - lastCcUiRedrawMs) >= 33u) {
@@ -58,6 +70,8 @@ static int instLearningInstIdx = 0;
 static int instLearningSlotIdx = 0;
 static bool learnIgnoreActive = false;
 static uint32_t learnIgnoreUntilMs = 0;
+static uint8_t learnIgnoreCh = 0;
+static uint8_t learnIgnoreCc = 0;
 
 // Held REW / FF scrub & double-tap state (active when Punch/Loop are disabled)
 static constexpr uint32_t MIDI_REW_FF_TAP_HOLD_MS = 300u;
@@ -513,10 +527,13 @@ FLASHMEM int midiMapLearningTarget() {
 bool midiMapIsCcIntercepted(uint8_t inCh1To16, uint8_t cc) {
   if (learningActive || instLearningActive) return true;
   if (inCh1To16 < 1 || inCh1To16 > 16) return false;
-  return (mappedCcChMask[cc & 0x7F] & (uint16_t)(1u << (inCh1To16 - 1))) != 0;
+  uint16_t chBit = (uint16_t)(1u << (inCh1To16 - 1));
+  uint8_t c = cc & 0x7Fu;
+  return ((mappedCcChMask[c] | instMappedCcChMask[c]) & chBit) != 0;
 }
 
 FLASHMEM static void executeTargetAction(int targetId, uint8_t val) {
+  if (isSysProjectPlayLocked()) return;
   SongSettings &ps = songSettings();
 
   if (targetId >= MIDI_TGT_IN_FX_BASE) {
@@ -656,6 +673,7 @@ FLASHMEM static void executeTargetAction(int targetId, uint8_t val) {
         }
         int prevSq = (int)transport.speedQuarter;
         appSetPlaybackSpeedQuarter(nextSq);
+        sysProjectPlayOnSpeedChanged((int8_t)transport.speedQuarter);
         if ((int)transport.speedQuarter != prevSq) {
           requestContinuousCcUiRedraw();
         }
@@ -756,6 +774,7 @@ FLASHMEM static void executeTargetAction(int targetId, uint8_t val) {
       uint8_t v = (uint8_t)(((int)val * MASTER_VOLUME_MAX + 63) / 127);
       if (ps.masterVolume != v) {
         appSetMasterVolume(v);
+        sysProjectPlayOnMasterVolChanged(v);
         saveSessionWhenIdle();
         changed = true;
       }
@@ -829,7 +848,7 @@ FLASHMEM static void executeTargetAction(int targetId, uint8_t val) {
   }
 }
 
-FLASHMEM static void instMidiMapHandleExternalCc(uint8_t inCh1To16, uint8_t cc, uint8_t val);
+FLASHMEM static bool instMidiMapHandleExternalCc(uint8_t inCh1To16, uint8_t cc, uint8_t val);
 
 FLASHMEM bool midiMapHandleCc(uint8_t inCh1To16, uint8_t cc, uint8_t val) {
   cc &= 0x7F;
@@ -842,6 +861,8 @@ FLASHMEM bool midiMapHandleCc(uint8_t inCh1To16, uint8_t cc, uint8_t val) {
     midiMapSetEntry(learningTargetId, inCh1To16, cc);
     midiMapFlushSaveIfDirty();
     lastSeenVal[learningTargetId] = val;
+    learnIgnoreCh = inCh1To16;
+    learnIgnoreCc = cc;
     learnIgnoreUntilMs = millis() + 1000u;
     learnIgnoreActive = true;
     char msg[32];
@@ -854,6 +875,8 @@ FLASHMEM bool midiMapHandleCc(uint8_t inCh1To16, uint8_t cc, uint8_t val) {
     instLearningActive = false;
     instMidiMapSetSlot(instLearningInstIdx, instLearningSlotIdx, inCh1To16, cc);
     saveSessionWhenIdle();
+    learnIgnoreCh = inCh1To16;
+    learnIgnoreCc = cc;
     learnIgnoreUntilMs = millis() + 1000u;
     learnIgnoreActive = true;
     char msg[32];
@@ -871,20 +894,24 @@ FLASHMEM bool midiMapHandleCc(uint8_t inCh1To16, uint8_t cc, uint8_t val) {
   bool inLearnCooldown = false;
   if (learnIgnoreActive) {
     if ((int32_t)(nowMs - learnIgnoreUntilMs) < 0) {
-      inLearnCooldown = true;
+      inLearnCooldown = (inCh1To16 == learnIgnoreCh && cc == learnIgnoreCc);
     } else {
       learnIgnoreActive = false;
     }
   }
+  if (inLearnCooldown) {
+    return true;
+  }
 
   const uint16_t chBit = (uint16_t)(1u << (inCh1To16 - 1));
-  if (!inLearnCooldown && (instMappedCcChMask[cc] & chBit) != 0) {
-    instMidiMapHandleExternalCc(inCh1To16, cc, val);
+  bool instMatched = false;
+  if (!isSysProjectPlayLocked() && (instMappedCcChMask[cc] & chBit) != 0) {
+    instMatched = instMidiMapHandleExternalCc(inCh1To16, cc, val);
   }
 
   // O(1) fast-path exit when (inCh1To16, cc) is not mapped to any global system target
   if ((mappedCcChMask[cc] & chBit) == 0) {
-    return false;
+    return instMatched;
   }
 
   // 2. Match against all active global target mappings
@@ -902,6 +929,12 @@ FLASHMEM bool midiMapHandleCc(uint8_t inCh1To16, uint8_t cc, uint8_t val) {
     if (inLearnCooldown) continue;
 
     if (i == MIDI_TGT_REW || i == MIDI_TGT_FF) {
+      if (isSysProjectPlayLocked()) {
+        midiScrubDir = 0;
+        midiScrubFracFrames = 0.0f;
+        lastRewFfTapDir = 0;
+        continue;
+      }
       const int dir = (i == MIDI_TGT_REW) ? -1 : 1;
       const SongSettings &ps = songSettings();
       if (val < 64) {
@@ -1073,11 +1106,13 @@ FLASHMEM bool midiMapHandleCc(uint8_t inCh1To16, uint8_t cc, uint8_t val) {
     }
   }
 
-  return matched;
+  return matched || instMatched;
 }
 
 FLASHMEM void midiMapService() {
   uint32_t ms = millis();
+
+  instMidiMapFlushRoutedCc();
 
   if (instMapParamDirty) {
     instMapParamDirty = false;
@@ -1107,6 +1142,11 @@ FLASHMEM void midiMapService() {
   }
 
   if (midiScrubDir == 0) return;
+  if (isSysProjectPlayLocked()) {
+    midiScrubDir = 0;
+    midiScrubFracFrames = 0.0f;
+    return;
+  }
   const SongSettings &ps = songSettings();
   if (ps.punchEnabled || ps.loopEnabled) {
     midiScrubDir = 0;
@@ -1232,12 +1272,15 @@ static inline int instEngineParamCount(InstType type) {
   }
 }
 
-FLASHMEM static void instMidiMapRebuildMask() {
+FLASHMEM void instMidiMapRebuildMask() {
   uint16_t chMask[128] = {};
   uint32_t instMask[NUM_INSTRUMENTS][4] = {};
 
   for (int inst = 0; inst < NUM_INSTRUMENTS; inst++) {
+    int engCount = instEngineParamCount((InstType)fmSynthPatch(inst).type);
+    if (engCount <= 0) continue;
     for (int s = 0; s < INST_MIDI_MAP_TOTAL_SLOTS; s++) {
+      if (s >= engCount && s < INST_MIDI_MAP_ENGINE_SLOTS) continue;
       uint8_t ch = instMap[inst][s].channel;
       uint8_t cc = instMap[inst][s].cc & 0x7Fu;
       if (ch != MIDI_MAP_CH_OFF) {
@@ -1422,32 +1465,37 @@ static inline uint16_t scaleCcToTune4800(uint8_t val) {
 
 static inline bool assignU8(uint8_t &dst, uint8_t v) {
   if (dst == v) return false;
+  uint32_t irq = saveIrq();
   dst = v;
+  restoreIrq(irq);
   return true;
 }
 
 static inline bool assignU16(uint16_t &dst, uint16_t v) {
   if (dst == v) return false;
+  uint32_t irq = saveIrq();
   dst = v;
+  restoreIrq(irq);
   return true;
 }
 
 FLASHMEM static bool applyInstPatchSlotCc(FmPatch &p, InstType iType, int slot, uint8_t val) {
   val &= 0x7Fu;
   if (slot >= INST_MIDI_MAP_ENGINE_SLOTS && slot < INST_MIDI_MAP_TOTAL_SLOTS) {
-    bool changed = false;
+    int instIdx = (int)(&p - &fmSynthPatch(0));
     const int genIdx = slot - INST_MIDI_MAP_ENGINE_SLOTS;
+    bool changed = false;
     switch (genIdx) {
-      case 0:  return assignU8(p.amp.amt,           val);
-      case 1:  changed = assignU8(p.amp.attack,     val); break;
-      case 2:  changed = assignU8(p.amp.decay,      val); break;
-      case 3:  changed = assignU8(p.amp.sustain,    val); break;
-      case 4:  changed = assignU8(p.amp.release,    val); break;
-      case 5:  return assignU8(p.flt.amt,           val);
-      case 6:  return assignU8(p.flt.attack,        val);
-      case 7:  return assignU8(p.flt.decay,         val);
-      case 8:  return assignU8(p.flt.sustain,       val);
-      case 9:  return assignU8(p.flt.release,       val);
+      case 0:  changed = assignU8(p.amp.amt,           val); break;
+      case 1:  changed = assignU8(p.amp.attack,        val); break;
+      case 2:  changed = assignU8(p.amp.decay,         val); break;
+      case 3:  changed = assignU8(p.amp.sustain,       val); break;
+      case 4:  changed = assignU8(p.amp.release,       val); break;
+      case 5:  changed = assignU8(p.flt.amt,           val); break;
+      case 6:  changed = assignU8(p.flt.attack,        val); break;
+      case 7:  changed = assignU8(p.flt.decay,         val); break;
+      case 8:  changed = assignU8(p.flt.sustain,       val); break;
+      case 9:  changed = assignU8(p.flt.release,       val); break;
       case 10: return assignU8(p.fx.drive,          scaleCcTo100(val));
       case 11: return assignU8(p.fx.chorus,         scaleCcTo100(val));
       case 12: return assignU8(p.fx.delay,          scaleCcTo100(val));
@@ -1460,14 +1508,12 @@ FLASHMEM static bool applyInstPatchSlotCc(FmPatch &p, InstType iType, int slot, 
         return true;
       }
       case 16: {
-        int instIdx = (int)(&p - &fmSynthPatch(0));
         uint8_t nextPct = scaleCcTo100(val);
         if (instGetTape(instIdx) == nextPct) return false;
         instSetTape(instIdx, nextPct);
         return true;
       }
       case 17: {
-        int instIdx = (int)(&p - &fmSynthPatch(0));
         uint8_t nextPct = scaleCcTo100(val);
         if (instGetComp(instIdx) == nextPct) return false;
         instSetComp(instIdx, nextPct);
@@ -1475,8 +1521,11 @@ FLASHMEM static bool applyInstPatchSlotCc(FmPatch &p, InstType iType, int slot, 
       }
       default: return false;
     }
-    if (changed && iType == InstType::SoundFont) {
-      sf2RefreshLivePatchParams((int)(&p - &fmSynthPatch(0)));
+    if (changed && genIdx <= 9) {
+      fmSynthRefreshEnvelopeRates(instIdx);
+      if (iType == InstType::SoundFont && genIdx >= 1 && genIdx <= 4) {
+        sf2RefreshLivePatchParams(instIdx);
+      }
     }
     return changed;
   }
@@ -1576,7 +1625,8 @@ FLASHMEM static bool applyInstPatchSlotCc(FmPatch &p, InstType iType, int slot, 
   }
 }
 
-FLASHMEM static void instMidiMapHandleExternalCc(uint8_t inCh1To16, uint8_t cc, uint8_t val) {
+FLASHMEM static bool instMidiMapHandleExternalCc(uint8_t inCh1To16, uint8_t cc, uint8_t val) {
+  bool matchedAny = false;
   bool anyChanged = false;
   for (int inst = 0; inst < NUM_INSTRUMENTS; inst++) {
     if ((instMappedCcMask[inst][cc >> 5] & (1u << (cc & 31))) == 0) continue;
@@ -1590,6 +1640,7 @@ FLASHMEM static void instMidiMapHandleExternalCc(uint8_t inCh1To16, uint8_t cc, 
       const MidiCcMapEntry &ent = instMap[inst][s];
       if (ent.channel == MIDI_MAP_CH_OFF || ent.cc != cc) continue;
       if (ent.channel != MIDI_MAP_CH_ALL && ent.channel != inCh1To16) continue;
+      matchedAny = true;
       if (applyInstPatchSlotCc(p, iType, s, val)) {
         anyChanged = true;
       }
@@ -1598,14 +1649,16 @@ FLASHMEM static void instMidiMapHandleExternalCc(uint8_t inCh1To16, uint8_t cc, 
   if (anyChanged) {
     instMapParamDirty = true;
   }
+  return matchedAny;
 }
 
 FLASHMEM static void instMidiMapApplyRoutedCcSlow(int instIdx, uint8_t cc, uint8_t val) {
   if (learnIgnoreActive) {
     if ((int32_t)(millis() - learnIgnoreUntilMs) < 0) {
-      return;
+      if (cc == learnIgnoreCc) return;
+    } else {
+      learnIgnoreActive = false;
     }
-    learnIgnoreActive = false;
   }
   FmPatch &p = fmSynthPatch(instIdx);
   InstType iType = (InstType)p.type;
@@ -1626,12 +1679,59 @@ FLASHMEM static void instMidiMapApplyRoutedCcSlow(int instIdx, uint8_t cc, uint8
   }
 }
 
-FLASHMEM void instMidiMapApplyRoutedCc(int instIdx, uint8_t cc, uint8_t val) {
+bool instMidiMapHasRoutedCc(int instIdx, uint8_t cc) {
+  if (instIdx < 0 || instIdx >= NUM_INSTRUMENTS) return false;
+  if (learningActive || instLearningActive) return false;
+  cc &= 0x7Fu;
+  return (instMappedCcMask[instIdx][cc >> 5] & (1u << (cc & 31))) != 0;
+}
+
+void instMidiMapApplyRoutedCc(int instIdx, uint8_t cc, uint8_t val) {
   if (instIdx < 0 || instIdx >= NUM_INSTRUMENTS) return;
   if (learningActive || instLearningActive) return;
   cc &= 0x7Fu;
+  val &= 0x7Fu;
   if ((instMappedCcMask[instIdx][cc >> 5] & (1u << (cc & 31))) == 0) return;
-  instMidiMapApplyRoutedCcSlow(instIdx, cc, val & 0x7Fu);
+
+  uint32_t irq = saveIrq();
+  uint32_t h = routedCcHead;
+  uint32_t t = routedCcTail;
+  if (h != t) {
+    volatile RoutedCcEvent &prev = routedCcRing[(h - 1u) & ROUTED_CC_RING_MASK];
+    if (prev.instIdx == (uint8_t)instIdx && prev.cc == cc) {
+      prev.val = val;
+      restoreIrq(irq);
+      return;
+    }
+  }
+  if ((h - t) < ROUTED_CC_RING_SIZE) {
+    volatile RoutedCcEvent &slot = routedCcRing[h & ROUTED_CC_RING_MASK];
+    slot.instIdx = (uint8_t)instIdx;
+    slot.cc = cc;
+    slot.val = val;
+    __asm__ volatile("" ::: "memory");
+    routedCcHead = h + 1u;
+  }
+  restoreIrq(irq);
+}
+
+FLASHMEM void instMidiMapFlushRoutedCc() {
+  while (routedCcTail != routedCcHead) {
+    uint32_t irq = saveIrq();
+    if (routedCcTail == routedCcHead) {
+      restoreIrq(irq);
+      break;
+    }
+    uint32_t t = routedCcTail;
+    const volatile RoutedCcEvent &slot = routedCcRing[t & ROUTED_CC_RING_MASK];
+    uint8_t instIdx = slot.instIdx;
+    uint8_t cc = slot.cc;
+    uint8_t val = slot.val;
+    __asm__ volatile("" ::: "memory");
+    routedCcTail = t + 1u;
+    restoreIrq(irq);
+    instMidiMapApplyRoutedCcSlow((int)instIdx, cc, val);
+  }
 }
 
 // ============================================================================

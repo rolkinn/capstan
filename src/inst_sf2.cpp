@@ -3,6 +3,7 @@
 #include "inst_sf2.h"
 #include "inst_sampler.h"
 #include "storage.h"
+#include "paged_dir_scanner.h"
 #include "ui.h"
 #include <Arduino.h>
 #include <math.h>
@@ -214,6 +215,8 @@ struct Sf2VoiceRuntime {
   volatile bool inPreRoll = false;
   volatile bool wantStream = false;
   volatile bool streamReady = false;
+  bool preRollHold = false;
+  bool choked = false;
 };
 
 // Uncached RAM1 Attack/Micro-Loop Pre-Roll buffer & hot ISR Voice Runtime State (zero-wait-state DTCM)
@@ -2988,6 +2991,7 @@ FLASHMEM void sf2InitVoiceInIsr(int voiceIdx, FmVoice &v, const FmPatch &p,
         sf2Voices[i].envDelayRem = 0u;
         sf2Voices[i].envHoldRem = 0u;
         sf2Voices[i].ampRelMul = 0.992f; // ~8 ms smooth choke fade
+        sf2Voices[i].choked = true;
       }
     }
   }
@@ -3001,6 +3005,8 @@ FLASHMEM void sf2InitVoiceInIsr(int voiceIdx, FmVoice &v, const FmPatch &p,
     sv.declickR = 0;
     sv.declickRem = 0;
   }
+  sv.choked = false;
+  sv.preRollHold = false;
   sv.prevOutL = 0;
   sv.prevOutR = 0;
   sv.voiceAge = v.age;
@@ -3139,7 +3145,11 @@ FLASHMEM void sf2ServiceStreams(bool fromCheckpoint) {
     req.sf2Path        = fullPath;
     req.sf2FileTag     = meta.fileTag;
     req.kind           = isStereo ? SharedStreamKind::Sf2StereoLink : SharedStreamKind::Sf2Mono16;
-    req.sf2LoopMode    = effectiveZoneLoopMode(z, p);
+    uint8_t streamLoopMode = effectiveZoneLoopMode(z, p);
+    if (streamLoopMode == 3u && z.loopEnd <= SF2_PREROLL_LEN) {
+      streamLoopMode = 0u;
+    }
+    req.sf2LoopMode    = streamLoopMode;
     req.dataOffsetL    = meta.hydra.smplOffset + z.sampleStart * 2u;
     req.dataOffsetR    = isStereo ? (meta.hydra.smplOffset + z.rightStart * 2u) : 0u;
     req.totalFrames    = totalF;
@@ -3206,6 +3216,8 @@ __attribute__((noinline)) static void retireSf2VoiceInIsr(FmVoice &v, Sf2VoiceRu
     }
   }
   sv.wantStream = false;
+  sv.preRollHold = false;
+  sv.choked = false;
   sv.prevOutL = 0;
   sv.prevOutR = 0;
 }
@@ -3225,7 +3237,7 @@ struct Sf2BlockPrep {
   bool userFltShaped;
 };
 
-__attribute__((noinline)) FLASHMEM static bool sf2PrepareVoiceBlock(
+__attribute__((noinline)) static bool sf2PrepareVoiceBlock(
     FmVoice &v, Sf2VoiceRuntime &sv, const Sf2Zone &z,
     const FmPatch &p, const FmInstRuntime &rt,
     const FmInstEnvRates &er,
@@ -3336,7 +3348,7 @@ __attribute__((noinline)) FLASHMEM static bool sf2PrepareVoiceBlock(
   return true;
 }
 
-__attribute__((noinline)) FLASHMEM static void sf2UpdateVoiceFilter16(
+__attribute__((noinline)) static void sf2UpdateVoiceFilter16(
     FmVoice &v, Sf2VoiceRuntime &sv, const FmInstEnvRates &er,
     bool useAdsrOverride, bool userFltShaped, int aaMaxIdx,
     float &curAlpha, float &curEffFbG) {
@@ -3415,7 +3427,17 @@ static void sf2RenderVoice(FmVoice &v, const FmPatch &p, const FmInstRuntime &rt
     const bool held = v.gate || v.sustained;
 
     if (useAdsrOverride) {
-      if (!instAdvanceVoiceEnvelopes(v)) {
+      if (sv.choked) {
+        if (userFltShaped) {
+          instAdvanceEnvelope(v.fltStage, v.fltEnv, er.fltAtkInc, er.fltDecMul, er.fltSusLvl, er.fltRelMul);
+        }
+        instAdvanceEnvelope(v.ampStage, v.ampEnv, er.ampAtkInc, er.ampDecMul, er.ampSusLvl, 0.992f);
+        if (v.ampStage == EnvStage::Idle) {
+          retireSf2VoiceInIsr(v, sv);
+          sv.declickRem = 0;
+          break;
+        }
+      } else if (!instAdvanceVoiceEnvelopes(v)) {
         retireSf2VoiceInIsr(v, sv);
         sv.declickRem = 0;
         break;
@@ -3471,76 +3493,121 @@ static void sf2RenderVoice(FmVoice &v, const FmPatch &p, const FmInstRuntime &rt
     bool holdLast = false;
     bool hitEofAfterSample = false;
 
-    if (sv.inPreRoll) {
-      const uint32_t pos = sv.preRollPos;
-      const int16_t *prL = sf2PreRoll[z.preRollSlot];
-      const bool loopInPre = (effLoop != 0u) && (held || effLoop == 1u) &&
-                             (z.loopEnd > z.loopStart) && (z.loopEnd <= SF2_PREROLL_LEN);
-      uint32_t idx1 = pos + 1u;
-      uint32_t idx2 = pos + 2u;
-      if (loopInPre && idx2 >= z.loopEnd) {
-        const uint32_t loopLen = z.loopEnd - z.loopStart;
-        if (idx1 >= z.loopEnd) {
-          idx1 = z.loopStart;
-          idx2 = (loopLen > 1u) ? (z.loopStart + 1u) : z.loopStart;
-        } else {
-          idx2 = z.loopStart;
+    if (sv.inPreRoll && sv.preRollHold) {
+      if (sv.streamReady && v.opPhase[0] < SHARED_NUM_STREAMS) {
+        SamplerStream *st = samplerStreamSlot(v.opPhase[0]);
+        if (st && st->active && st->generation == v.opPhase[1]) {
+          sv.prevL = sf2PreRoll[z.preRollSlot][SF2_PREROLL_LEN - 1u];
+          if (isStereo) sv.prevR = sf2PreRoll[z.preRollSlot + 1][SF2_PREROLL_LEN - 1u];
+          sv.inPreRoll = false;
+          sv.preRollHold = false;
+        } else if (!sv.wantStream) {
+          retireSf2VoiceInIsr(v, sv);
+          break;
         }
+      } else if (!sv.wantStream) {
+        retireSf2VoiceInIsr(v, sv);
+        break;
       }
-      y0L = prL[pos];
-      y1L = prL[idx1];
-      y2L = prL[idx2];
-      const int16_t *prR = prL;
-      if (isStereo) {
-        prR = sf2PreRoll[z.preRollSlot + 1];
-        y0R = prR[pos];
-        y1R = prR[idx1];
-        y2R = prR[idx2];
-      }
+    }
 
-      sv.fracFp += stepFp;
-      uint32_t adv = sv.fracFp >> 16;
-      sv.fracFp &= 0xFFFFu;
-
-      if (adv > 0u) {
-        uint32_t nextPos = pos + adv;
-        if (loopInPre) {
-          uint32_t loopLen = z.loopEnd - z.loopStart;
-          if (nextPos >= z.loopEnd) {
-            nextPos = z.loopStart + (nextPos - z.loopStart) % loopLen;
-          }
-          uint32_t prevIdx = (nextPos > z.loopStart) ? (nextPos - 1u) : (z.loopEnd - 1u);
-          sv.prevL = prL[prevIdx];
-          if (isStereo) sv.prevR = prR[prevIdx];
-          sv.preRollPos = nextPos;
-        } else if (sv.totalFrames <= SF2_PREROLL_LEN) {
-          if (nextPos >= sv.totalFrames) {
-            hitEofAfterSample = true;
+    if (sv.inPreRoll) {
+      if (sv.preRollHold) {
+        holdLast = true;
+      } else {
+        const uint32_t pos = sv.preRollPos;
+        const int16_t *prL = sf2PreRoll[z.preRollSlot];
+        const bool loopInPre = (effLoop != 0u) && (held || effLoop == 1u) &&
+                               (z.loopEnd > z.loopStart) && (z.loopEnd <= SF2_PREROLL_LEN);
+        uint32_t idx1 = pos + 1u;
+        uint32_t idx2 = pos + 2u;
+        if (loopInPre && idx2 >= z.loopEnd) {
+          const uint32_t loopLen = z.loopEnd - z.loopStart;
+          if (idx1 >= z.loopEnd) {
+            idx1 = z.loopStart;
+            idx2 = (loopLen > 1u) ? (z.loopStart + 1u) : z.loopStart;
           } else {
+            idx2 = z.loopStart;
+          }
+        }
+        y0L = prL[pos];
+        y1L = prL[idx1];
+        y2L = prL[idx2];
+        const int16_t *prR = prL;
+        if (isStereo) {
+          prR = sf2PreRoll[z.preRollSlot + 1];
+          y0R = prR[pos];
+          y1R = prR[idx1];
+          y2R = prR[idx2];
+        }
+
+        sv.fracFp += stepFp;
+        uint32_t adv = sv.fracFp >> 16;
+        sv.fracFp &= 0xFFFFu;
+
+        if (adv > 0u) {
+          uint32_t nextPos = pos + adv;
+          if (loopInPre) {
+            uint32_t loopLen = z.loopEnd - z.loopStart;
+            if (nextPos >= z.loopEnd) {
+              nextPos = z.loopStart + (nextPos - z.loopStart) % loopLen;
+            }
+            uint32_t prevIdx = (nextPos > z.loopStart) ? (nextPos - 1u) : (z.loopEnd - 1u);
+            sv.prevL = prL[prevIdx];
+            if (isStereo) sv.prevR = prR[prevIdx];
+            sv.preRollPos = nextPos;
+          } else if (sv.totalFrames <= SF2_PREROLL_LEN) {
+            if (nextPos >= sv.totalFrames) {
+              hitEofAfterSample = true;
+            } else {
+              sv.prevL = prL[nextPos - 1u];
+              if (isStereo) sv.prevR = prR[nextPos - 1u];
+              sv.preRollPos = nextPos;
+            }
+          } else if (nextPos < SF2_PREROLL_LEN) {
             sv.prevL = prL[nextPos - 1u];
             if (isStereo) sv.prevR = prR[nextPos - 1u];
             sv.preRollPos = nextPos;
-          }
-        } else if (nextPos < SF2_PREROLL_LEN) {
-          sv.prevL = prL[nextPos - 1u];
-          if (isStereo) sv.prevR = prR[nextPos - 1u];
-          sv.preRollPos = nextPos;
-        } else if (sv.streamReady && v.opPhase[0] < SHARED_NUM_STREAMS) {
-          SamplerStream *st = samplerStreamSlot(v.opPhase[0]);
-          if (st && st->active && st->generation == v.opPhase[1]) {
-            uint32_t over = nextPos - SF2_PREROLL_LEN;
-            sv.prevL = prL[SF2_PREROLL_LEN - 1u];
-            if (isStereo) sv.prevR = prR[SF2_PREROLL_LEN - 1u];
-            sv.inPreRoll = false;
-            uint32_t availSt = st->head - st->tail;
-            st->tail += min(over, availSt);
+          } else if (sv.streamReady && v.opPhase[0] < SHARED_NUM_STREAMS) {
+            SamplerStream *st = samplerStreamSlot(v.opPhase[0]);
+            if (st && st->active && st->generation == v.opPhase[1]) {
+              const uint32_t over = nextPos - SF2_PREROLL_LEN;
+              const uint32_t ringMask = isStereo ? (SHARED_STEREO_RING_FRAMES - 1u) : (SHARED_MONO_RING_FRAMES - 1u);
+              const uint32_t oldTail = st->tail;
+              const uint32_t availSt = st->head - oldTail;
+              const uint32_t stepOver = min(over, availSt);
+              if (stepOver > 0u) {
+                uint32_t prevIdx = oldTail + stepOver - 1u;
+                if (isStereo) {
+                  uint32_t pm = st->ring[prevIdx & ringMask];
+                  sv.prevL = (int16_t)(pm & 0xFFFFu);
+                  sv.prevR = (int16_t)(pm >> 16);
+                } else {
+                  const int16_t *mRing = reinterpret_cast<const int16_t *>(st->ring);
+                  sv.prevL = mRing[prevIdx & ringMask];
+                  sv.prevR = sv.prevL;
+                }
+              } else {
+                sv.prevL = prL[SF2_PREROLL_LEN - 1u];
+                if (isStereo) sv.prevR = prR[SF2_PREROLL_LEN - 1u];
+              }
+              sv.inPreRoll = false;
+              sv.preRollHold = false;
+              st->tail = oldTail + stepOver;
+            } else if (!sv.wantStream) {
+              hitEofAfterSample = true;
+            } else {
+              sv.preRollPos = SF2_PREROLL_LEN - 1u;
+              sv.fracFp = 0u;
+              sv.preRollHold = true;
+            }
+          } else if (!sv.wantStream) {
+            hitEofAfterSample = true;
           } else {
             sv.preRollPos = SF2_PREROLL_LEN - 1u;
+            sv.fracFp = 0u;
+            sv.preRollHold = true;
           }
-        } else if (!sv.wantStream) {
-          hitEofAfterSample = true;
-        } else {
-          sv.preRollPos = SF2_PREROLL_LEN - 1u;
         }
       }
     } else {
@@ -3871,7 +3938,7 @@ struct Sf2PoolEntry {
 static_assert(sizeof(Sf2PoolEntry) <= 64, "Sf2PoolEntry must fit in 64-byte sharedBrowserPool slot");
 
 static constexpr int MAX_SF2_BROWSER_WINDOW = 32;
-static Sf2PoolEntry *const sf2BrowserWin = reinterpret_cast<Sf2PoolEntry *>(sharedBrowserPoolBuf());
+static Sf2PoolEntry *const sf2BrowserWin = reinterpret_cast<Sf2PoolEntry *>(sharedBrowserPool);
 static Sf2BrowserMode sf2BrMode = Sf2BrowserMode::Closed;
 static int sf2BrInstIdx = 0;
 static int sf2BrTotalCount = 0;
@@ -3888,149 +3955,27 @@ FLASHMEM static bool hasSf2Extension(const char *name) {
   return strcasecmp(name + len - 4, ".sf2") == 0;
 }
 
-static inline bool sf2EntryLess(const Sf2PoolEntry &a, const Sf2PoolEntry &b, bool presetMode) {
-  if (presetMode) {
-    return phdrItemLess(a.bank, a.preset, a.phdrIdx, b.bank, b.preset, b.phdrIdx);
-  }
-  bool aParent = (a.isDir != 0) && (strcmp(a.name, "..") == 0);
-  bool bParent = (b.isDir != 0) && (strcmp(b.name, "..") == 0);
-  if (aParent != bParent) return aParent;
-  if ((a.isDir != 0) != (b.isDir != 0)) return a.isDir != 0;
-  int cmp = strcasecmp(a.name, b.name);
-  if (cmp != 0) return cmp < 0;
-  return strcmp(a.name, b.name) < 0;
+FLASHMEM static bool acceptSf2BrowserFile(const char *name, uint64_t) {
+  return hasSf2Extension(name);
 }
 
-FLASHMEM static void insertSf2Smallest(Sf2PoolEntry *arr, int &count, int cap,
-                                       const Sf2PoolEntry &item, bool presetMode) {
-  if (cap <= 0) return;
-  if (count >= cap && !sf2EntryLess(item, arr[cap - 1], presetMode)) return;
-  int ins = (count < cap) ? count++ : (cap - 1);
-  while (ins > 0 && sf2EntryLess(item, arr[ins - 1], presetMode)) {
-    arr[ins] = arr[ins - 1];
-    ins--;
-  }
-  arr[ins] = item;
-}
-
-FLASHMEM static void insertSf2Largest(Sf2PoolEntry *arr, int &count, int cap,
-                                      const Sf2PoolEntry &item, bool presetMode) {
-  if (cap <= 0) return;
-  if (count >= cap && !sf2EntryLess(arr[0], item, presetMode)) return;
-  if (count < cap) {
-    int ins = count++;
-    while (ins > 0 && sf2EntryLess(item, arr[ins - 1], presetMode)) {
-      arr[ins] = arr[ins - 1];
-      ins--;
-    }
-    arr[ins] = item;
-  } else {
-    int ins = 0;
-    while (ins + 1 < cap && sf2EntryLess(arr[ins + 1], item, presetMode)) {
-      arr[ins] = arr[ins + 1];
-      ins++;
-    }
-    arr[ins] = item;
-  }
+static inline bool sf2PresetEntryLess(const Sf2PoolEntry &a, const Sf2PoolEntry &b) {
+  return phdrItemLess(a.bank, a.preset, a.phdrIdx, b.bank, b.preset, b.phdrIdx);
 }
 
 FLASHMEM static void scanSf2FileWindow(const Sf2PoolEntry *pivot, int pivotIdx, int wantStart,
                                        const char *matchFile = nullptr, int *outMatchIdx = nullptr,
                                        Sf2PoolEntry *outMatchEntry = nullptr) {
-  if (outMatchIdx) *outMatchIdx = -1;
   if (!SD.sdfs.exists(ROOT_DIR)) SD.sdfs.mkdir(ROOT_DIR);
   if (!SD.sdfs.exists(SOUNDFONTS_DIR)) SD.sdfs.mkdir(SOUNDFONTS_DIR);
   if (!SD.sdfs.exists(sf2BrDir)) {
     snprintf(sf2BrDir, sizeof(sf2BrDir), "%s", SOUNDFONTS_DIR);
   }
-
-  Sf2PoolEntry pivotCopy{};
-  const bool usePivot = (pivot != nullptr);
-  int pOff = 0, leftCap = 0, rightCap = MAX_SF2_BROWSER_WINDOW;
-  int leftCount = 0, rightCount = 0, totalCount = 0;
-  if (usePivot) {
-    pivotCopy = *pivot;
-    pOff = constrain(pivotIdx - wantStart, 0, MAX_SF2_BROWSER_WINDOW - 1);
-    leftCap = pOff;
-    rightCap = (MAX_SF2_BROWSER_WINDOW - 1) - pOff;
-  }
-
-  Sf2PoolEntry matchTarget{};
-  const bool hasMatch = (matchFile != nullptr && matchFile[0] != '\0' &&
-                         strlen(matchFile) < sizeof(matchTarget.name));
-  int matchRank = 0;
-  bool matchFound = false;
-  if (hasMatch) {
-    snprintf(matchTarget.name, sizeof(matchTarget.name), "%s", matchFile);
-    matchTarget.isDir = 0;
-  }
-
-  auto considerItem = [&](const Sf2PoolEntry &item) FLASHMEM {
-    totalCount++;
-    if (hasMatch) {
-      if (!item.isDir && strcasecmp(item.name, matchTarget.name) == 0) {
-        matchFound = true;
-        if (outMatchEntry) *outMatchEntry = item;
-      } else if (sf2EntryLess(item, matchTarget, false)) {
-        matchRank++;
-      }
-    }
-    if (!usePivot) {
-      insertSf2Smallest(sf2BrowserWin, rightCount, rightCap, item, false);
-    } else if (sf2EntryLess(item, pivotCopy, false)) {
-      insertSf2Largest(sf2BrowserWin, leftCount, leftCap, item, false);
-    } else if (sf2EntryLess(pivotCopy, item, false)) {
-      insertSf2Smallest(&sf2BrowserWin[pOff + 1], rightCount, rightCap, item, false);
-    }
-  };
-
-  if (strcmp(sf2BrDir, "/") != 0) {
-    Sf2PoolEntry parentItem{};
-    snprintf(parentItem.name, sizeof(parentItem.name), "..");
-    parentItem.isDir = 1;
-    considerItem(parentItem);
-  }
-
-  FsFile dir = SD.sdfs.open(sf2BrDir, O_RDONLY);
-  if (dir.isOpen() && dir.isDir()) {
-    FsFile entry;
-    while (entry.openNext(&dir, O_RDONLY)) {
-      char nameBuf[64] = {};
-      entry.getName(nameBuf, sizeof(nameBuf));
-      bool isSubDir = entry.isDir();
-      bool isHidden = entry.isHidden() || (nameBuf[0] == '.') ||
-                      (strcasecmp(nameBuf, "System Volume Information") == 0);
-      entry.close();
-
-      if (isHidden || nameBuf[0] == '\0') continue;
-      if (!isSubDir && !hasSf2Extension(nameBuf)) continue;
-      if (strlen(nameBuf) >= sizeof(sf2BrowserWin[0].name)) continue;
-
-      Sf2PoolEntry item{};
-      snprintf(item.name, sizeof(item.name), "%s", nameBuf);
-      item.isDir = isSubDir ? 1 : 0;
-      considerItem(item);
-      keepStreaming();
-    }
-  }
-  if (dir.isOpen()) dir.close();
-
-  sf2BrTotalCount = totalCount;
-  if (!usePivot) {
-    sf2BrWinStart = 0;
-    sf2BrWinCount = rightCount;
-  } else {
-    sf2BrowserWin[leftCount] = pivotCopy;
-    if (leftCount < pOff && rightCount > 0) {
-      memmove(&sf2BrowserWin[leftCount + 1], &sf2BrowserWin[pOff + 1],
-              (size_t)rightCount * sizeof(Sf2PoolEntry));
-    }
-    sf2BrWinStart = max(0, pivotIdx - leftCount);
-    sf2BrWinCount = leftCount + 1 + rightCount;
-  }
-  if (matchFound && outMatchIdx) {
-    *outMatchIdx = matchRank;
-  }
+  pagedScanDirWindow<Sf2PoolEntry>(
+      sf2BrDir, sf2BrowserWin, MAX_SF2_BROWSER_WINDOW,
+      sf2BrTotalCount, sf2BrWinStart, sf2BrWinCount,
+      acceptSf2BrowserFile, pivot, pivotIdx, wantStart,
+      matchFile, outMatchIdx, outMatchEntry);
 }
 
 FLASHMEM static void scanSf2PresetWindow(const Sf2PoolEntry *pivot, int pivotIdx, int wantStart,
@@ -4099,11 +4044,11 @@ FLASHMEM static void scanSf2PresetWindow(const Sf2PoolEntry *pivot, int pivotIdx
         }
       }
       if (!usePivot) {
-        insertSf2Smallest(sf2BrowserWin, rightCount, rightCap, item, true);
-      } else if (sf2EntryLess(item, pivotCopy, true)) {
-        insertSf2Largest(sf2BrowserWin, leftCount, leftCap, item, true);
-      } else if (sf2EntryLess(pivotCopy, item, true)) {
-        insertSf2Smallest(&sf2BrowserWin[pOff + 1], rightCount, rightCap, item, true);
+        pagedInsertSmallest(sf2BrowserWin, rightCount, rightCap, item, sf2PresetEntryLess);
+      } else if (sf2PresetEntryLess(item, pivotCopy)) {
+        pagedInsertLargest(sf2BrowserWin, leftCount, leftCap, item, sf2PresetEntryLess);
+      } else if (sf2PresetEntryLess(pivotCopy, item)) {
+        pagedInsertSmallest(&sf2BrowserWin[pOff + 1], rightCount, rightCap, item, sf2PresetEntryLess);
       }
     }
     keepStreaming();
@@ -4134,60 +4079,22 @@ FLASHMEM static void scanSf2PresetWindow(const Sf2PoolEntry *pivot, int pivotIdx
 
   f.close();
 
-  sf2BrTotalCount = totalCount;
-  if (!usePivot) {
-    sf2BrWinStart = 0;
-    sf2BrWinCount = rightCount;
+  pagedFinalizeWindow(sf2BrowserWin, usePivot, pivotCopy, pivotIdx, pOff, leftCount, rightCount,
+                      totalCount, sf2BrTotalCount, sf2BrWinStart, sf2BrWinCount);
+}
+
+FLASHMEM static void rescanSf2BrowserWindow(const Sf2PoolEntry *pivot, int pivotIdx, int wantStart) {
+  if (sf2BrMode == Sf2BrowserMode::PresetList) {
+    scanSf2PresetWindow(pivot, pivotIdx, wantStart);
   } else {
-    sf2BrowserWin[leftCount] = pivotCopy;
-    if (leftCount < pOff && rightCount > 0) {
-      memmove(&sf2BrowserWin[leftCount + 1], &sf2BrowserWin[pOff + 1],
-              (size_t)rightCount * sizeof(Sf2PoolEntry));
-    }
-    sf2BrWinStart = max(0, pivotIdx - leftCount);
-    sf2BrWinCount = leftCount + 1 + rightCount;
+    scanSf2FileWindow(pivot, pivotIdx, wantStart);
   }
 }
 
 FLASHMEM static void syncSf2BrowserScroll() {
-  if (sf2BrTotalCount <= 0) {
-    sf2BrCursor = 0;
-    sf2BrScroll = 0;
-    sf2BrWinStart = 0;
-    sf2BrWinCount = 0;
-    return;
-  }
-  sf2BrCursor = constrain(sf2BrCursor, 0, sf2BrTotalCount - 1);
-  if (sf2BrCursor < sf2BrScroll) {
-    sf2BrScroll = sf2BrCursor;
-  } else if (sf2BrCursor >= sf2BrScroll + SF2_BROWSER_VISIBLE_ROWS) {
-    sf2BrScroll = sf2BrCursor - SF2_BROWSER_VISIBLE_ROWS + 1;
-  }
-  int maxScroll = max(0, sf2BrTotalCount - SF2_BROWSER_VISIBLE_ROWS);
-  sf2BrScroll = constrain(sf2BrScroll, 0, maxScroll);
-
-  int visEnd = min(sf2BrTotalCount - 1, sf2BrScroll + SF2_BROWSER_VISIBLE_ROWS - 1);
-  if (sf2BrScroll < sf2BrWinStart || visEnd >= sf2BrWinStart + sf2BrWinCount) {
-    int maxWinStart = max(0, sf2BrTotalCount - MAX_SF2_BROWSER_WINDOW);
-    int wantStart = constrain(sf2BrScroll - 12, 0, maxWinStart);
-    const bool presetMode = (sf2BrMode == Sf2BrowserMode::PresetList);
-    if (wantStart == 0) {
-      if (presetMode) scanSf2PresetWindow(nullptr, 0, 0);
-      else            scanSf2FileWindow(nullptr, 0, 0);
-    } else {
-      int overlapLo = max(sf2BrWinStart, wantStart);
-      int overlapHi = min(sf2BrWinStart + sf2BrWinCount - 1, wantStart + MAX_SF2_BROWSER_WINDOW - 1);
-      if (sf2BrWinCount > 0 && overlapLo <= overlapHi) {
-        int pivotIdx = (wantStart < sf2BrWinStart) ? overlapHi : overlapLo;
-        Sf2PoolEntry pivot = sf2BrowserWin[pivotIdx - sf2BrWinStart];
-        if (presetMode) scanSf2PresetWindow(&pivot, pivotIdx, wantStart);
-        else            scanSf2FileWindow(&pivot, pivotIdx, wantStart);
-      } else {
-        if (presetMode) scanSf2PresetWindow(nullptr, 0, 0);
-        else            scanSf2FileWindow(nullptr, 0, 0);
-      }
-    }
-  }
+  pagedSyncWindowScroll(sf2BrTotalCount, SF2_BROWSER_VISIBLE_ROWS, MAX_SF2_BROWSER_WINDOW,
+                        sf2BrCursor, sf2BrScroll, sf2BrWinStart, sf2BrWinCount,
+                        sf2BrowserWin, rescanSf2BrowserWindow);
 }
 
 FLASHMEM bool isSf2BrowserOpen() {
@@ -4362,22 +4269,10 @@ FLASHMEM bool sf2BrowserConfirm() {
 
   // FileSelect mode
   if (ent.isDir) {
-    if (strcmp(ent.name, "..") == 0) {
-      char *lastSlash = strrchr(sf2BrDir, '/');
-      if (!lastSlash || lastSlash == sf2BrDir) {
-        snprintf(sf2BrDir, sizeof(sf2BrDir), "/");
-      } else {
-        *lastSlash = '\0';
-      }
-    } else {
-      char nextDir[SAMPLER_DIR_MAX];
-      if (strcmp(sf2BrDir, "/") == 0) {
-        snprintf(nextDir, sizeof(nextDir), "/%.42s", ent.name);
-      } else {
-        snprintf(nextDir, sizeof(nextDir), "%.51s/%.42s", sf2BrDir, ent.name);
-      }
-      snprintf(sf2BrDir, sizeof(sf2BrDir), "%s", nextDir);
-    }
+    char entName[sizeof(ent.name)];
+    memcpy(entName, ent.name, sizeof(entName));
+    entName[sizeof(entName) - 1] = '\0';
+    if (!pagedStepBrowserDir(sf2BrDir, sizeof(sf2BrDir), entName)) return false;
     sf2BrCursor = 0;
     sf2BrScroll = 0;
     scanSf2FileWindow(nullptr, 0, 0);
@@ -4535,7 +4430,7 @@ PROGMEM static const InstEngineOps SF2_ENGINE_OPS = {
   sf2RenderVoice
 };
 
-FLASHMEM const InstEngineOps &instSoundFontEngine() {
+const InstEngineOps &instSoundFontEngine() {
   return SF2_ENGINE_OPS;
 }
 

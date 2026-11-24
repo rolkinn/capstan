@@ -332,7 +332,7 @@ static void rx_event(transfer_t *t)
 				rx_ring[head % RX_RING] = src[k];
 				head++;
 			}
-			__asm__ volatile("" ::: "memory");
+			__asm__ volatile("dmb" ::: "memory");
 			rx_head = head;
 		}
 	}
@@ -587,6 +587,8 @@ int usb_audio_rx_block(uint32_t *frames)
 		if (fill >= RX_RECENTER_HIGH) {
 			// Burst overrun guard: re-center to RX_MARK instead of pinning against RX_RING
 			tail = head - RX_MARK;
+			rx_tail = tail;
+			__asm__ volatile("dmb" ::: "memory");
 			fill = RX_MARK;
 			rx_fill = (float)RX_MARK;
 		} else {
@@ -630,11 +632,12 @@ int usb_audio_rx_block(uint32_t *frames)
 	}
 
 	rx_prev_frame = frames[AUDIO_BLOCK_SAMPLES - 1];
-	__asm__ volatile("" ::: "memory");
+	__asm__ volatile("dmb" ::: "memory");
 	rx_tail = tail + consumed;
 	return 1;
 }
 
+#if defined(CAPSTAN_DEBUG) && CAPSTAN_DEBUG
 FLASHMEM void usb_audio_l7_get_stats(struct usb_audio_l7_stats *s)
 {
 	s->txUnderruns = tx_underruns;
@@ -646,5 +649,6 @@ FLASHMEM void usb_audio_l7_get_stats(struct usb_audio_l7_stats *s)
 	s->txRate = tx_rate;
 	s->rxRate = rx_rate;
 }
+#endif
 
 #endif

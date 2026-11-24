@@ -78,7 +78,7 @@ static inline uint16_t absSample16(int16_t s) {
   return (uint16_t)(v > 32767 ? 32767 : v);
 }
 
-FLASHMEM void tunerPushStereo16(const int16_t *inL, const int16_t *inR, int numFrames) {
+void tunerPushStereo16(const int16_t *inL, const int16_t *inR, int numFrames) {
   uint32_t w = tunerWriteHead;
   int16_t prev = tunerPrevM1;
   uint16_t pk = tunerBlockPeak;
@@ -101,7 +101,7 @@ FLASHMEM void tunerPushStereo16(const int16_t *inL, const int16_t *inR, int numF
   tunerBlockPeak = pk;
 }
 
-FLASHMEM void tunerPushPackedStereo16(const uint32_t *packedLR, int numFrames) {
+void tunerPushPackedStereo16(const uint32_t *packedLR, int numFrames) {
   uint32_t w = tunerWriteHead;
   int16_t prev = tunerPrevM1;
   uint16_t pk = tunerBlockPeak;
@@ -126,7 +126,7 @@ FLASHMEM void tunerPushPackedStereo16(const uint32_t *packedLR, int numFrames) {
   tunerBlockPeak = pk;
 }
 
-FLASHMEM void tunerPushStereo32(const int32_t *inL, const int32_t *inR, int numFrames) {
+void tunerPushStereo32(const int32_t *inL, const int32_t *inR, int numFrames) {
   uint32_t w = tunerWriteHead;
   int16_t prev = tunerPrevM1;
   uint16_t pk = tunerBlockPeak;
@@ -149,7 +149,7 @@ FLASHMEM void tunerPushStereo32(const int32_t *inL, const int32_t *inR, int numF
   tunerBlockPeak = pk;
 }
 
-FLASHMEM void tunerPushMono16(const int16_t *mono, int numFrames) {
+void tunerPushMono16(const int16_t *mono, int numFrames) {
   uint32_t w = tunerWriteHead;
   int16_t prev = tunerPrevM1;
   uint16_t pk = tunerBlockPeak;
@@ -172,7 +172,7 @@ FLASHMEM void tunerPushMono16(const int16_t *mono, int numFrames) {
   tunerBlockPeak = pk;
 }
 
-FLASHMEM void tunerPushSilenceBlock(int numFrames) {
+void tunerPushSilenceBlock(int numFrames) {
   uint32_t w = tunerWriteHead;
   int16_t prev = tunerPrevM1;
   const int pairs = numFrames >> 1;
@@ -301,39 +301,46 @@ FLASHMEM static void updateLockedNoteAndCents(float hz) {
   }
   lockedMidiNote = (int8_t)candMidi;
   float c = (midiFloat - (float)candMidi) * 100.0f;
-  smoothCents = constrain(c, -50.0f, 50.0f);
+  smoothCents = constrain(c, -54.0f, 54.0f);
 }
 
 FLASHMEM static void runYinDetectStep() {
-  int16_t rawSnap[TUNER_SNAP_LEN];
-  uint32_t headSnap = tunerWriteHead;
-  uint32_t startPos = headSnap - (uint32_t)TUNER_SNAP_LEN;
-  for (int i = 0; i < TUNER_SNAP_LEN; i++) {
-    rawSnap[i] = tunerRing[(startPos + (uint32_t)i) & TUNER_RING_MASK];
-  }
-
-  // Compute mean over recent 1024 samples for DC removal, plus RMS & peak for gate
-  int64_t sumRaw = 0;
+  float x[TUNER_SNAP_LEN];
   constexpr int GATE_WIN = 1024;
   const int gateStart = TUNER_SNAP_LEN - GATE_WIN;
-  for (int i = gateStart; i < TUNER_SNAP_LEN; i++) {
-    sumRaw += rawSnap[i];
+  int64_t sumRaw = 0;
+  bool snapOk = false;
+  for (int attempt = 0; attempt < 2; attempt++) {
+    uint32_t headSnap = tunerWriteHead;
+    __asm__ volatile("" ::: "memory");
+    uint32_t startPos = headSnap - (uint32_t)TUNER_SNAP_LEN;
+    sumRaw = 0;
+    for (int i = 0; i < TUNER_SNAP_LEN; i++) {
+      int16_t s = tunerRing[(startPos + (uint32_t)i) & TUNER_RING_MASK];
+      x[i] = (float)s;
+      if (i >= gateStart) sumRaw += s;
+    }
+    __asm__ volatile("" ::: "memory");
+    if ((uint32_t)(tunerWriteHead - headSnap) <= (TUNER_RING_SAMPLES - (uint32_t)TUNER_SNAP_LEN)) {
+      snapOk = true;
+      break;
+    }
   }
+  if (!snapOk) return;
+
+  // Compute mean over recent 1024 samples for DC removal, plus RMS & peak for gate
   const float mean = (float)sumRaw * (1.0f / (float)GATE_WIN);
   const float invScale = 1.0f / 32768.0f;
-
-  float x[TUNER_SNAP_LEN];
-  for (int i = 0; i < TUNER_SNAP_LEN; i++) {
-    x[i] = ((float)rawSnap[i] - mean) * invScale;
-  }
-
   float energy = 0.0f;
   float peak = 0.0f;
-  for (int i = gateStart; i < TUNER_SNAP_LEN; i++) {
-    float v = x[i];
-    energy += v * v;
-    float av = fabsf(v);
-    if (av > peak) peak = av;
+  for (int i = 0; i < TUNER_SNAP_LEN; i++) {
+    float v = (x[i] - mean) * invScale;
+    x[i] = v;
+    if (i >= gateStart) {
+      energy += v * v;
+      float av = fabsf(v);
+      if (av > peak) peak = av;
+    }
   }
   const float rms = sqrtf(energy * (1.0f / (float)GATE_WIN));
 
@@ -348,34 +355,36 @@ FLASHMEM static void runYinDetectStep() {
     return;
   }
 
-  // 1. High/Mid Band YIN @ 22,050 Hz (tau = 1 .. YIN_HI_TAU_MAX + 2, recent window)
-  constexpr int HI_MAX_EVAL = YIN_HI_TAU_MAX + 2;
-  const int hiStart = TUNER_SNAP_LEN - (YIN_HI_WIN + HI_MAX_EVAL + 2);
-  float dHi[HI_MAX_EVAL + 1];
-  float cmndHi[HI_MAX_EVAL + 1];
-  dHi[0] = 0.0f;
-  cmndHi[0] = 1.0f;
-  float runSumHi = 0.0f;
-  for (int tau = 1; tau <= HI_MAX_EVAL; tau++) {
-    float df = evalFullDiff(x, hiStart, YIN_HI_WIN, tau);
-    dHi[tau] = df;
-    runSumHi += df;
-    cmndHi[tau] = (runSumHi > 1e-12f) ? (df * (float)tau / runSumHi) : 1.0f;
-  }
-
   int bestTauFull = -1;
   float bestLagFrac = 0.0f;
   float bestCmnd = 1.0f;
 
-  for (int tau = YIN_HI_TAU_MIN; tau <= YIN_HI_TAU_MAX; tau++) {
-    if (cmndHi[tau] < 0.14f) {
-      while (tau + 1 <= YIN_HI_TAU_MAX && cmndHi[tau + 1] <= cmndHi[tau]) {
-        tau++;
+  // 1. High/Mid Band YIN @ 22,050 Hz (tau = 1 .. YIN_HI_TAU_MAX + 2, recent window)
+  {
+    constexpr int HI_MAX_EVAL = YIN_HI_TAU_MAX + 2;
+    const int hiStart = TUNER_SNAP_LEN - (YIN_HI_WIN + HI_MAX_EVAL + 2);
+    float dHi[HI_MAX_EVAL + 1];
+    float cmndHi[HI_MAX_EVAL + 1];
+    dHi[0] = 0.0f;
+    cmndHi[0] = 1.0f;
+    float runSumHi = 0.0f;
+    for (int tau = 1; tau <= HI_MAX_EVAL; tau++) {
+      float df = evalFullDiff(x, hiStart, YIN_HI_WIN, tau);
+      dHi[tau] = df;
+      runSumHi += df;
+      cmndHi[tau] = (runSumHi > 1e-12f) ? (df * (float)tau / runSumHi) : 1.0f;
+    }
+
+    for (int tau = YIN_HI_TAU_MIN; tau <= YIN_HI_TAU_MAX; tau++) {
+      if (cmndHi[tau] < 0.14f) {
+        while (tau + 1 <= YIN_HI_TAU_MAX && cmndHi[tau + 1] <= cmndHi[tau]) {
+          tau++;
+        }
+        bestTauFull = tau;
+        bestCmnd = cmndHi[tau];
+        bestLagFrac = parabolicRefineLag(dHi[tau - 1], dHi[tau], dHi[tau + 1], tau);
+        break;
       }
-      bestTauFull = tau;
-      bestCmnd = cmndHi[tau];
-      bestLagFrac = parabolicRefineLag(dHi[tau - 1], dHi[tau], dHi[tau + 1], tau);
-      break;
     }
   }
 
@@ -463,8 +472,13 @@ FLASHMEM static void runYinDetectStep() {
   const float fsDec = 0.5f * (float)AUDIO_SAMPLE_RATE_EXACT;
   const float detectedHz = fsDec / bestLagFrac;
   if (detectedHz < 26.0f || detectedHz > 2800.0f) {
-    if (holdTicksLeft > 0) holdTicksLeft--;
-    else pitchLocked = false;
+    if (holdTicksLeft > 0) {
+      holdTicksLeft--;
+    } else {
+      pitchLocked    = false;
+      rawHzCount     = 0;
+      lockedMidiNote = -1;
+    }
     return;
   }
 

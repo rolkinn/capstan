@@ -751,7 +751,7 @@ PROGMEM static const InstEngineOps NOISEDRONE_ENGINE_OPS = {
   noiseDroneRenderVoice
 };
 
-FLASHMEM const InstEngineOps &instNoiseDroneEngine() {
+const InstEngineOps &instNoiseDroneEngine() {
   return NOISEDRONE_ENGINE_OPS;
 }
 

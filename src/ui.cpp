@@ -40,6 +40,10 @@ uint16_t cellBuf[CELL_BUF_MAX];
 // Shared header, transport, and modal keyboard state caches
 static uint64_t prevHeaderKey = 0;
 static uint64_t prevHeaderTagKey = 0;
+static int16_t prevHeaderMidX = -1;
+static int16_t prevHeaderSubX0 = 0;
+static int16_t prevHeaderSubX1 = 0;
+static bool prevHeaderWasPlain = false;
 static TransportMode lastHeaderTm = TransportMode::Stopped;
 static bool lastHeaderArmed = false;
 static int lastBatteryPct = -2;
@@ -64,7 +68,11 @@ FLASHMEM bool uiTierDue(uint8_t periodTicks) {
 }
 
 FLASHMEM uint8_t uiTimelineRrSlot() {
+#if defined(ARDUINO_TEENSY_MICROMOD)
+  return (uint8_t)(uiFramePhase & 3u);
+#else
   return (uint8_t)(uiFramePhase & 1u);
+#endif
 }
 
 FLASHMEM void computeTimelineFrameCtx(TimelineFrameCtx &ctx, int innerW, int playCol) {
@@ -74,6 +82,11 @@ FLASHMEM void computeTimelineFrameCtx(TimelineFrameCtx &ctx, int innerW, int pla
   ctx.winFrames = timelineWindowFrames(ctx.zoom, bpm);
   ctx.halfWinFrames = ctx.winFrames / 2u;
   ctx.scrollStep = (uint32_t)(((uint64_t)transport.tapeFrame * (uint64_t)innerW) / max(1u, ctx.winFrames));
+#if defined(ARDUINO_TEENSY_MICROMOD)
+  if (transport.mode == looper::TransportMode::Running) {
+    ctx.scrollStep >>= 1;
+  }
+#endif
   ctx.curTick = framesToMidiTicks((uint32_t)ctx.curFrame, bpm);
   ctx.windowTicks = max((int64_t)1, (int64_t)framesToMidiTicks(ctx.winFrames, bpm));
   int64_t winStartF = max((int64_t)0, ctx.curFrame - (int64_t)ctx.halfWinFrames);
@@ -117,6 +130,10 @@ FLASHMEM void invalidateAllPagesCache() {
 FLASHMEM static void invalidateUiCache() {
   prevHeaderKey = 0;
   prevHeaderTagKey = 0;
+  prevHeaderMidX = -1;
+  prevHeaderSubX0 = 0;
+  prevHeaderSubX1 = 0;
+  prevHeaderWasPlain = false;
   prevStripKey = 0;
   prevInOutMeterKey = 0;
   memset(prevBtnKey, 0, sizeof(prevBtnKey));
@@ -203,25 +220,25 @@ FLASHMEM void drawBatteryIcon(bool all, uint16_t ink, uint16_t ground) {
 // Row 2: [AUDIO] [MIDI] [INSTR] [TYPE/EDIT]
 // Row 3: [MASTER]
 FLASHMEM static void drawPageMap(int x, int y, Page active) {
-  auto &t = board.tft();
-  t.fillRect(x, y, SX(28), SY(18), PANEL);
+  const int w = SX(28), h = SY(18);
   const int nw = SX(5), nh = SY(4);
-  auto node = [&](int nx, int ny, bool isActive) {
-    t.fillRect(nx, ny, nw, nh, isActive ? ACCENT : DIM);
-  };
+  Surface s(w, h);
+  s.fillRect(0, 0, w, h, PANEL);
+
   // Row 1 (top): SYSTEM, SONG, MAIN
-  node(x + SX(1),  y + SY(1),  active == Page::SystemSettings);
-  node(x + SX(8),  y + SY(1),  active == Page::SongSettings);
-  node(x + SX(15), y + SY(1),  active == Page::Main);
+  s.fillRect(SX(1),  SY(1),  nw, nh, (active == Page::SystemSettings) ? ACCENT : DIM);
+  s.fillRect(SX(8),  SY(1),  nw, nh, (active == Page::SongSettings)   ? ACCENT : DIM);
+  s.fillRect(SX(15), SY(1),  nw, nh, (active == Page::Main)           ? ACCENT : DIM);
 
   // Row 2 (middle): AUDIO, MIDI, INST, TYPE/EDIT
-  node(x + SX(1),  y + SY(7),  active == Page::Audio);
-  node(x + SX(8),  y + SY(7),  active == Page::Midi);
-  node(x + SX(15), y + SY(7),  active == Page::Instruments);
-  node(x + SX(22), y + SY(7),  active == Page::InstrumentType || active == Page::InstrumentEdit);
+  s.fillRect(SX(1),  SY(7),  nw, nh, (active == Page::Audio)          ? ACCENT : DIM);
+  s.fillRect(SX(8),  SY(7),  nw, nh, (active == Page::Midi)           ? ACCENT : DIM);
+  s.fillRect(SX(15), SY(7),  nw, nh, (active == Page::Instruments)    ? ACCENT : DIM);
+  s.fillRect(SX(22), SY(7),  nw, nh, (active == Page::InstrumentType || active == Page::InstrumentEdit) ? ACCENT : DIM);
 
   // Row 3 (bottom): MASTER FX
-  node(x + SX(1),  y + SY(13), active == Page::Master);
+  s.fillRect(SX(1),  SY(13), nw, nh, (active == Page::Master)         ? ACCENT : DIM);
+  s.blit(x, y);
 }
 
 // Top Header Bar: Page title, Playhead MM:SS.mmm + Bar.Beat, Page map, Battery
@@ -248,6 +265,8 @@ FLASHMEM static void drawHeaderBar(bool full) {
     drawBatteryIcon(true, LIGHT, PANEL);
     prevHeaderKey = 0;
     prevHeaderTagKey = 0;
+    prevHeaderMidX = -1;
+    prevHeaderWasPlain = false;
   } else {
     drawBatteryIcon(false, LIGHT, PANEL);
   }
@@ -258,6 +277,8 @@ FLASHMEM static void drawHeaderBar(bool full) {
     toastMsg[0] = '\0';
     prevHeaderKey = 0;
     prevHeaderTagKey = 0;
+    prevHeaderMidX = -1;
+    prevHeaderWasPlain = false;
     Surface clearS(midW, boxH);
     clearS.fillRect(0, 0, midW, boxH, PANEL);
     clearS.blit(midX, boxY);
@@ -277,6 +298,7 @@ FLASHMEM static void drawHeaderBar(bool full) {
     uint64_t hk = hashMix(hashStr(hashInit(), toastMsg), 1);
     if (hk != prevHeaderKey) {
       prevHeaderKey = hk;
+      prevHeaderWasPlain = false;
       Surface s(midW, boxH);
       s.fillRect(0, 0, midW, boxH, PANEL);
       int msgW = textWidth(toastMsg);
@@ -334,66 +356,85 @@ FLASHMEM static void drawHeaderBar(bool full) {
   hk = hashMix(hk, (uint64_t)(selField + 2) | ((uint64_t)(optHlField + 2) << 4) | ((uint64_t)pageAccent << 8));
   if (hk != prevHeaderKey) {
     prevHeaderKey = hk;
-    Surface s(midW, boxH);
-    s.fillRect(0, 0, midW, boxH, PANEL);
     int cw = textWidth(combined);
     int refW = isStatusMsg ? cw : textWidth("00:00.000 001.4.8.16.32");
     int targetX = (SX(66) + SX(198) / 2) - midX - refW / 2;
     int tx = constrain(targetX, SX(2), max(SX(2), midW - cw - SX(2)));
+    const bool isPlain = isStatusMsg || (selField < 0 && optHlField < 0);
+    const int curX0 = tx;
+    const int curX1 = min(midW, tx + cw);
 
-    if (isStatusMsg || (selField < 0 && optHlField < 0)) {
-      s.drawText(tx, TY(boxH), combined, c);
+    if (!full && isPlain && prevHeaderWasPlain && prevHeaderMidX == midX &&
+        prevHeaderSubX1 > prevHeaderSubX0 && curX1 > curX0) {
+      int uX0 = min(curX0, (int)prevHeaderSubX0);
+      int uX1 = max(curX1, (int)prevHeaderSubX1);
+      int uW = uX1 - uX0;
+      Surface s(uW, FONT_H);
+      s.fillRect(0, 0, uW, FONT_H, PANEL);
+      s.drawText(curX0 - uX0, 0, combined, c);
+      s.blit(midX + uX0, boxY + TY(boxH));
     } else {
-      uint32_t totalMs = (uint32_t)(((uint64_t)tf * 1000 + SAMPLE_RATE_HZ / 2) / SAMPLE_RATE_HZ);
-      uint32_t totalSec = totalMs / 1000;
-      uint32_t ms = totalMs % 1000;
-      uint32_t mm = totalSec / 60;
-      uint32_t ss = totalSec % 60;
+      Surface s(midW, boxH);
+      s.fillRect(0, 0, midW, boxH, PANEL);
 
-      int64_t total32nds = framesTo32nds(tf, bpm);
-      constexpr int32_t SUB32_PER_BAR = BEATS_PER_BAR * 8;
-      int32_t bar = (int32_t)(total32nds / SUB32_PER_BAR) + 1;
-      int32_t sub32InBar = (int32_t)(total32nds % SUB32_PER_BAR);
-      int32_t beatInBar = (sub32InBar / 8) + 1;
-      int32_t eighthInBar = (sub32InBar / 4) + 1;
-      int32_t sixteenthInBar = (sub32InBar / 2) + 1;
-      int32_t thirtySecondInBar = sub32InBar + 1;
+      if (isPlain) {
+        s.drawText(tx, TY(boxH), combined, c);
+      } else {
+        uint32_t totalMs = (uint32_t)(((uint64_t)tf * 1000 + SAMPLE_RATE_HZ / 2) / SAMPLE_RATE_HZ);
+        uint32_t totalSec = totalMs / 1000;
+        uint32_t ms = totalMs % 1000;
+        uint32_t mm = totalSec / 60;
+        uint32_t ss = totalSec % 60;
 
-      char tok[HEADER_CELL_COUNT][16];
-      snprintf(tok[0], sizeof(tok[0]), "%02lu", (unsigned long)mm);
-      snprintf(tok[1], sizeof(tok[1]), "%02lu", (unsigned long)ss);
-      snprintf(tok[2], sizeof(tok[2]), "%03lu", (unsigned long)ms);
-      snprintf(tok[3], sizeof(tok[3]), "%03ld", (long)bar);
-      snprintf(tok[4], sizeof(tok[4]), "%ld", (long)beatInBar);
-      snprintf(tok[5], sizeof(tok[5]), "%ld", (long)eighthInBar);
-      snprintf(tok[6], sizeof(tok[6]), "%ld", (long)sixteenthInBar);
-      snprintf(tok[7], sizeof(tok[7]), "%ld", (long)thirtySecondInBar);
+        int64_t total32nds = framesTo32nds(tf, bpm);
+        constexpr int32_t SUB32_PER_BAR = BEATS_PER_BAR * 8;
+        int32_t bar = (int32_t)(total32nds / SUB32_PER_BAR) + 1;
+        int32_t sub32InBar = (int32_t)(total32nds % SUB32_PER_BAR);
+        int32_t beatInBar = (sub32InBar / 8) + 1;
+        int32_t eighthInBar = (sub32InBar / 4) + 1;
+        int32_t sixteenthInBar = (sub32InBar / 2) + 1;
+        int32_t thirtySecondInBar = sub32InBar + 1;
 
-      static const char *const SEP[HEADER_CELL_COUNT] = {":", ".", " ", ".", ".", ".", ".", ""};
-      int curX = tx;
-      int ty = TY(boxH);
-      int pillY = max(0, ty - SY(2));
-      int pillH = min(boxH - pillY, FONT_H + SY(4));
+        char tok[HEADER_CELL_COUNT][16];
+        snprintf(tok[0], sizeof(tok[0]), "%02lu", (unsigned long)mm);
+        snprintf(tok[1], sizeof(tok[1]), "%02lu", (unsigned long)ss);
+        snprintf(tok[2], sizeof(tok[2]), "%03lu", (unsigned long)ms);
+        snprintf(tok[3], sizeof(tok[3]), "%03ld", (long)bar);
+        snprintf(tok[4], sizeof(tok[4]), "%ld", (long)beatInBar);
+        snprintf(tok[5], sizeof(tok[5]), "%ld", (long)eighthInBar);
+        snprintf(tok[6], sizeof(tok[6]), "%ld", (long)sixteenthInBar);
+        snprintf(tok[7], sizeof(tok[7]), "%ld", (long)thirtySecondInBar);
 
-      for (int i = 0; i < HEADER_CELL_COUNT; i++) {
-        int tw = textWidth(tok[i]);
-        if (i == optHlField) {
-          s.fillRect(max(0, curX - PX), pillY, tw + 2 * PX, pillH, LIGHT);
-          s.drawText(curX, ty, tok[i], BG);
-        } else if (i == selField) {
-          s.fillRect(max(0, curX - PX), pillY, tw + 2 * PX, pillH, pageAccent);
-          s.drawText(curX, ty, tok[i], BG);
-        } else {
-          s.drawText(curX, ty, tok[i], c);
-        }
-        curX += tw + FONT_GAP;
-        if (SEP[i][0] != '\0') {
-          s.drawText(curX, ty, SEP[i], c);
-          curX += textWidth(SEP[i]) + FONT_GAP;
+        static const char *const SEP[HEADER_CELL_COUNT] = {":", ".", " ", ".", ".", ".", ".", ""};
+        int curX = tx;
+        int ty = TY(boxH);
+        int pillY = max(0, ty - SY(2));
+        int pillH = min(boxH - pillY, FONT_H + SY(4));
+
+        for (int i = 0; i < HEADER_CELL_COUNT; i++) {
+          int tw = textWidth(tok[i]);
+          if (i == optHlField) {
+            s.fillRect(max(0, curX - PX), pillY, tw + 2 * PX, pillH, LIGHT);
+            s.drawText(curX, ty, tok[i], BG);
+          } else if (i == selField) {
+            s.fillRect(max(0, curX - PX), pillY, tw + 2 * PX, pillH, pageAccent);
+            s.drawText(curX, ty, tok[i], BG);
+          } else {
+            s.drawText(curX, ty, tok[i], c);
+          }
+          curX += tw + FONT_GAP;
+          if (SEP[i][0] != '\0') {
+            s.drawText(curX, ty, SEP[i], c);
+            curX += textWidth(SEP[i]) + FONT_GAP;
+          }
         }
       }
+      s.blit(midX, boxY);
     }
-    s.blit(midX, boxY);
+    prevHeaderMidX = (int16_t)midX;
+    prevHeaderWasPlain = isPlain;
+    prevHeaderSubX0 = (int16_t)curX0;
+    prevHeaderSubX1 = (int16_t)curX1;
   }
 }
 
@@ -549,9 +590,9 @@ FLASHMEM void drawSettingsTableRow(int y, uint32_t rowId, const char *label, con
 
   uint64_t rk = hashStr(hashInit(), label);
   rk = hashStr(rk, valStr);
-  rk = hashMix(rk, (uint64_t)rowId | ((uint64_t)bg << 8) | ((uint64_t)border << 24) |
-                       ((uint64_t)vColor << 40) | ((uint64_t)sel << 56) |
-                       ((uint64_t)barCol << 57) | ((uint64_t)isPill << 62));
+  rk = hashMix(rk, (uint64_t)rowId | ((uint64_t)bg << 32) | ((uint64_t)border << 48));
+  rk = hashMix(rk, (uint64_t)vColor | ((uint64_t)barCol << 16) |
+                       ((uint64_t)sel << 32) | ((uint64_t)isPill << 33));
   if (!full && rk == cacheKey) return;
   cacheKey = rk;
 
@@ -603,6 +644,28 @@ FLASHMEM static void drawLoopArrowIcon(Surface &s, int cx, int cy, uint16_t colo
       s.drawPixel(cx + rMid + dx, py, color);
     }
   }
+}
+
+FLASHMEM static void getTransportBtnLayout(int btnX[TR_CELL_COUNT], int btnW[TR_CELL_COUNT]) {
+  constexpr int gap = SX(2);
+  constexpr int btnH = SY(26);
+  constexpr int recLoopW = btnH + SX(2);
+  constexpr int rtzX = 3 * gap + 2 * recLoopW;
+  constexpr int remW = (SCREEN_W - gap) - rtzX - 3 * gap;
+  constexpr int navW = (remW - SX(22)) / 4;
+  constexpr int playW = remW - 3 * navW;
+  btnX[0] = gap;
+  btnX[1] = 2 * gap + recLoopW;
+  btnX[2] = rtzX;
+  btnX[3] = rtzX + navW + gap;
+  btnX[4] = rtzX + 2 * (navW + gap);
+  btnX[5] = rtzX + 2 * (navW + gap) + playW + gap;
+  btnW[0] = recLoopW;
+  btnW[1] = recLoopW;
+  btnW[2] = navW;
+  btnW[3] = navW;
+  btnW[4] = playW;
+  btnW[5] = navW;
 }
 
 // Shared Bottom Transport & Locator Bar for Page::Audio, Page::Midi, and Page::Master
@@ -800,7 +863,8 @@ FLASHMEM void drawTransportBar(bool isSelectedRow, int selCell, bool full) {
                         ((uint64_t)clipInL << 32) | ((uint64_t)clipInR << 33) |
                         ((uint64_t)clipOutL << 34) | ((uint64_t)clipOutR << 35) |
                         ((uint64_t)pageAccent << 40));
-  if (full || mk != prevInOutMeterKey) {
+  if (full || prevInOutMeterKey == 0 ||
+      (uiTierDue(METER_TIER_PERIOD) && mk != prevInOutMeterKey)) {
     prevInOutMeterKey = mk;
     Surface ms(meterStripW, stripH);
     ms.fillRect(0, 0, meterStripW, stripH, BG);
@@ -844,21 +908,9 @@ FLASHMEM void drawTransportBar(bool isSelectedRow, int selCell, bool full) {
 
   const int btnY = SY(212);
   const int btnH = SY(26);
-  constexpr int gap = SX(2);
-  constexpr int recLoopW = btnH + SX(2);
-  constexpr int rtzX = 3 * gap + 2 * recLoopW;
-  constexpr int remW = (SCREEN_W - gap) - rtzX - 3 * gap;
-  constexpr int navW = (remW - SX(22)) / 4;
-  constexpr int playW = remW - 3 * navW;
-  static const int btnX[TR_CELL_COUNT] = {
-    gap,
-    2 * gap + recLoopW,
-    rtzX,
-    rtzX + navW + gap,
-    rtzX + 2 * (navW + gap),
-    rtzX + 2 * (navW + gap) + playW + gap
-  };
-  static const int btnW[TR_CELL_COUNT] = {recLoopW, recLoopW, navW, navW, playW, navW};
+  int btnX[TR_CELL_COUNT];
+  int btnW[TR_CELL_COUNT];
+  getTransportBtnLayout(btnX, btnW);
   TransportMode tm = transport.mode;
 
   for (int c = 0; c < TR_CELL_COUNT; c++) {
@@ -1009,7 +1061,7 @@ FLASHMEM void drawTransportBar(bool isSelectedRow, int selCell, bool full) {
 }
 
 // Shared On-Screen Keyboard Modal for Naming & Saving a Song or Instrument
-static const char *const KB_LABELS[KB_GRID_ROWS][KB_GRID_COLS] = {
+PROGMEM static const char *const KB_LABELS[KB_GRID_ROWS][KB_GRID_COLS] = {
   {"A", "B", "C", "D", "E", "F", "G", "H", "I", "J"},
   {"K", "L", "M", "N", "O", "P", "Q", "R", "S", "T"},
   {"U", "V", "W", "X", "Y", "Z", "_", "-", "0", "1"},
@@ -1238,6 +1290,182 @@ FLASHMEM void uiClearRegionStreaming(int y0, int h, uint16_t color) {
   }
 }
 
+FLASHMEM static inline void fillBgIfPos(int x, int y, int w, int h) {
+  if (w > 0 && h > 0) {
+    board.tft().fillRect(x, y, w, h, BG);
+  }
+}
+
+FLASHMEM static void clearTransportBarGutters() {
+  const int infoBotY = SY(195) + SY(16);
+  const int btnY = SY(212);
+  const int btnH = SY(26);
+  fillBgIfPos(0, SY(194) + 1, SCREEN_W, SY(195) - (SY(194) + 1));
+  fillBgIfPos(0, infoBotY, SCREEN_W, btnY - infoBotY);
+
+  int btnX[TR_CELL_COUNT];
+  int btnW[TR_CELL_COUNT];
+  getTransportBtnLayout(btnX, btnW);
+  int curX = 0;
+  for (int c = 0; c < TR_CELL_COUNT; c++) {
+    fillBgIfPos(curX, btnY, btnX[c] - curX, btnH);
+    curX = btnX[c] + btnW[c];
+  }
+  fillBgIfPos(curX, btnY, SCREEN_W - curX, btnH);
+  fillBgIfPos(0, btnY + btnH, SCREEN_W, SCREEN_H - (btnY + btnH));
+  keepStreaming();
+}
+
+FLASHMEM static void clearCenteredTableGutters(int firstY, int rowH, int rowPitch, int numRows,
+                                               int hdrY = -1, int hdrH = 0) {
+  const int leftW = SX(6);
+  const int boxW = SX(308);
+  const int rightX = leftW + boxW;
+  fillBgIfPos(0, SY(24), leftW, SCREEN_H - SY(24));
+  fillBgIfPos(rightX, SY(24), SCREEN_W - rightX, SCREEN_H - SY(24));
+  if (hdrH > 0 && hdrY >= SY(24)) {
+    fillBgIfPos(leftW, SY(24), boxW, hdrY - SY(24));
+    fillBgIfPos(leftW, hdrY + hdrH, boxW, firstY - (hdrY + hdrH));
+  } else {
+    fillBgIfPos(leftW, SY(24), boxW, firstY - SY(24));
+  }
+  for (int r = 0; r + 1 < numRows; r++) {
+    fillBgIfPos(leftW, firstY + r * rowPitch + rowH, boxW, rowPitch - rowH);
+  }
+  const int endY = (numRows > 0) ? (firstY + (numRows - 1) * rowPitch + rowH) : firstY;
+  fillBgIfPos(leftW, endY, boxW, SCREEN_H - endY);
+  keepStreaming();
+}
+
+FLASHMEM static void clearPageBodyGutters(Page pg) {
+  keepStreaming();
+  switch (pg) {
+    case Page::Audio:
+    case Page::Midi: {
+      const int firstY = SY(26);
+      const int rowH = SY(39);
+      const int pitch = SY(41);
+      const int bandEnd = firstY + (VISIBLE_TRACK_ROWS - 1) * pitch + rowH;
+      const int bandH = bandEnd - firstY;
+      fillBgIfPos(0, SY(24), SCREEN_W, firstY - SY(24));
+
+      fillBgIfPos(0, firstY, SX(2), bandH);
+      fillBgIfPos(SX(2) + SX(28), firstY, SX(32) - (SX(2) + SX(28)), bandH);
+      fillBgIfPos(SX(32) + SX(32), firstY, SX(66) - (SX(32) + SX(32)), bandH);
+      fillBgIfPos(SX(66) + SX(184), firstY, SX(252) - (SX(66) + SX(184)), bandH);
+      if (pg == Page::Midi || audioParamMode() != AUD_PMODE_COMP) {
+        fillBgIfPos(SX(252) + SX(32), firstY, SX(286) - (SX(252) + SX(32)), bandH);
+      }
+      const int rightEdge = SX(286) + SX(32);
+      fillBgIfPos(rightEdge, firstY, SCREEN_W - rightEdge, bandH);
+
+      for (int vis = 0; vis < VISIBLE_TRACK_ROWS; vis++) {
+        const int ry = firstY + vis * pitch;
+        if (pg == Page::Audio) {
+          fillBgIfPos(SX(32), ry + SY(19), SX(32), rowH - 2 * SY(19));
+        }
+        if (vis + 1 < VISIBLE_TRACK_ROWS) {
+          fillBgIfPos(0, ry + rowH, SCREEN_W, pitch - rowH);
+        }
+      }
+      fillBgIfPos(0, bandEnd, SCREEN_W, SY(194) - bandEnd);
+      keepStreaming();
+      clearTransportBarGutters();
+      break;
+    }
+
+    case Page::Master: {
+      const int trkW = SX(38), trkH = SY(122), trkPitch = SX(40);
+      const int trkX0 = (SCREEN_W - ((TRACK_ROWS - 1) * trkPitch + trkW)) / 2;
+      const int trkY = SY(26);
+      fillBgIfPos(0, SY(24), SCREEN_W, trkY - SY(24));
+      fillBgIfPos(0, trkY, trkX0, trkH);
+      for (int t = 0; t + 1 < TRACK_ROWS; t++) {
+        fillBgIfPos(trkX0 + t * trkPitch + trkW, trkY, trkPitch - trkW, trkH);
+      }
+      const int trkEndX = trkX0 + (TRACK_ROWS - 1) * trkPitch + trkW;
+      fillBgIfPos(trkEndX, trkY, SCREEN_W - trkEndX, trkH);
+
+      const int fxW = SX(43), fxH = SY(37), fxPitch = SX(45);
+      const int fxX0 = (SCREEN_W - ((MASTER_FX_ROW_COLS - 1) * fxPitch + fxW)) / 2;
+      const int fxY = SY(153);
+      fillBgIfPos(0, trkY + trkH, SCREEN_W, fxY - (trkY + trkH));
+      fillBgIfPos(0, fxY, fxX0, fxH);
+      for (int c = 0; c + 1 < MASTER_FX_ROW_COLS; c++) {
+        fillBgIfPos(fxX0 + c * fxPitch + fxW, fxY, fxPitch - fxW, fxH);
+      }
+      const int fxEndX = fxX0 + (MASTER_FX_ROW_COLS - 1) * fxPitch + fxW;
+      fillBgIfPos(fxEndX, fxY, SCREEN_W - fxEndX, fxH);
+      fillBgIfPos(0, fxY + fxH, SCREEN_W, SY(194) - (fxY + fxH));
+      keepStreaming();
+      clearTransportBarGutters();
+      break;
+    }
+
+    case Page::Instruments:
+      clearCenteredTableGutters(SY(28), SY(24), SY(26), INST_LIST_VISIBLE_ROWS);
+      break;
+
+    case Page::SongSettings:
+      clearCenteredTableGutters(SY(28), SY(24), SY(26), 7);
+      break;
+
+    case Page::SystemSettings:
+      clearCenteredTableGutters(SY(28), SY(24), SY(26),
+                                board.supportsUsbChargeControl() ? SSET_COUNT : (SSET_COUNT - 1));
+      break;
+
+    case Page::InstrumentType:
+      clearCenteredTableGutters(SY(40), SY(22), SY(24), INST_TYPE_ROW_COUNT, SY(26), SY(12));
+      break;
+
+    case Page::Main: {
+      const int leftX = SX(6);
+      const int rightX = max(SX(6) + SX(308), SX(310) + SX(4));
+      const int spanW = rightX - leftX;
+      const int sessY = SY(26), sessH = SY(24);
+      const int secY = SY(55), secH = SY(12);
+      const int listY = SY(70), rowH = SY(21), rowPitch = SY(23);
+      const int listH = (MAIN_LIST_VISIBLE_ROWS - 1) * rowPitch + rowH;
+      const int listEndY = listY + listH;
+
+      fillBgIfPos(0, SY(24), leftX, SCREEN_H - SY(24));
+      fillBgIfPos(rightX, SY(24), SCREEN_W - rightX, SCREEN_H - SY(24));
+      fillBgIfPos(leftX, SY(24), spanW, sessY - SY(24));
+      fillBgIfPos(leftX + SX(246), sessY, SX(256) - (leftX + SX(246)), sessH);
+      fillBgIfPos(SX(256) + SX(58), sessY, rightX - (SX(256) + SX(58)), sessH);
+      fillBgIfPos(leftX, sessY + sessH, spanW, secY - (sessY + sessH));
+      fillBgIfPos(leftX + SX(308), secY, rightX - (leftX + SX(308)), secH);
+      fillBgIfPos(leftX, secY + secH, spanW, listY - (secY + secH));
+      fillBgIfPos(leftX + SX(302), listY, SX(310) - (leftX + SX(302)), listH);
+      for (int r = 0; r + 1 < MAIN_LIST_VISIBLE_ROWS; r++) {
+        fillBgIfPos(leftX, listY + r * rowPitch + rowH, SX(302), rowPitch - rowH);
+      }
+      fillBgIfPos(leftX, listEndY, spanW, SCREEN_H - listEndY);
+      keepStreaming();
+      break;
+    }
+
+    case Page::InstrumentEdit: {
+      const int leftX = SX(6), boxW = SX(308), rightX = leftX + boxW;
+      const int row0Y = SY(26), row0H = SY(24);
+      fillBgIfPos(0, SY(24), leftX, SCREEN_H - SY(24));
+      fillBgIfPos(rightX, SY(24), SCREEN_W - rightX, SCREEN_H - SY(24));
+      fillBgIfPos(leftX, SY(24), boxW, row0Y - SY(24));
+      fillBgIfPos(leftX + SX(152), row0Y, SX(162) - (leftX + SX(152)), row0H);
+      fillBgIfPos(SX(162) + SX(58), row0Y, SX(224) - (SX(162) + SX(58)), row0H);
+      fillBgIfPos(leftX, row0Y + row0H, boxW, INST_EDIT_VIEWPORT_TOP_Y - (row0Y + row0H));
+      fillBgIfPos(leftX, INST_EDIT_VIEWPORT_BOTTOM_Y, boxW, SCREEN_H - INST_EDIT_VIEWPORT_BOTTOM_Y);
+      keepStreaming();
+      break;
+    }
+
+    default:
+      uiClearRegionStreaming(SY(24), SCREEN_H - SY(24), BG);
+      break;
+  }
+}
+
 FLASHMEM void uiRefresh() {
   static uint32_t lastRefreshMs = 0;
   sysProjectPlayService();
@@ -1354,7 +1582,17 @@ FLASHMEM void uiRefresh() {
     if (sysProjState != 4) {
       drawHeaderBar(true);
       headerDrawnFull = true;
-      uiClearRegionStreaming(SY(24), SCREEN_H - SY(24), BG);
+      const bool hasModalOrSubview =
+          kbOpen || teModalOpen || clearModalOpen || noteEdOpen || smpBrowserOpen ||
+          (sf2BrowserSt != 0) || (smpKeyModalSt != 0) || instBrowserOpen || instSaveToOpen ||
+          instMidiMapOpen || sysPresetsOpen || sysPresetDelOpen || usbSavePromptOpen ||
+          (sysProjState != 0) || sysProjConfirmOpen || sysMidiMapOpen || typePresetOpen ||
+          midiBrowserOpen || (songSubSt != 0);
+      if (hasModalOrSubview) {
+        uiClearRegionStreaming(SY(24), SCREEN_H - SY(24), BG);
+      } else {
+        clearPageBodyGutters(pg);
+      }
     } else {
       uiClearRegionStreaming(0, SCREEN_H, BG);
     }

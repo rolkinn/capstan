@@ -26,13 +26,32 @@ static const uint8_t INIT[] PROGMEM = {
 // MADCTL orientation values for rotations 0..3 (MX=0x40, MY=0x80, MV=0x20, BGR=0x08).
 PROGMEM static const uint8_t MADCTL[4] = {0x48, 0x28, 0x88, 0xE8};
 
-// Single-scanline RGB666 width (480 pixels * 3 bytes/pixel = 1,440 bytes on stack).
-static constexpr int ROW_PX = 480;
+FLASHMEM static inline uint32_t packRgb666(uint16_t c) { // Pack RGB565 into 24-bit RGB666 word (MSB = R[23:16], G[15:8], B[7:0])
+  return ((uint32_t)(c & 0xF800u) << 8)
+       | ((uint32_t)(c & 0x07E0u) << 5)
+       | ((uint32_t)(c & 0x001Fu) << 3);
+}
 
-static inline void px666(uint16_t c, uint8_t *o) {   // Unpack RGB565 into 3 RGB666 bytes (top 6 bits of each channel)
-  o[0] = (c & 0xF800) >> 8;
-  o[1] = (c & 0x07E0) >> 3;
-  o[2] = (c & 0x001F) << 3;
+FLASHMEM static inline void waitLpspi4Idle() {
+  while ((IMXRT_LPSPI4_S.FSR & 0x1Fu) != 0u) {}
+  while (IMXRT_LPSPI4_S.SR & LPSPI_SR_MBF) {}
+}
+
+FLASHMEM static inline uint32_t enter24BitTxOnlyMode() {
+  waitLpspi4Idle();
+  const uint32_t origTcr = IMXRT_LPSPI4_S.TCR;
+  IMXRT_LPSPI4_S.TCR = (origTcr & ~(LPSPI_TCR_FRAMESZ(0xFFF) | LPSPI_TCR_RXMSK))
+                     | LPSPI_TCR_FRAMESZ(23) | LPSPI_TCR_RXMSK;
+  return origTcr;
+}
+
+FLASHMEM static inline void exit24BitTxOnlyMode(uint32_t origTcr) {
+  waitLpspi4Idle();
+  IMXRT_LPSPI4_S.TCR = origTcr;
+  waitLpspi4Idle();
+  while (!(IMXRT_LPSPI4_S.RSR & LPSPI_RSR_RXEMPTY)) {
+    (void)IMXRT_LPSPI4_S.RDR;
+  }
 }
 
 FLASHMEM void ILI9488Spi::start() {
@@ -102,30 +121,24 @@ FLASHMEM void ILI9488Spi::setRotation(uint8_t r) {
 }
 
 FLASHMEM void ILI9488Spi::clearPanel(uint16_t color) {
-  uint8_t rowBuf[ROW_PX * 3];
-  uint8_t px[3];
-  px666(color, px);
-  for (int i = 0; i < ROW_PX; i++) memcpy(rowBuf + 3 * i, px, 3);
-  int total = (int)_pw * _ph;
+  const uint32_t px24 = packRgb666(color);
+  const int total = (int)_pw * (int)_ph;
   start();
   uint8_t c[4] = {0, 0, (uint8_t)((_pw - 1) >> 8), (uint8_t)(_pw - 1)};
   uint8_t p[4] = {0, 0, (uint8_t)((_ph - 1) >> 8), (uint8_t)(_ph - 1)};
   cmd(0x2A); data(c, 4);
   cmd(0x2B); data(p, 4);
   cmd(0x2C);
-  for (int left = total; left > 0; left -= ROW_PX) data(rowBuf, 3 * min(left, ROW_PX));
+  const uint32_t origTcr = enter24BitTxOnlyMode();
+  for (int i = 0; i < total; i++) {
+    while ((IMXRT_LPSPI4_S.FSR & 0x1Fu) >= 15u) {}
+    IMXRT_LPSPI4_S.TDR = px24;
+  }
+  exit24BitTxOnlyMode(origTcr);
   stop();
 }
 
 FLASHMEM void ILI9488Spi::invertDisplay(bool on) { sendCmd(on ? 0x21 : 0x20, nullptr, 0); }
-
-FLASHMEM void ILI9488Spi::setClipRect(int16_t x, int16_t y, int16_t w, int16_t h) {
-  if (x < 0) { w += x; x = 0; }
-  if (y < 0) { h += y; y = 0; }
-  if (x + w > _w) w = _w - x;
-  if (y + h > _h) h = _h - y;
-  _cx = x; _cy = y; _cw = max(w, (int16_t)0); _ch = max(h, (int16_t)0);
-}
 
 FLASHMEM bool ILI9488Spi::clip(int16_t &x, int16_t &y, int16_t &w, int16_t &h, int16_t &dx, int16_t &dy) const {
   int16_t x0 = max(x, _cx), y0 = max(y, _cy);
@@ -149,14 +162,16 @@ FLASHMEM void ILI9488Spi::window(int16_t x0, int16_t y0, int16_t x1, int16_t y1)
 FLASHMEM void ILI9488Spi::fillRect(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t color) {
   int16_t dx, dy;
   if (!clip(x, y, w, h, dx, dy)) return;
-  uint8_t rowBuf[ROW_PX * 3];
-  uint8_t px[3];
-  px666(color, px);
-  int chunk = min((int)w * h, ROW_PX);     // Fill scanline buffer once and stream in ROW_PX chunks
-  for (int i = 0; i < chunk; i++) memcpy(rowBuf + 3 * i, px, 3);
+  const uint32_t px24 = packRgb666(color);
   start();
   window(x, y, x + w - 1, y + h - 1);
-  for (int left = w * h; left > 0; left -= chunk) data(rowBuf, 3 * min(left, chunk));
+  const uint32_t origTcr = enter24BitTxOnlyMode();
+  const int total = (int)w * (int)h;
+  for (int i = 0; i < total; i++) {
+    while ((IMXRT_LPSPI4_S.FSR & 0x1Fu) >= 15u) {}
+    IMXRT_LPSPI4_S.TDR = px24;
+  }
+  exit24BitTxOnlyMode(origTcr);
   stop();
 }
 
@@ -164,14 +179,17 @@ FLASHMEM void ILI9488Spi::writeRect(int16_t x, int16_t y, int16_t w, int16_t h, 
   const int16_t stride = w;
   int16_t dx, dy;
   if (!clip(x, y, w, h, dx, dy)) return;
-  uint8_t rowBuf[ROW_PX * 3];
   start();
   window(x, y, x + w - 1, y + h - 1);
+  const uint32_t origTcr = enter24BitTxOnlyMode();
   for (int16_t r = 0; r < h; r++) {
     const uint16_t *row = px + (dy + r) * stride + dx;
-    for (int16_t i = 0; i < w; i++) px666(row[i], rowBuf + 3 * i);
-    data(rowBuf, 3 * w);
+    for (int16_t i = 0; i < w; i++) {
+      while ((IMXRT_LPSPI4_S.FSR & 0x1Fu) >= 15u) {}
+      IMXRT_LPSPI4_S.TDR = packRgb666(row[i]);
+    }
   }
+  exit24BitTxOnlyMode(origTcr);
   stop();
 }
 

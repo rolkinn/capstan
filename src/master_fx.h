@@ -104,6 +104,7 @@ struct LookaheadMonitorLimiter {
 // Shared Instrument FX Bus (Drive -> Chorus -> Delay -> Reverb -> Tape -> Comp)
 // Uses the exact same Chorus, Delay, Delay Feedback, Reverb, Tape, and Comp implementations as Master FX,
 // plus per-instrument warm oversaturated Drive distortion.
+constexpr int CHORUS_BUF_LEN = 688; // ~15.6 ms max delay capacity at 44.1 kHz
 void resetInstFxState();
 void resetInstDriveState(int instIdx);
 float processInstDriveSample(int instIdx, uint8_t drivePct, float x);
@@ -112,7 +113,10 @@ void setInstFxParams(uint8_t chorusPct, uint8_t delayPct, uint8_t delayFbPct, ui
                      uint8_t tapePct = 0, uint8_t compPct = 0);
 bool isInstFxChainEnabled();
 bool instNeedsSharedAuxSend();
-void processInstFxSample(float &xL, float &xR);
+void processInstFxSample(float &xL, float &xR,
+                         float *outPureAuxWetL = nullptr,
+                         float *outPureAuxWetR = nullptr,
+                         float *outAuxDryTrim = nullptr);
 
 // Per-Audio-Track FX Chain (Drive -> Chorus -> Delay -> Reverb -> Tape -> Comp):
 // - Independent per-track Drive, Tape, and Comp inserts (Stereo on A1..A4, Mono on A5..A8)
@@ -162,6 +166,7 @@ void resetAudioTrackFxState(int trackIdx);
 void resetAllAudioTrackFxState();
 void syncAudioTrackFxParams(int trackIdx, const AudioTrackFxParams &fx);
 bool anyAudioTrackDelayOrReverbActive();
+void syncAudioTrackAuxTargets(uint8_t audibleTrackMask);
 void prepareAudioTrackFxBlock(AudioTrackFxBlockCtx &ctx, uint8_t processTrackMask, uint8_t audibleTrackMask,
                               bool instAuxAvailable, AudioInputFxBlockCtx *inCtx = nullptr);
 void processAudioTrackInsertSample(int trackIdx, bool stereo, float &sl, float &sr);

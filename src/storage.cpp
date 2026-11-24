@@ -1,6 +1,7 @@
 // storage.cpp — SD card streaming, 666s linear WAV recording/overdubbing, and manual song persistence
 #include "storage.h"
 #include "midi_map.h"
+#include "midi_in.h"
 #include "instruments.h"
 #include "inst_sampler.h"
 #include "inst_sf2.h"
@@ -206,6 +207,16 @@ FLASHMEM static bool writeWavHeader(FsFile &f, uint32_t frames, int trackIdx = 0
   return f.write(hdr, sizeof(hdr)) == (int)sizeof(hdr);
 }
 
+FLASHMEM static void finalizeTrackWavFile(FsFile &f, uint32_t frames, int trackIdx) {
+  if (!f.isOpen()) return;
+  uint64_t validBytes = trackWavByteOffset(trackIdx, frames);
+  if (f.fileSize() > validBytes && f.seekSet(validBytes)) {
+    f.truncate();
+  }
+  writeWavHeader(f, frames, trackIdx);
+  f.sync();
+}
+
 FLASHMEM bool cardResponds() {
   return SD.sdfs.card() && SD.sdfs.card()->status() != 0xFFFFFFFFu;
 }
@@ -276,10 +287,11 @@ FLASHMEM static void updateTrackOverviewChunk(int t, uint32_t startFrame, const 
   for (int b = b0; b <= b1; b++) {
     uint8_t curPeak = tr.getWavePeak(b);
     uint8_t nextPeak = level;
-    if (recording.overdub || b <= recording.lastOverviewCol) {
+    if (recording.overdub || (b >= recording.firstOverviewCol && b <= recording.lastOverviewCol)) {
       nextPeak = max(curPeak, level);
     } else {
-      recording.lastOverviewCol = (int16_t)b;
+      if ((int16_t)b < recording.firstOverviewCol) recording.firstOverviewCol = (int16_t)b;
+      if ((int16_t)b > recording.lastOverviewCol)  recording.lastOverviewCol  = (int16_t)b;
     }
     tr.setWavePeak(b, nextPeak);
   }
@@ -321,7 +333,7 @@ struct DiskAudioTrack {
   uint8_t monoInput;
   uint8_t solo;
   uint32_t recordedFrames;
-  uint8_t overview[OVERVIEW_COLS]; // Legacy v1 field retained for SONG.DAT v2 layout compatibility (superseded by Track::wavePeaks)
+  uint8_t overview[OVERVIEW_COLS]; // Legacy v1/v2 field retained for SONG.DAT v2 read compatibility
 };
 
 struct DiskSong {
@@ -335,11 +347,47 @@ struct DiskSong {
   DiskAudioTrack audio[NUM_AUDIO_TRACKS];
 };
 
-static_assert(sizeof(SongSettings) == 40, "SongSettings must remain 40 bytes for SONG.DAT v2 layout");
+// SONG.DAT v3 (compact 232-byte single-sector format with explicit recSrc, track FX, and input FX/vol)
+static constexpr uint16_t DISK_SONG_VERSION = 3;
+
+struct DiskAudioTrackV3 {
+  int8_t volume;
+  int8_t balance;
+  uint8_t muted;
+  uint8_t trigMode;
+  int8_t threshDb;
+  uint8_t armMode;
+  uint8_t monoInput;      // 0 = L, 1 = R, 2 = L+R (used by mono tracks 5..8)
+  uint8_t solo;           // 1 = Solo active on Master page
+  uint8_t recSrc;         // AudioRecSrc (0..20)
+  AudioTrackFxParams fx;  // 7 bytes: drive, chorus, delay, delayFeedback, reverb, tape, comp
+  uint32_t recordedFrames;
+};
+
+struct DiskSongV3 {
+  char magic[4];            // "M8PR"
+  uint16_t version;         // 3 (DISK_SONG_VERSION)
+  uint16_t structBytes;     // sizeof(DiskSongV3) = 232
+  SongSettings ps;          // 40 bytes
+  uint32_t tapeFrame;
+  uint8_t selectedAudioTrack;
+  uint8_t selectedMidiTrack;
+  uint16_t tunerRefTenthsEnc; // 0 = DEFAULT_TUNER_REF_TENTHS (440.0 Hz), else 4000..4800
+  AudioTrackFxParams inputFx; // 7 bytes: Line/USB Audio Input FX
+  uint8_t inputVol;           // 0..100 (80 = unity)
+  uint8_t reservedHdr[8];     // Zeroed for future non-breaking fields
+  DiskAudioTrackV3 audio[NUM_AUDIO_TRACKS]; // 8 * 20 = 160 bytes
+};
+
+static_assert(sizeof(SongSettings) == 40, "SongSettings must remain 40 bytes for SONG.DAT layout compatibility");
+static_assert(sizeof(DiskAudioTrackV3) == 20, "DiskAudioTrackV3 must be 20 bytes");
+static_assert(sizeof(DiskSongV3) == 232, "DiskSongV3 must be 232 bytes");
 static_assert(offsetof(DiskSystem, lastSongName) == 9, "DiskSystem v5 lastSongName offset must remain 9");
 static_assert(offsetof(DiskSystem, usbChargeOffEnc) == 200, "DiskSystem v5 usbChargeOffEnc offset must remain 200");
 static_assert(sizeof(DiskSystem) <= 512, "DiskSystem must fit in one 512-byte sector");
 static_assert(sizeof(DiskSong) <= sizeof(chunk), "DiskSong must fit in RAM1 chunk buffer");
+static_assert(256u + sizeof(DiskSong) <= 2048u && 2048u + sizeof(DiskSong) <= sizeof(chunk),
+              "DiskSong v2/v3 staging slices must fit in RAM1 chunk buffer");
 
 FLASHMEM static void syncSdCard() {
   if (SD.sdfs.card()) {
@@ -347,7 +395,23 @@ FLASHMEM static void syncSdCard() {
   }
 }
 
+static uint8_t savedUsbChargeOffEnc = 0;
+static bool sysSettingsDirty = false;
+static uint32_t sysSettingsDirtyAtMs = 0;
+
+FLASHMEM void markSystemSettingsDirty() {
+  sysSettingsDirty = true;
+  sysSettingsDirtyAtMs = millis();
+}
+
+FLASHMEM void flushSystemSettingsIfDirty(bool force) {
+  if (!sysSettingsDirty) return;
+  if (!force && (int32_t)(millis() - sysSettingsDirtyAtMs) < 500) return;
+  saveSystemSettings();
+}
+
 FLASHMEM bool saveSystemSettings() {
+  sysSettingsDirty = false;
   ensureSongsRootDir();
   if (!SD.sdfs.exists(INST_PRESETS_DIR)) {
     SD.sdfs.mkdir(INST_PRESETS_DIR);
@@ -368,7 +432,10 @@ FLASHMEM bool saveSystemSettings() {
   snprintf(ds.lastSongName, sizeof(ds.lastSongName), "%s", lastActiveSongName);
   const MidiCcMapEntry *gSrc = midiMapGlobalTable();
   memcpy(ds.globalMidiMap, gSrc, sizeof(ds.globalMidiMap));
-  ds.usbChargeOffEnc = ss.usbChargeWhileOn ? 0 : 1;
+  if (board.supportsUsbChargeControl()) {
+    savedUsbChargeOffEnc = ss.usbChargeWhileOn ? 0u : 1u;
+  }
+  ds.usbChargeOffEnc = savedUsbChargeOffEnc;
   memcpy(ds.globalMidiMapExt, gSrc + LEGACY_MIDI_TARGET_COUNT_V5, sizeof(ds.globalMidiMapExt));
   memset(chunk, 0, 512);
   memcpy(chunk, &ds, sizeof(ds));
@@ -403,7 +470,8 @@ FLASHMEM static bool loadSystemSettingsFromDisk() {
     memcpy(&ds, chunk, min((size_t)rd, sizeof(DiskSystem)));
     ss.brightness = (uint8_t)constrain((int)ds.ss.brightness, (int)MIN_BRIGHTNESS, (int)MAX_BRIGHTNESS);
     ss.metroVolume = (uint8_t)constrain((int)ds.ss.metroVolume, 0, (int)VOLUME_MAX);
-    ss.usbChargeWhileOn = board.supportsUsbChargeControl() ? (ds.usbChargeOffEnc == 0) : true;
+    savedUsbChargeOffEnc = (ds.usbChargeOffEnc != 0) ? 1u : 0u;
+    ss.usbChargeWhileOn = board.supportsUsbChargeControl() ? (savedUsbChargeOffEnc == 0) : true;
     ds.lastSongName[MAX_SONG_NAME_LEN] = '\0';
     sanitizeSongName(ds.lastSongName, lastActiveSongName, sizeof(lastActiveSongName));
     MidiCcMapEntry *gMap = midiMapGlobalTableMut();
@@ -426,6 +494,7 @@ FLASHMEM static bool loadSystemSettingsFromDisk() {
     memcpy(&ds4, chunk, min((size_t)rd, sizeof(DiskSystemV4)));
     ss.brightness = (uint8_t)constrain((int)ds4.ss.brightness, (int)MIN_BRIGHTNESS, (int)MAX_BRIGHTNESS);
     ss.metroVolume = (uint8_t)constrain((int)ds4.ss.metroVolume, 0, (int)VOLUME_MAX);
+    savedUsbChargeOffEnc = 0u;
     ss.usbChargeWhileOn = true;
     ds4.lastSongName[MAX_SONG_NAME_LEN] = '\0';
     sanitizeSongName(ds4.lastSongName, lastActiveSongName, sizeof(lastActiveSongName));
@@ -452,6 +521,7 @@ FLASHMEM static bool loadSystemSettingsFromDisk() {
                         : (uint8_t)constrain(((int)oldBright * 100 + 127) / 255,
                                              (int)MIN_BRIGHTNESS, (int)MAX_BRIGHTNESS);
     ss.metroVolume = DEFAULT_METRO_VOLUME;
+    savedUsbChargeOffEnc = 0u;
     ss.usbChargeWhileOn = true;
     applySystemSettings();
     return true;
@@ -468,37 +538,59 @@ FLASHMEM static void rebuildTrackOverviewFromFile(int t) {
   }
   const uint32_t bpf = audioTrackBytesPerFrame(t);
   const bool isMono = isAudioTrackMono(t);
-  int maxBin = constrain((int)((tr.recordedFrames - 1) / FRAMES_PER_PEAK_BIN), 0, WAVE_PEAK_BINS - 1);
-  int step = max(1, (maxBin + 1) / 480);
-  for (int b = 0; b <= maxBin; b += step) {
-    uint32_t fStart = (uint32_t)b * FRAMES_PER_PEAK_BIN;
-    if (fStart >= tr.recordedFrames) break;
-    uint32_t toRead = min(512u, tr.recordedFrames - fStart);
-    uint64_t bytePos = trackWavByteOffset(t, fStart);
-    if (tr.file.seekSet(bytePos)) {
-      int rd = tr.file.read(chunk, toRead * bpf);
-      uint32_t got = (rd > 0) ? ((uint32_t)rd / bpf) : 0;
-      uint16_t maxAbs = 0;
-      if (isMono) {
-        const int16_t *mono = reinterpret_cast<const int16_t *>(chunk);
-        for (uint32_t i = 0; i < got; i++) {
-          uint16_t a = (uint16_t)abs((int)mono[i]);
-          if (a > maxAbs) maxAbs = a;
-        }
-      } else {
-        for (uint32_t i = 0; i < got; i++) {
-          uint32_t v = chunk[i];
-          int16_t l = (int16_t)(v & 0xFFFF);
-          int16_t r = (int16_t)(v >> 16);
-          uint16_t a = (uint16_t)max(abs((int)l), abs((int)r));
-          if (a > maxAbs) maxAbs = a;
+  const uint32_t totalF = min(tr.recordedFrames, (uint32_t)MAX_REC_FRAMES);
+  if (!tr.file.seekSet(WAV_DATA_OFFSET)) {
+    tr.overviewVersion++;
+    return;
+  }
+
+  uint32_t framePos = 0;
+  int curBin = 0;
+  uint16_t binMaxAbs = 0;
+  while (framePos < totalF) {
+    uint32_t toRead = min((uint32_t)CHUNK_FRAMES, totalF - framePos);
+    int rd = tr.file.read(chunk, toRead * bpf);
+    uint32_t got = (rd > 0) ? ((uint32_t)rd / bpf) : 0;
+    if (got == 0) break;
+
+    if (isMono) {
+      const int16_t *mono = reinterpret_cast<const int16_t *>(chunk);
+      for (uint32_t i = 0; i < got; i += 4) {
+        uint16_t a = (uint16_t)abs((int)mono[i]);
+        int bin = (int)((framePos + i) / FRAMES_PER_PEAK_BIN);
+        if (bin >= WAVE_PEAK_BINS) bin = WAVE_PEAK_BINS - 1;
+        if (bin != curBin) {
+          uint8_t pk = (uint8_t)min(255, (int)(sqrtf((float)binMaxAbs / 32768.0f) * 255.0f + 0.5f));
+          tr.setWavePeak(curBin, pk);
+          curBin = bin;
+          binMaxAbs = a;
+        } else if (a > binMaxAbs) {
+          binMaxAbs = a;
         }
       }
-      uint8_t pk = (uint8_t)min(255, (int)(sqrtf((float)maxAbs / 32768.0f) * 255.0f + 0.5f));
-      for (int k = 0; k < step && (b + k) <= maxBin; k++) {
-        tr.setWavePeak(b + k, pk);
+    } else {
+      for (uint32_t i = 0; i < got; i += 4) {
+        uint32_t v = chunk[i];
+        int16_t l = (int16_t)(v & 0xFFFF);
+        int16_t r = (int16_t)(v >> 16);
+        uint16_t a = (uint16_t)max(abs((int)l), abs((int)r));
+        int bin = (int)((framePos + i) / FRAMES_PER_PEAK_BIN);
+        if (bin >= WAVE_PEAK_BINS) bin = WAVE_PEAK_BINS - 1;
+        if (bin != curBin) {
+          uint8_t pk = (uint8_t)min(255, (int)(sqrtf((float)binMaxAbs / 32768.0f) * 255.0f + 0.5f));
+          tr.setWavePeak(curBin, pk);
+          curBin = bin;
+          binMaxAbs = a;
+        } else if (a > binMaxAbs) {
+          binMaxAbs = a;
+        }
       }
     }
+    framePos += got;
+  }
+  if (framePos > 0) {
+    uint8_t pk = (uint8_t)min(255, (int)(sqrtf((float)binMaxAbs / 32768.0f) * 255.0f + 0.5f));
+    tr.setWavePeak(curBin, pk);
   }
   tr.overviewVersion++;
 }
@@ -571,7 +663,7 @@ FLASHMEM static bool inspectSongFolder(const char *folderName, bool cleanUnsaved
   char magic[4] = {};
   uint16_t ver = 0;
   if (pf.read(magic, 4) == 4 && memcmp(magic, "M8PR", 4) == 0 &&
-      pf.read(&ver, 2) == 2 && ver == 2) {
+      pf.read(&ver, 2) == 2 && (ver == 2 || ver == DISK_SONG_VERSION)) {
     hasValidDat = true;
   }
   pf.close();
@@ -926,6 +1018,7 @@ FLASHMEM static void resetSongToDefaults() {
   fmSynthResetAll();
   trackEditReset();
   closeSongTuner();
+  resetSongTunerUiState();
   closeSongInputFx();
   setTunerRefTenths(DEFAULT_TUNER_REF_TENTHS);
   setAudioParamMode(AUD_PMODE_MIX);
@@ -1004,70 +1097,151 @@ FLASHMEM static void copySongInstrumentsSubfolder(const char *srcFolder, const c
   copySongSubfolder(srcFolder, dstFolder, "SAMPLES");
 }
 
-// Read and deserialize SONG.DAT (version 2) from `/Capstan/<folderName>` directly into `chunk`
-FLASHMEM static const DiskSong *readDiskSongFromFolder(const char *folderName) {
+// Read and deserialize SONG.DAT (v3 or legacy v2) from `/Capstan/<folderName>` into `chunk`
+FLASHMEM static const DiskSongV3 *readDiskSongFromFolder(const char *folderName) {
   char pPath[64];
   songDatByName(folderName, pPath, sizeof(pPath));
   FsFile pf = SD.sdfs.open(pPath, O_RDONLY);
   if (!pf.isOpen()) return nullptr;
-  DiskSong &outDp = *reinterpret_cast<DiskSong *>(chunk);
-  uint8_t *raw = reinterpret_cast<uint8_t *>(chunk) + sizeof(DiskSong);
-  outDp = DiskSong{};
+
+  DiskSongV3 &outV3 = *reinterpret_cast<DiskSongV3 *>(chunk);
+  DiskSong &dp = *reinterpret_cast<DiskSong *>(reinterpret_cast<uint8_t *>(chunk) + 256);
+  uint8_t *raw = reinterpret_cast<uint8_t *>(chunk) + 2048;
+
+  outV3 = DiskSongV3{};
+  outV3.inputVol = VOLUME_UNITY;
   for (int t = 0; t < NUM_AUDIO_TRACKS; t++) {
-    outDp.audio[t].volume = VOLUME_UNITY;
-    outDp.audio[t].threshDb = DEFAULT_THRESH_DB;
+    outV3.audio[t].volume = VOLUME_UNITY;
+    outV3.audio[t].threshDb = DEFAULT_THRESH_DB;
   }
+
   int rd = pf.read(raw, sizeof(DiskSong));
   pf.close();
+
+  // SONG.DAT v3 fast path
+  if (rd >= (int)sizeof(DiskSongV3) && memcmp(raw, "M8PR", 4) == 0) {
+    uint16_t hdrVer = 0;
+    memcpy(&hdrVer, raw + 4, sizeof(hdrVer));
+    if (hdrVer == DISK_SONG_VERSION) {
+      memcpy(static_cast<void *>(&outV3), raw, sizeof(DiskSongV3));
+      return &outV3;
+    }
+  }
+
+  // Legacy SONG.DAT v2 compatibility paths (all 6 historical struct revisions)
+  dp = DiskSong{};
+  for (int t = 0; t < NUM_AUDIO_TRACKS; t++) {
+    dp.audio[t].volume = VOLUME_UNITY;
+    dp.audio[t].threshDb = DEFAULT_THRESH_DB;
+  }
 
   constexpr int LEGACY_4TRK_SIZE = (int)(sizeof(DiskSong) - 4 * sizeof(DiskAudioTrack));
   constexpr int PREV_PS_DELTA = 4; // 36-byte SongSettings (before lineInGainTenths / dual masterVol)
   constexpr int OLD_PS_DELTA  = 8; // 32-byte SongSettings
+  bool parsedV2 = false;
   if (rd == (int)sizeof(DiskSong) || rd == LEGACY_4TRK_SIZE) {
-    memcpy(static_cast<void *>(&outDp), raw, (size_t)rd);
-    if (outDp.ps.masterVolHpEnc == 0 && outDp.ps.masterVolSpkEnc == 0 && raw[8 + 37] == 0) {
+    memcpy(static_cast<void *>(&dp), raw, (size_t)rd);
+    if (dp.ps.masterVolHpEnc == 0 && dp.ps.masterVolSpkEnc == 0 && raw[8 + 37] == 0) {
       // Migrate earlier 40-byte SongSettings where offset 36 stored 0..15 SGTL5000 step
       int lvl = constrain((int)raw[8 + 36], 0, (int)SGTL_MAX_LINE_IN_LEVEL);
-      outDp.ps.lineInGainTenths = (int16_t)((lvl - (int)SGTL_UNITY_LINE_IN_LEVEL) * 15);
+      dp.ps.lineInGainTenths = (int16_t)((lvl - (int)SGTL_UNITY_LINE_IN_LEVEL) * 15);
     }
-    return (memcmp(outDp.magic, "M8PR", 4) == 0 && outDp.version == 2) ? &outDp : nullptr;
-  }
-  if (rd == (int)sizeof(DiskSong) - PREV_PS_DELTA || rd == LEGACY_4TRK_SIZE - PREV_PS_DELTA) {
-    memcpy(static_cast<void *>(&outDp), raw, 8 + 36);
-    outDp.ps.lineInGainTenths = DEFAULT_LINE_IN_GAIN_TENTHS;
-    outDp.ps.masterVolHpEnc = 0;
-    outDp.ps.masterVolSpkEnc = 0;
+    parsedV2 = true;
+  } else if (rd == (int)sizeof(DiskSong) - PREV_PS_DELTA || rd == LEGACY_4TRK_SIZE - PREV_PS_DELTA) {
+    memcpy(static_cast<void *>(&dp), raw, 8 + 36);
+    dp.ps.lineInGainTenths = DEFAULT_LINE_IN_GAIN_TENTHS;
+    dp.ps.masterVolHpEnc = 0;
+    dp.ps.masterVolSpkEnc = 0;
     size_t tailBytes = (size_t)rd - (8 + 36);
-    memcpy(static_cast<void *>(&outDp.tapeFrame), raw + 8 + 36, tailBytes);
-    return (memcmp(outDp.magic, "M8PR", 4) == 0 && outDp.version == 2) ? &outDp : nullptr;
-  }
-  if (rd == (int)sizeof(DiskSong) - OLD_PS_DELTA || rd == LEGACY_4TRK_SIZE - OLD_PS_DELTA) {
-    memcpy(static_cast<void *>(&outDp), raw, 8 + 30);
-    AudioInputSource src = outDp.ps.audioInputSource;
-    outDp.ps.recLineIn = (src == AudioInputSource::LineAndSynth || src == AudioInputSource::All ||
-                          src == AudioInputSource::LineOnly || (uint8_t)src >= (uint8_t)SELECTABLE_AUDIO_INPUT_SOURCES);
-    outDp.ps.recUsbIn = (src == AudioInputSource::UsbAndSynth || src == AudioInputSource::All ||
-                         src == AudioInputSource::UsbOnly);
-    outDp.ps.recInternalInstr = (src == AudioInputSource::LineAndSynth || src == AudioInputSource::UsbAndSynth ||
-                                 src == AudioInputSource::All || src == AudioInputSource::SynthOnly ||
-                                 (uint8_t)src >= (uint8_t)SELECTABLE_AUDIO_INPUT_SOURCES);
-    outDp.ps.lineMonitor = outDp.ps.inputMonitor ? MonitorMode::On : MonitorMode::Off;
-    outDp.ps.usbMonitor = outDp.ps.usbInputMonitor ? MonitorMode::On : MonitorMode::Off;
-    outDp.ps.lineInGainTenths = DEFAULT_LINE_IN_GAIN_TENTHS;
-    outDp.ps.masterVolHpEnc = 0;
-    outDp.ps.masterVolSpkEnc = 0;
+    memcpy(static_cast<void *>(&dp.tapeFrame), raw + 8 + 36, tailBytes);
+    parsedV2 = true;
+  } else if (rd == (int)sizeof(DiskSong) - OLD_PS_DELTA || rd == LEGACY_4TRK_SIZE - OLD_PS_DELTA) {
+    memcpy(static_cast<void *>(&dp), raw, 8 + 30);
+    AudioInputSource src = dp.ps.audioInputSource;
+    dp.ps.recLineIn = (src == AudioInputSource::LineAndSynth || src == AudioInputSource::All ||
+                       src == AudioInputSource::LineOnly || (uint8_t)src >= (uint8_t)SELECTABLE_AUDIO_INPUT_SOURCES);
+    dp.ps.recUsbIn = (src == AudioInputSource::UsbAndSynth || src == AudioInputSource::All ||
+                      src == AudioInputSource::UsbOnly);
+    dp.ps.recInternalInstr = (src == AudioInputSource::LineAndSynth || src == AudioInputSource::UsbAndSynth ||
+                              src == AudioInputSource::All || src == AudioInputSource::SynthOnly ||
+                              (uint8_t)src >= (uint8_t)SELECTABLE_AUDIO_INPUT_SOURCES);
+    dp.ps.lineMonitor = dp.ps.inputMonitor ? MonitorMode::On : MonitorMode::Off;
+    dp.ps.usbMonitor = dp.ps.usbInputMonitor ? MonitorMode::On : MonitorMode::Off;
+    dp.ps.lineInGainTenths = DEFAULT_LINE_IN_GAIN_TENTHS;
+    dp.ps.masterVolHpEnc = 0;
+    dp.ps.masterVolSpkEnc = 0;
     size_t tailBytes = (size_t)rd - (8 + 32);
-    memcpy(static_cast<void *>(&outDp.tapeFrame), raw + 8 + 32, tailBytes);
-    return (memcmp(outDp.magic, "M8PR", 4) == 0 && outDp.version == 2) ? &outDp : nullptr;
+    memcpy(static_cast<void *>(&dp.tapeFrame), raw + 8 + 32, tailBytes);
+    parsedV2 = true;
   }
-  return nullptr;
+
+  if (!parsedV2 || memcmp(dp.magic, "M8PR", 4) != 0 || dp.version != 2) {
+    return nullptr;
+  }
+
+  memcpy(outV3.magic, dp.magic, 4);
+  outV3.version = dp.version;
+  outV3.structBytes = sizeof(DiskSongV3);
+  outV3.ps = dp.ps;
+  outV3.tapeFrame = dp.tapeFrame;
+  outV3.selectedAudioTrack = dp.selectedAudioTrack;
+  outV3.selectedMidiTrack = dp.selectedMidiTrack;
+  outV3.tunerRefTenthsEnc = dp.tunerRefTenthsEnc;
+
+  for (int t = 0; t < NUM_AUDIO_TRACKS; t++) {
+    DiskAudioTrackV3 &dst = outV3.audio[t];
+    const DiskAudioTrack &src = dp.audio[t];
+    dst.volume = src.volume;
+    dst.balance = src.balance;
+    dst.muted = src.muted;
+    dst.trigMode = src.trigMode;
+    dst.threshDb = src.threshDb;
+    dst.armMode = src.armMode;
+    dst.monoInput = src.monoInput;
+    dst.solo = src.solo;
+    dst.recordedFrames = src.recordedFrames;
+    if (src.overview[1] == 0xCA) {
+      dst.recSrc = src.overview[0];
+    } else if (src.trigMode == 2) {
+      dst.recSrc = (uint8_t)AudioRecSrc::ResamplePost;
+    } else {
+      dst.recSrc = (uint8_t)AudioRecSrc::Off;
+    }
+    if (dp.audio[t].overview[2] == 0xF1) {
+      dst.fx.drive         = dp.audio[t].overview[3];
+      dst.fx.chorus        = dp.audio[t].overview[4];
+      dst.fx.delay         = dp.audio[t].overview[5];
+      dst.fx.delayFeedback = dp.audio[t].overview[6];
+      dst.fx.reverb        = dp.audio[t].overview[7];
+      dst.fx.tape          = dp.audio[t].overview[8];
+      dst.fx.comp          = dp.audio[t].overview[9];
+    } else {
+      dst.fx = AudioTrackFxParams{};
+    }
+  }
+  if (dp.audio[0].overview[10] == 0xF2) {
+    outV3.inputFx.drive         = dp.audio[0].overview[11];
+    outV3.inputFx.chorus        = dp.audio[0].overview[12];
+    outV3.inputFx.delay         = dp.audio[0].overview[13];
+    outV3.inputFx.delayFeedback = dp.audio[0].overview[14];
+    outV3.inputFx.reverb        = dp.audio[0].overview[15];
+    outV3.inputFx.tape          = dp.audio[0].overview[16];
+    outV3.inputFx.comp          = dp.audio[0].overview[17];
+    uint8_t volEnc              = dp.audio[0].overview[18];
+    outV3.inputVol = (volEnc == 0) ? (uint8_t)VOLUME_UNITY
+                                   : (uint8_t)constrain((int)volEnc - 1, 0, VOLUME_MAX);
+  } else {
+    outV3.inputFx = AudioTrackFxParams{};
+    outV3.inputVol = VOLUME_UNITY;
+  }
+  return &outV3;
 }
 
 // Restore a saved song's WAV files to match its saved SONG.DAT lengths (used after Save-As)
 FLASHMEM static void restoreSavedFolderWavLengths(const char *folderName) {
-  const DiskSong *dp = readDiskSongFromFolder(folderName);
-  if (!dp) return;
-  const DiskAudioTrack *savedAudio = dp->audio;
+  const DiskSongV3 *sp = readDiskSongFromFolder(folderName);
+  if (!sp) return;
+  const DiskAudioTrackV3 *savedAudio = sp->audio;
 
   for (int t = 0; t < NUM_AUDIO_TRACKS; t++) {
     char wPath[64];
@@ -1078,12 +1252,7 @@ FLASHMEM static void restoreSavedFolderWavLengths(const char *folderName) {
     } else if (SD.sdfs.exists(wPath)) {
       FsFile wf = SD.sdfs.open(wPath, O_RDWR);
       if (wf.isOpen()) {
-        uint64_t validBytes = trackWavByteOffset(t, savedFrames);
-        if (wf.fileSize() > validBytes && wf.seekSet(validBytes)) {
-          wf.truncate();
-        }
-        writeWavHeader(wf, savedFrames, t);
-        wf.sync();
+        finalizeTrackWavFile(wf, savedFrames, t);
         wf.close();
       }
     }
@@ -1179,12 +1348,7 @@ FLASHMEM bool saveSongAs(const char *newName) {
         tr.file = SD.sdfs.open(wPath, O_RDWR);
       }
       if (tr.file.isOpen()) {
-        uint64_t validBytes = trackWavByteOffset(t, tr.recordedFrames);
-        if (tr.file.fileSize() > validBytes && tr.file.seekSet(validBytes)) {
-          tr.file.truncate();
-        }
-        writeWavHeader(tr.file, tr.recordedFrames, t);
-        tr.file.sync();
+        finalizeTrackWavFile(tr.file, tr.recordedFrames, t);
       }
     } else {
       if (tr.file.isOpen()) {
@@ -1196,55 +1360,39 @@ FLASHMEM bool saveSongAs(const char *newName) {
     }
   }
 
-  // Write SONG.DAT (version 2) staged directly inside RAM1 chunk
+  // Write SONG.DAT (version 3) staged directly inside RAM1 chunk
   songDatByName(activeSongName, pPath, sizeof(pPath));
   FsFile pf = SD.sdfs.open(pPath, O_RDWR | O_CREAT | O_TRUNC);
   if (!pf.isOpen()) return false;
 
-  DiskSong &dp = *reinterpret_cast<DiskSong *>(chunk);
-  dp = DiskSong{};
-  memcpy(dp.magic, "M8PR", 4);
-  dp.version = 2;
-  dp.ps = songSettings();
-  dp.tapeFrame = transport.tapeFrame;
-  dp.selectedAudioTrack = (uint8_t)constrain(audioRow, 0, PAGE_ROWS - 1);
-  dp.selectedMidiTrack = (uint8_t)constrain(midiRow, 0, PAGE_ROWS - 1);
-  dp.tunerRefTenthsEnc = tunerRefTenths();
+  DiskSongV3 &sp = *reinterpret_cast<DiskSongV3 *>(chunk);
+  sp = DiskSongV3{};
+  memcpy(sp.magic, "M8PR", 4);
+  sp.version = DISK_SONG_VERSION;
+  sp.structBytes = (uint16_t)sizeof(DiskSongV3);
+  sp.ps = songSettings();
+  sp.tapeFrame = transport.tapeFrame;
+  sp.selectedAudioTrack = (uint8_t)constrain(audioRow, 0, PAGE_ROWS - 1);
+  sp.selectedMidiTrack = (uint8_t)constrain(midiRow, 0, PAGE_ROWS - 1);
+  sp.tunerRefTenthsEnc = tunerRefTenths();
+  sp.inputFx = audioInputFxParams();
+  sp.inputVol = (uint8_t)constrain((int)getAudioInputVolume(), 0, VOLUME_MAX);
   for (int t = 0; t < NUM_AUDIO_TRACKS; t++) {
     const Track &tr = tracks[t];
-    dp.audio[t].volume = tr.volume;
-    dp.audio[t].balance = tr.balance;
-    dp.audio[t].muted = (tr.state == TrackState::Muted) ? 1 : 0;
-    dp.audio[t].trigMode = (uint8_t)tr.trigMode;
-    dp.audio[t].threshDb = tr.threshDb;
-    dp.audio[t].armMode = (uint8_t)tr.armMode;
-    dp.audio[t].monoInput = (uint8_t)tr.monoInput;
-    dp.audio[t].solo = tr.solo ? 1 : 0;
-    dp.audio[t].recordedFrames = tr.recordedFrames;
-    dp.audio[t].overview[0] = (uint8_t)tr.recSrc;
-    dp.audio[t].overview[1] = 0xCA;
-    dp.audio[t].overview[2] = 0xF1;
-    dp.audio[t].overview[3] = tr.fx.drive;
-    dp.audio[t].overview[4] = tr.fx.chorus;
-    dp.audio[t].overview[5] = tr.fx.delay;
-    dp.audio[t].overview[6] = tr.fx.delayFeedback;
-    dp.audio[t].overview[7] = tr.fx.reverb;
-    dp.audio[t].overview[8] = tr.fx.tape;
-    dp.audio[t].overview[9] = tr.fx.comp;
+    DiskAudioTrackV3 &dst = sp.audio[t];
+    dst.volume = tr.volume;
+    dst.balance = tr.balance;
+    dst.muted = (tr.state == TrackState::Muted) ? 1 : 0;
+    dst.trigMode = (uint8_t)tr.trigMode;
+    dst.threshDb = tr.threshDb;
+    dst.armMode = (uint8_t)tr.armMode;
+    dst.monoInput = (uint8_t)tr.monoInput;
+    dst.solo = tr.solo ? 1 : 0;
+    dst.recSrc = (uint8_t)tr.recSrc;
+    dst.fx = tr.fx;
+    dst.recordedFrames = tr.recordedFrames;
   }
-  {
-    const AudioTrackFxParams &inFx = audioInputFxParams();
-    dp.audio[0].overview[10] = 0xF2;
-    dp.audio[0].overview[11] = inFx.drive;
-    dp.audio[0].overview[12] = inFx.chorus;
-    dp.audio[0].overview[13] = inFx.delay;
-    dp.audio[0].overview[14] = inFx.delayFeedback;
-    dp.audio[0].overview[15] = inFx.reverb;
-    dp.audio[0].overview[16] = inFx.tape;
-    dp.audio[0].overview[17] = inFx.comp;
-    dp.audio[0].overview[18] = (uint8_t)(constrain((int)getAudioInputVolume(), 0, VOLUME_MAX) + 1);
-  }
-  bool ok = (pf.write(chunk, sizeof(DiskSong)) == (int)sizeof(DiskSong));
+  bool ok = (pf.write(chunk, sizeof(DiskSongV3)) == (int)sizeof(DiskSongV3));
   pf.truncate();
   pf.sync();
   pf.close();
@@ -1270,12 +1418,16 @@ FLASHMEM bool saveSongAs(const char *newName) {
     ok = false;
   }
 
-  songSaved = true;
-  songDirty = false;
-  scanSongFolders();
+  if (ok) {
+    songSaved = true;
+    songDirty = false;
+    scanSongFolders();
 
-  snprintf(lastActiveSongName, sizeof(lastActiveSongName), "%s", activeSongName);
-  saveSystemSettings();
+    snprintf(lastActiveSongName, sizeof(lastActiveSongName), "%s", activeSongName);
+    saveSystemSettings();
+  } else if (!songSaved) {
+    SD.sdfs.remove(pPath);
+  }
 
   applySongSettings();
   syncSdCard();
@@ -1327,72 +1479,59 @@ FLASHMEM bool loadSongByName(const char *name) {
   SongSettings &ps = songSettings();
   uint32_t restoredTapeFrame = 0;
   bool mutedFlags[NUM_AUDIO_TRACKS] = {};
-  bool loadedV2 = false;
+  bool loadedDiskSong = false;
 
-  if (const DiskSong *dpPtr = readDiskSongFromFolder(clean)) {
-    const DiskSong &dp = *dpPtr;
-    loadedV2 = true;
-    ps = dp.ps;
-    setTunerRefTenths(dp.tunerRefTenthsEnc);
-    restoredTapeFrame = min(dp.tapeFrame, MAX_REC_FRAMES);
-    audioRow = constrain((int)dp.selectedAudioTrack, 0, PAGE_ROWS - 1);
-    midiRow = constrain((int)dp.selectedMidiTrack, 0, PAGE_ROWS - 1);
+  if (const DiskSongV3 *spPtr = readDiskSongFromFolder(clean)) {
+    const DiskSongV3 &sp = *spPtr;
+    loadedDiskSong = true;
+    ps = sp.ps;
+    setTunerRefTenths(sp.tunerRefTenthsEnc);
+    restoredTapeFrame = min(sp.tapeFrame, MAX_REC_FRAMES);
+    audioRow = constrain((int)sp.selectedAudioTrack, 0, PAGE_ROWS - 1);
+    midiRow = constrain((int)sp.selectedMidiTrack, 0, PAGE_ROWS - 1);
     syncAudioScroll();
     syncMidiScroll();
     for (int t = 0; t < NUM_AUDIO_TRACKS; t++) {
       Track &tr = tracks[t];
-      uint8_t tm = dp.audio[t].trigMode;
+      const DiskAudioTrackV3 &sa = sp.audio[t];
+      uint8_t tm = sa.trigMode;
       tr.trigMode = (tm == (uint8_t)TrigMode::Threshold) ? TrigMode::Threshold : TrigMode::Manual;
-      uint8_t rs = 0;
-      if (dp.audio[t].overview[1] == 0xCA) {
-        rs = dp.audio[t].overview[0];
-      } else if (tm == 2) {
-        rs = (uint8_t)AudioRecSrc::ResamplePost;
-      }
+      uint8_t rs = sa.recSrc;
       if (rs >= (uint8_t)AudioRecSrc::Count || rs == (uint8_t)AudioRecSrc::Audio1 + t) {
         rs = (uint8_t)AudioRecSrc::Off;
       }
       tr.recSrc = (AudioRecSrc)rs;
-      tr.threshDb = (int8_t)constrain((int)dp.audio[t].threshDb, MIN_THRESH_DB, MAX_THRESH_DB);
-      uint8_t arm = dp.audio[t].armMode;
+      tr.threshDb = (int8_t)constrain((int)sa.threshDb, MIN_THRESH_DB, MAX_THRESH_DB);
+      uint8_t arm = sa.armMode;
       tr.armMode = (arm == (uint8_t)ArmMode::Record)  ? ArmMode::Record :
                    (arm == (uint8_t)ArmMode::Overdub) ? ArmMode::Overdub : ArmMode::Off;
-      uint8_t mi = dp.audio[t].monoInput;
+      uint8_t mi = sa.monoInput;
       tr.monoInput = (mi == (uint8_t)MonoInput::Right) ? MonoInput::Right :
                      (mi == (uint8_t)MonoInput::SumLR) ? MonoInput::SumLR : MonoInput::Left;
-      tr.solo = (dp.audio[t].solo != 0);
-      tr.recordedFrames = min(dp.audio[t].recordedFrames, MAX_REC_FRAMES);
+      tr.solo = (sa.solo != 0);
+      tr.recordedFrames = min(sa.recordedFrames, MAX_REC_FRAMES);
       tr.overviewVersion++;
-      if (dp.audio[t].overview[2] == 0xF1) {
-        tr.fx.drive         = (uint8_t)constrain((int)dp.audio[t].overview[3], 0, 100);
-        tr.fx.chorus        = (uint8_t)constrain((int)dp.audio[t].overview[4], 0, 100);
-        tr.fx.delay         = (uint8_t)constrain((int)dp.audio[t].overview[5], 0, 100);
-        tr.fx.delayFeedback = (uint8_t)constrain((int)dp.audio[t].overview[6], 0, 100);
-        tr.fx.reverb        = (uint8_t)constrain((int)dp.audio[t].overview[7], 0, 100);
-        tr.fx.tape          = (uint8_t)constrain((int)dp.audio[t].overview[8], 0, 100);
-        tr.fx.comp          = (uint8_t)constrain((int)dp.audio[t].overview[9], 0, 100);
-      } else {
-        tr.fx = AudioTrackFxParams{};
-      }
+      tr.fx.drive         = (uint8_t)constrain((int)sa.fx.drive, 0, 100);
+      tr.fx.chorus        = (uint8_t)constrain((int)sa.fx.chorus, 0, 100);
+      tr.fx.delay         = (uint8_t)constrain((int)sa.fx.delay, 0, 100);
+      tr.fx.delayFeedback = (uint8_t)constrain((int)sa.fx.delayFeedback, 0, 100);
+      tr.fx.reverb        = (uint8_t)constrain((int)sa.fx.reverb, 0, 100);
+      tr.fx.tape          = (uint8_t)constrain((int)sa.fx.tape, 0, 100);
+      tr.fx.comp          = (uint8_t)constrain((int)sa.fx.comp, 0, 100);
       syncAudioTrackFxParams(t, tr.fx);
-      setTrackMix(t, dp.audio[t].volume, dp.audio[t].balance);
-      mutedFlags[t] = (dp.audio[t].muted != 0);
+      setTrackMix(t, sa.volume, sa.balance);
+      mutedFlags[t] = (sa.muted != 0);
     }
-    if (dp.audio[0].overview[10] == 0xF2) {
-      AudioTrackFxParams inFx;
-      inFx.drive         = dp.audio[0].overview[11];
-      inFx.chorus        = dp.audio[0].overview[12];
-      inFx.delay         = dp.audio[0].overview[13];
-      inFx.delayFeedback = dp.audio[0].overview[14];
-      inFx.reverb        = dp.audio[0].overview[15];
-      inFx.tape          = dp.audio[0].overview[16];
-      inFx.comp          = dp.audio[0].overview[17];
-      uint8_t volEnc     = dp.audio[0].overview[18];
-      int inVol = (volEnc == 0) ? VOLUME_UNITY : constrain((int)volEnc - 1, 0, VOLUME_MAX);
-      setAllAudioInputFx(inFx, inVol);
-    } else {
-      setAllAudioInputFx(AudioTrackFxParams{}, VOLUME_UNITY);
-    }
+    AudioTrackFxParams inFx;
+    inFx.drive         = (uint8_t)constrain((int)sp.inputFx.drive, 0, 100);
+    inFx.chorus        = (uint8_t)constrain((int)sp.inputFx.chorus, 0, 100);
+    inFx.delay         = (uint8_t)constrain((int)sp.inputFx.delay, 0, 100);
+    inFx.delayFeedback = (uint8_t)constrain((int)sp.inputFx.delayFeedback, 0, 100);
+    inFx.reverb        = (uint8_t)constrain((int)sp.inputFx.reverb, 0, 100);
+    inFx.tape          = (uint8_t)constrain((int)sp.inputFx.tape, 0, 100);
+    inFx.comp          = (uint8_t)constrain((int)sp.inputFx.comp, 0, 100);
+    int inVol = constrain((int)sp.inputVol, 0, VOLUME_MAX);
+    setAllAudioInputFx(inFx, inVol);
   }
 
   ps.bpm = constrain(ps.bpm, MIN_BPM, MAX_BPM);
@@ -1400,6 +1539,10 @@ FLASHMEM bool loadSongByName(const char *name) {
     ps.clockSource = ClockSource::Internal;
   }
   ps.countInBeats = (uint8_t)constrain((int)ps.countInBeats, 0, 16);
+  ps.punchInFrame = min(ps.punchInFrame, MAX_REC_FRAMES - 1u);
+  if (ps.punchOutFrame > MAX_REC_FRAMES) {
+    ps.punchOutFrame = MAX_REC_FRAMES;
+  }
   if (ps.punchOutFrame <= ps.punchInFrame) {
     ps.punchOutFrame = min(MAX_REC_FRAMES, ps.punchInFrame + SAMPLE_RATE_HZ * 2);
   }
@@ -1410,8 +1553,8 @@ FLASHMEM bool loadSongByName(const char *name) {
   ps.masterTape = (uint8_t)constrain((int)ps.masterTape, 0, 100);
   ps.masterComp = (uint8_t)constrain((int)ps.masterComp, 0, 100);
   ps.masterVolume = (uint8_t)constrain((int)ps.masterVolume, 0, MASTER_VOLUME_MAX);
-  if ((uint8_t)ps.audioInputSource >= (uint8_t)SELECTABLE_AUDIO_INPUT_SOURCES) {
-    ps.audioInputSource = AudioInputSource::LineAndSynth;
+  if ((uint8_t)ps.audioInputSource >= (uint8_t)AudioInputSource::Count) {
+    ps.audioInputSource = AudioInputSource::All;
   }
   ps.defaultThreshDb = (int8_t)constrain((int)ps.defaultThreshDb, MIN_THRESH_DB, MAX_THRESH_DB);
   if ((uint8_t)ps.midiClockOut > (uint8_t)MidiClockOut::Both) {
@@ -1461,7 +1604,7 @@ FLASHMEM bool loadSongByName(const char *name) {
       }
     }
     if (SD.sdfs.exists(wPath)) {
-      if (loadedV2 && tr.recordedFrames == 0) {
+      if (loadedDiskSong && tr.recordedFrames == 0) {
         // Track was empty when song was last saved; remove any unsaved WAV file
         SD.sdfs.remove(wPath);
         tr.state = mutedFlags[t] ? TrackState::Muted : TrackState::Empty;
@@ -1474,18 +1617,13 @@ FLASHMEM bool loadSongByName(const char *name) {
         uint32_t fileFrames = (fsz > WAV_DATA_OFFSET)
             ? (uint32_t)min((uint64_t)MAX_REC_FRAMES, (fsz - WAV_DATA_OFFSET) / bpf)
             : 0;
-        if (!loadedV2 && tr.recordedFrames == 0 && fileFrames > 0) {
+        if (!loadedDiskSong && tr.recordedFrames == 0 && fileFrames > 0) {
           tr.recordedFrames = fileFrames;
         } else if (tr.recordedFrames > fileFrames) {
           tr.recordedFrames = fileFrames;
-        } else if (loadedV2 && fileFrames > tr.recordedFrames && tr.recordedFrames > 0) {
+        } else if (loadedDiskSong && fileFrames > tr.recordedFrames && tr.recordedFrames > 0) {
           // Truncate any unsaved audio recorded past the last manual save point
-          uint64_t validBytes = trackWavByteOffset(t, tr.recordedFrames);
-          if (tr.file.seekSet(validBytes)) {
-            tr.file.truncate();
-          }
-          writeWavHeader(tr.file, tr.recordedFrames, t);
-          tr.file.sync();
+          finalizeTrackWavFile(tr.file, tr.recordedFrames, t);
         }
         if (tr.recordedFrames > 0) {
           tr.state = mutedFlags[t] ? TrackState::Muted : TrackState::Playing;
@@ -1797,12 +1935,7 @@ FLASHMEM bool storagePasteAudioClipToTrack(int dstTrack, uint32_t destStartFrame
   if (tr.recordedFrames > 0 && tr.state == TrackState::Empty) {
     tr.state = TrackState::Playing;
   }
-  uint64_t validBytes = trackWavByteOffset(dstTrack, tr.recordedFrames);
-  if (tr.file.fileSize() > validBytes && tr.file.seekSet(validBytes)) {
-    tr.file.truncate();
-  }
-  writeWavHeader(tr.file, tr.recordedFrames, dstTrack);
-  tr.file.sync();
+  finalizeTrackWavFile(tr.file, tr.recordedFrames, dstTrack);
   rebuildTrackOverviewFromFile(dstTrack);
   prefillTrackStreams(transport.tapeFrame);
   songDirty = true;
@@ -1914,35 +2047,127 @@ FLASHMEM bool storageLoadWavFileToTrack(int dstTrack, uint32_t destStartFrame, c
   }
 
   const uint32_t maxOutFrames = (uint32_t)MAX_REC_FRAMES - destStartFrame;
-  const uint32_t srcLimitFrames = min(srcTotalFrames, maxOutFrames);
   const uint8_t chStride = (numCh > 0) ? (srcBpf / numCh) : (uint8_t)(bits / 8);
   uint8_t *rawIn = reinterpret_cast<uint8_t *>(chunk) + 8192;
-  const uint32_t maxBatch = min(2048u, (uint32_t)(8192u / srcBpf));
-  uint32_t remFrames = srcLimitFrames;
   uint32_t writtenFrames = 0;
   bool ok = true;
 
-  while (remFrames > 0) {
-    uint32_t n = min(remFrames, maxBatch);
-    size_t rdBytes = (size_t)n * srcBpf;
-    int rd = srcFile.read(rawIn, rdBytes);
-    uint32_t got = (rd > 0) ? ((uint32_t)rd / srcBpf) : 0;
-    if (got == 0) break;
+  if (sRate == SAMPLE_RATE_HZ) {
+    const uint32_t srcLimitFrames = min(srcTotalFrames, maxOutFrames);
+    const uint32_t maxBatch = min(2048u, (uint32_t)(8192u / srcBpf));
+    uint32_t remFrames = srcLimitFrames;
+    while (remFrames > 0) {
+      uint32_t n = min(remFrames, maxBatch);
+      size_t rdBytes = (size_t)n * srcBpf;
+      int rd = srcFile.read(rawIn, rdBytes);
+      uint32_t got = (rd > 0) ? ((uint32_t)rd / srcBpf) : 0;
+      if (got == 0) break;
 
-    for (uint32_t i = 0; i < got; i++) {
-      const uint8_t *fp = rawIn + i * srcBpf;
-      int16_t sL = decodeClipWavSample(fp, bits, audioFmt);
-      int16_t sR = (numCh >= 2) ? decodeClipWavSample(fp + chStride, bits, audioFmt) : sL;
-      chunk[i] = (uint32_t)(uint16_t)sL | ((uint32_t)(uint16_t)sR << 16);
+      for (uint32_t i = 0; i < got; i++) {
+        const uint8_t *fp = rawIn + i * srcBpf;
+        int16_t sL = decodeClipWavSample(fp, bits, audioFmt);
+        int16_t sR = (numCh >= 2) ? decodeClipWavSample(fp + chStride, bits, audioFmt) : sL;
+        chunk[i] = (uint32_t)(uint16_t)sL | ((uint32_t)(uint16_t)sR << 16);
+      }
+
+      size_t wrBytes = (size_t)got * sizeof(uint32_t);
+      if (clipFile.write(chunk, wrBytes) != wrBytes) {
+        ok = false;
+        break;
+      }
+      writtenFrames += got;
+      remFrames -= got;
+    }
+  } else {
+    // 32.32 fixed-point linear resampler staged completely inside RAM1 chunk[]
+    constexpr uint32_t OUT_CAP = 1024u;
+    constexpr uint32_t IN_CAP = 1024u;
+    uint32_t *outBuf = chunk;
+    uint32_t *inBuf = chunk + OUT_CAP;
+    const uint32_t rawBatchMax = min(IN_CAP, (uint32_t)(8192u / srcBpf));
+    const uint64_t stepQ32 = (((uint64_t)sRate << 32) + (SAMPLE_RATE_HZ / 2u)) / (uint64_t)SAMPLE_RATE_HZ;
+
+    uint64_t phaseQ32 = 0;
+    uint32_t decodedBase = 0;
+    uint32_t decodedCount = 0;
+    uint32_t srcCursor = 0;
+    uint32_t outPos = 0;
+    bool eofSrc = false;
+
+    while (writtenFrames + outPos < maxOutFrames) {
+      uint32_t s0 = (uint32_t)(phaseQ32 >> 32);
+      if (s0 >= srcTotalFrames) break;
+      uint32_t s1 = (s0 + 1u < srcTotalFrames) ? (s0 + 1u) : s0;
+
+      while (!eofSrc && s1 >= decodedBase + decodedCount) {
+        if (s0 > decodedBase) {
+          if (s0 < decodedBase + decodedCount) {
+            uint32_t keep = (decodedBase + decodedCount) - s0;
+            memmove(inBuf, inBuf + (s0 - decodedBase), keep * sizeof(uint32_t));
+            decodedBase = s0;
+            decodedCount = keep;
+          } else {
+            decodedBase += decodedCount;
+            decodedCount = 0;
+          }
+        }
+        uint32_t space = IN_CAP - decodedCount;
+        uint32_t remSrc = (srcCursor < srcTotalFrames) ? (srcTotalFrames - srcCursor) : 0u;
+        uint32_t want = min(remSrc, min(space, rawBatchMax));
+        if (want == 0) {
+          eofSrc = true;
+          break;
+        }
+        int rd = srcFile.read(rawIn, (size_t)want * srcBpf);
+        uint32_t got = (rd > 0) ? ((uint32_t)rd / srcBpf) : 0u;
+        if (got == 0) {
+          eofSrc = true;
+          break;
+        }
+        for (uint32_t j = 0; j < got; j++) {
+          const uint8_t *fp = rawIn + j * srcBpf;
+          int16_t sL = decodeClipWavSample(fp, bits, audioFmt);
+          int16_t sR = (numCh >= 2) ? decodeClipWavSample(fp + chStride, bits, audioFmt) : sL;
+          inBuf[decodedCount + j] = (uint32_t)(uint16_t)sL | ((uint32_t)(uint16_t)sR << 16);
+        }
+        decodedCount += got;
+        srcCursor += got;
+      }
+
+      if (s0 >= decodedBase + decodedCount) break;
+      uint32_t p0 = inBuf[s0 - decodedBase];
+      uint32_t p1 = (s1 < decodedBase + decodedCount) ? inBuf[s1 - decodedBase] : p0;
+
+      int32_t fracQ15 = (int32_t)((phaseQ32 >> 17) & 0x7FFFu);
+      int32_t l0 = (int16_t)(p0 & 0xFFFF);
+      int32_t r0 = (int16_t)(p0 >> 16);
+      int32_t l1 = (int16_t)(p1 & 0xFFFF);
+      int32_t r1 = (int16_t)(p1 >> 16);
+      int16_t outL = (int16_t)(l0 + (((l1 - l0) * fracQ15) >> 15));
+      int16_t outR = (int16_t)(r0 + (((r1 - r0) * fracQ15) >> 15));
+      outBuf[outPos++] = (uint32_t)(uint16_t)outL | ((uint32_t)(uint16_t)outR << 16);
+
+      if (outPos == OUT_CAP) {
+        size_t wrBytes = (size_t)outPos * sizeof(uint32_t);
+        if (clipFile.write(outBuf, wrBytes) != wrBytes) {
+          ok = false;
+          outPos = 0;
+          break;
+        }
+        writtenFrames += outPos;
+        outPos = 0;
+      }
+      phaseQ32 += stepQ32;
     }
 
-    size_t wrBytes = (size_t)got * sizeof(uint32_t);
-    if (clipFile.write(chunk, wrBytes) != wrBytes) {
-      ok = false;
-      break;
+    if (ok && outPos > 0) {
+      size_t wrBytes = (size_t)outPos * sizeof(uint32_t);
+      if (clipFile.write(outBuf, wrBytes) != wrBytes) {
+        ok = false;
+      } else {
+        writtenFrames += outPos;
+      }
     }
-    writtenFrames += got;
-    remFrames -= got;
   }
 
   srcFile.close();
@@ -1979,14 +2204,7 @@ FLASHMEM bool storageDeleteAudioRegion(int t, uint32_t startFrame, uint32_t endF
 
   if (delEnd >= tr.recordedFrames) {
     tr.recordedFrames = startFrame;
-    if (tr.file.isOpen()) {
-      uint64_t validBytes = trackWavByteOffset(t, tr.recordedFrames);
-      if (tr.file.fileSize() > validBytes && tr.file.seekSet(validBytes)) {
-        tr.file.truncate();
-      }
-      writeWavHeader(tr.file, tr.recordedFrames, t);
-      tr.file.sync();
-    }
+    finalizeTrackWavFile(tr.file, tr.recordedFrames, t);
   } else if (tr.file.isOpen()) {
     const uint32_t bpf = audioTrackBytesPerFrame(t);
     uint32_t curFrame = startFrame;
@@ -2057,7 +2275,7 @@ FLASHMEM static void fillTrackRing(int t, int maxChunks) {
 
     if (!rev) {
       uint32_t n = maxBlock;
-      if (!scrubMode && loopOn && tr.fileFrame < transport.punchOutFrame) {
+      if (loopOn && tr.fileFrame < transport.punchOutFrame) {
         uint32_t toLoopEnd = transport.punchOutFrame - tr.fileFrame;
         if (toLoopEnd < n) n = toLoopEnd;
       }
@@ -2086,15 +2304,18 @@ FLASHMEM static void fillTrackRing(int t, int maxChunks) {
       }
 
       uint32_t h = tr.head;
+      uint32_t rIdx = h % RING_FRAMES;
       if (isMono) {
         int16_t *dstRing = reinterpret_cast<int16_t *>(tr.ring);
         const int16_t *srcChunk = reinterpret_cast<const int16_t *>(chunk);
         for (uint32_t i = 0; i < n; i++) {
-          dstRing[(h + i) % RING_FRAMES] = srcChunk[i];
+          dstRing[rIdx] = srcChunk[i];
+          if (++rIdx >= RING_FRAMES) rIdx = 0;
         }
       } else {
         for (uint32_t i = 0; i < n; i++) {
-          tr.ring[(h + i) % RING_FRAMES] = chunk[i];
+          tr.ring[rIdx] = chunk[i];
+          if (++rIdx >= RING_FRAMES) rIdx = 0;
         }
       }
       __asm__ volatile("" ::: "memory");
@@ -2113,11 +2334,18 @@ FLASHMEM static void fillTrackRing(int t, int maxChunks) {
         uint32_t n = maxBlock;
         memset(chunk, 0, n * bpf);
         uint32_t h = tr.head;
+        uint32_t rIdx = h % RING_FRAMES;
         if (isMono) {
           int16_t *dstRing = reinterpret_cast<int16_t *>(tr.ring);
-          for (uint32_t i = 0; i < n; i++) dstRing[(h + i) % RING_FRAMES] = 0;
+          for (uint32_t i = 0; i < n; i++) {
+            dstRing[rIdx] = 0;
+            if (++rIdx >= RING_FRAMES) rIdx = 0;
+          }
         } else {
-          for (uint32_t i = 0; i < n; i++) tr.ring[(h + i) % RING_FRAMES] = 0;
+          for (uint32_t i = 0; i < n; i++) {
+            tr.ring[rIdx] = 0;
+            if (++rIdx >= RING_FRAMES) rIdx = 0;
+          }
         }
         __asm__ volatile("" ::: "memory");
         tr.head = h + n;
@@ -2125,7 +2353,7 @@ FLASHMEM static void fillTrackRing(int t, int maxChunks) {
       }
 
       uint32_t n = min(maxBlock, tr.fileFrame + 1u);
-      if (!scrubMode && loopOn && tr.fileFrame >= transport.punchInFrame) {
+      if (loopOn && tr.fileFrame >= transport.punchInFrame) {
         uint32_t toLoopStart = (tr.fileFrame - transport.punchInFrame) + 1u;
         if (toLoopStart < n) n = toLoopStart;
       }
@@ -2155,15 +2383,18 @@ FLASHMEM static void fillTrackRing(int t, int maxChunks) {
       }
 
       uint32_t h = tr.head;
+      uint32_t rIdx = h % RING_FRAMES;
       if (isMono) {
         int16_t *dstRing = reinterpret_cast<int16_t *>(tr.ring);
         const int16_t *srcChunk = reinterpret_cast<const int16_t *>(chunk);
         for (uint32_t i = 0; i < n; i++) {
-          dstRing[(h + i) % RING_FRAMES] = srcChunk[n - 1u - i];
+          dstRing[rIdx] = srcChunk[n - 1u - i];
+          if (++rIdx >= RING_FRAMES) rIdx = 0;
         }
       } else {
         for (uint32_t i = 0; i < n; i++) {
-          tr.ring[(h + i) % RING_FRAMES] = chunk[n - 1u - i];
+          tr.ring[rIdx] = chunk[n - 1u - i];
+          if (++rIdx >= RING_FRAMES) rIdx = 0;
         }
       }
       __asm__ volatile("" ::: "memory");
@@ -2182,7 +2413,10 @@ FLASHMEM static void fillTrackRing(int t, int maxChunks) {
   }
 }
 
+static uint32_t lastAudioScrubWrapCount = 0;
+
 FLASHMEM void prefillTrackStreams(uint32_t fromTapeFrame) {
+  lastAudioScrubWrapCount = transport.loopWrapCount;
   for (int t = 0; t < NUM_AUDIO_TRACKS; t++) {
     Track &tr = tracks[t];
     noInterrupts();
@@ -2258,16 +2492,20 @@ FLASHMEM void storageSeekTape(uint32_t tapeFrame) {
     recording.windowExited = false;
   }
 
+  uint32_t safeSpb = max(1u, spbForBpm(bpm));
   noInterrupts();
   transport.tapeFrame = tapeFrame;
   transport.subFrame = 0;
-  transport.beat = (int32_t)framesToBeats(tapeFrame, bpm);
-  transport.sampleInBeat = 0;
+  transport.spb = safeSpb;
+  transport.beat = (int32_t)(tapeFrame / safeSpb);
+  transport.sampleInBeat = tapeFrame % safeSpb;
+  transport.clockGridDirty = true;
   if (recording.track >= 0 && recording.mode != Recording::Idle) {
     recording.reverse = (transport.speedQuarter < 0);
     recording.startTapeFrame = tapeFrame;
     recording.writeTapeFrame = tapeFrame;
     recording.readNow = transport.now;
+    recording.firstOverviewCol = 32767;
     recording.lastOverviewCol = -1;
     recording.mode = Recording::Armed;
   }
@@ -2355,6 +2593,7 @@ FLASHMEM static void armRecordingStateForTrack(int recTrk, uint32_t tf) {
     recording.overdub = (tracks[recTrk].armMode == ArmMode::Overdub);
     recording.src = src;
     recording.autoMute = autoMute;
+    recording.prevWasMuted = (tracks[recTrk].state == TrackState::Muted);
     recording.monoInput = tracks[recTrk].monoInput;
     recording.reverse = (transport.speedQuarter < 0);
     if (autoMute) {
@@ -2367,12 +2606,14 @@ FLASHMEM static void armRecordingStateForTrack(int recTrk, uint32_t tf) {
     recording.startTapeFrame = tf;
     recording.writeTapeFrame = tf;
     recording.writtenFrames = 0;
+    recording.firstOverviewCol = 32767;
     recording.lastOverviewCol = -1;
     recording.mode = Recording::Armed;
   } else {
     recording.track = -1;
     recording.src = AudioRecSrc::Off;
     recording.autoMute = false;
+    recording.prevWasMuted = false;
     recording.reverse = false;
     recording.mode = Recording::Idle;
     recording.activeInWindow = false;
@@ -2397,8 +2638,12 @@ FLASHMEM void storageSyncArmedAudioTrack() {
     bool newAutoMute = isAutoMuteRecSrc(newSrc);
     noInterrupts();
     if (recording.autoMute && !newAutoMute) {
-      tracks[newRecTrk].state = (tracks[newRecTrk].recordedFrames > 0) ? TrackState::Playing : TrackState::Empty;
-    } else if (newAutoMute) {
+      tracks[newRecTrk].state = (recording.prevWasMuted && tracks[newRecTrk].recordedFrames > 0)
+                                    ? TrackState::Muted
+                                    : ((tracks[newRecTrk].recordedFrames > 0) ? TrackState::Playing : TrackState::Empty);
+      recording.prevWasMuted = false;
+    } else if (!recording.autoMute && newAutoMute) {
+      recording.prevWasMuted = (tracks[newRecTrk].state == TrackState::Muted);
       tracks[newRecTrk].state = TrackState::Muted;
     }
     recording.overdub = (tracks[newRecTrk].armMode == ArmMode::Overdub);
@@ -2410,6 +2655,7 @@ FLASHMEM void storageSyncArmedAudioTrack() {
       recording.startTapeFrame = transport.tapeFrame;
       recording.writeTapeFrame = transport.tapeFrame;
       recording.readNow = transport.now;
+      recording.firstOverviewCol = 32767;
       recording.lastOverviewCol = -1;
       recording.mode = Recording::Armed;
     }
@@ -2430,12 +2676,7 @@ FLASHMEM void storageSyncArmedAudioTrack() {
     drainRecordingBuffer(true);
     if (tracks[oldRecTrk].file.isOpen()) {
       if (tracks[oldRecTrk].recordedFrames > 0) {
-        uint64_t validBytes = trackWavByteOffset(oldRecTrk, tracks[oldRecTrk].recordedFrames);
-        if (tracks[oldRecTrk].file.fileSize() > validBytes && tracks[oldRecTrk].file.seekSet(validBytes)) {
-          tracks[oldRecTrk].file.truncate();
-        }
-        writeWavHeader(tracks[oldRecTrk].file, tracks[oldRecTrk].recordedFrames, oldRecTrk);
-        tracks[oldRecTrk].file.sync();
+        finalizeTrackWavFile(tracks[oldRecTrk].file, tracks[oldRecTrk].recordedFrames, oldRecTrk);
       } else {
         tracks[oldRecTrk].file.close();
         char wPath[64];
@@ -2448,8 +2689,11 @@ FLASHMEM void storageSyncArmedAudioTrack() {
     recording.windowExited = false;
   }
   if (oldRecTrk >= 0 && oldRecTrk < NUM_AUDIO_TRACKS && recording.autoMute) {
-    tracks[oldRecTrk].state = (tracks[oldRecTrk].recordedFrames > 0) ? TrackState::Playing : TrackState::Empty;
+    tracks[oldRecTrk].state = (recording.prevWasMuted && tracks[oldRecTrk].recordedFrames > 0)
+                                  ? TrackState::Muted
+                                  : ((tracks[oldRecTrk].recordedFrames > 0) ? TrackState::Playing : TrackState::Empty);
     recording.autoMute = false;
+    recording.prevWasMuted = false;
   }
 
   if (newRecTrk >= 0) {
@@ -2470,12 +2714,17 @@ FLASHMEM void storageSyncArmedAudioTrack() {
 
   if (transport.mode == TransportMode::WaitThreshold && transport.waitAudioThresh) {
     if (newRecTrk < 0 || tracks[newRecTrk].trigMode != TrigMode::Threshold) {
+      uint32_t safeSpb = max(1u, spbForBpm(bpm));
       noInterrupts();
       transport.waitAudioThresh = false;
       if (!transport.waitMidiThresh && transport.mode == TransportMode::WaitThreshold) {
+        uint32_t curTf = transport.tapeFrame;
+        transport.spb = safeSpb;
+        transport.beat = (int32_t)(curTf / safeSpb);
+        transport.sampleInBeat = curTf % safeSpb;
+        transport.clockGridDirty = true;
         transport.mode = TransportMode::Running;
         transport.running = true;
-        transport.sampleInBeat = 0;
         midiSendNow(0xFA);
       }
       interrupts();
@@ -2548,14 +2797,14 @@ FLASHMEM void storageStartTransport(bool countIn, bool waitAudio, bool waitMidi)
     if (tf >= MAX_REC_FRAMES) {
       tf = loopOn ? (transport.punchOutFrame > 0 ? (uint32_t)transport.punchOutFrame - 1u : 0u) : (MAX_REC_FRAMES - 1u);
     } else if (anyArmed && transport.punchEnabled && tf < transport.punchOutFrame) {
-      tf = transport.punchOutFrame;
+      tf = (transport.punchOutFrame > 0) ? ((uint32_t)transport.punchOutFrame - 1u) : 0u;
     } else if (loopOn && (tf <= transport.punchInFrame || tf >= transport.punchOutFrame)) {
       tf = (transport.punchOutFrame > 0) ? ((uint32_t)transport.punchOutFrame - 1u) : 0u;
     } else if (!loopOn && tf == 0) {
       if (maxContent > 0) {
         tf = min(maxContent, MAX_REC_FRAMES - 1u);
       } else if (anyArmed && transport.punchEnabled && transport.punchOutFrame > 0) {
-        tf = transport.punchOutFrame;
+        tf = (uint32_t)transport.punchOutFrame - 1u;
       }
     }
   } else {
@@ -2598,8 +2847,10 @@ FLASHMEM void storageStartTransport(bool countIn, bool waitAudio, bool waitMidi)
     threshLin = powf(10.0f, (float)tracks[recTrk].threshDb / 20.0f);
   }
 
+  uint32_t safeSpb = max(1u, spbForBpm(bpm));
   noInterrupts();
-  transport.beat = (int32_t)framesToBeats(tf, bpm);
+  transport.spb = safeSpb;
+  transport.beat = (int32_t)(tf / safeSpb);
   transport.sampleInBeat = 0;
   transport.waitAudioThresh = waitAudio;
   transport.waitMidiThresh = waitMidi;
@@ -2614,6 +2865,8 @@ FLASHMEM void storageStartTransport(bool countIn, bool waitAudio, bool waitMidi)
     transport.mode = TransportMode::CountIn;
     transport.running = false;
   } else {
+    transport.sampleInBeat = tf % safeSpb;
+    transport.clockGridDirty = true;
     transport.mode = TransportMode::Running;
     transport.running = true;
     midiSendNow(0xFA);
@@ -2637,6 +2890,7 @@ FLASHMEM static void drainRecordingBuffer(bool flushAll) {
     interrupts();
     recording.readNow = sNow;
     recording.writeTapeFrame = sTape;
+    recording.firstOverviewCol = 32767;
     recording.lastOverviewCol = -1;
   }
 
@@ -2645,11 +2899,20 @@ FLASHMEM static void drainRecordingBuffer(bool flushAll) {
     uint32_t limitNow = recording.activeInWindow ? transport.now : recording.endNow;
     int32_t avail = (int32_t)(limitNow - recording.readNow);
     if (avail <= 0) break;
+    if (rev && recording.writeTapeFrame == 0xFFFFFFFFu) {
+      recording.readNow = limitNow;
+      break;
+    }
     if (avail > (int32_t)INPUT_FRAMES) {
       uint32_t drop = (uint32_t)avail - INPUT_FRAMES;
       recording.readNow += drop;
       if (rev) {
-        recording.writeTapeFrame = (recording.writeTapeFrame >= drop) ? (recording.writeTapeFrame - drop) : 0u;
+        if (recording.writeTapeFrame == 0xFFFFFFFFu || recording.writeTapeFrame < drop) {
+          recording.writeTapeFrame = 0xFFFFFFFFu;
+          recording.readNow = limitNow;
+          break;
+        }
+        recording.writeTapeFrame -= drop;
       } else {
         recording.writeTapeFrame += drop;
       }
@@ -2661,6 +2924,10 @@ FLASHMEM static void drainRecordingBuffer(bool flushAll) {
     const bool isMono = isAudioTrackMono(recTrk);
     uint32_t n = min((uint32_t)avail, CHUNK_FRAMES);
     if (rev) {
+      if (recording.writeTapeFrame == 0xFFFFFFFFu) {
+        recording.readNow = limitNow;
+        break;
+      }
       uint32_t maxRev = recording.writeTapeFrame + 1u;
       if (n > maxRev) n = maxRev;
       if (n == 0) {
@@ -2673,7 +2940,8 @@ FLASHMEM static void drainRecordingBuffer(bool flushAll) {
     uint64_t bytePos = trackWavByteOffset(recTrk, firstTapeFrame);
 
     if (tr.file.fileSize() < bytePos) {
-      padTrackFileToBytePos(tr.file, bytePos, !flushAll, recTrk);
+      if (!padTrackFileToBytePos(tr.file, bytePos, !flushAll, recTrk)) break;
+      continue;
     }
 
     uint32_t rNow = recording.readNow;
@@ -2699,7 +2967,7 @@ FLASHMEM static void drainRecordingBuffer(bool flushAll) {
 
     recording.readNow += n;
     if (rev) {
-      recording.writeTapeFrame = (recording.writeTapeFrame >= n) ? (recording.writeTapeFrame - n) : 0u;
+      recording.writeTapeFrame = (recording.writeTapeFrame >= n) ? (recording.writeTapeFrame - n) : 0xFFFFFFFFu;
     } else {
       recording.writeTapeFrame += n;
     }
@@ -2743,12 +3011,7 @@ FLASHMEM void storageStopTransport() {
   if (wasActive || recording.windowExited || recording.mode == Recording::Finishing) {
     drainRecordingBuffer(true);
     if (recTrk >= 0 && tracks[recTrk].file.isOpen() && tracks[recTrk].recordedFrames > 0) {
-      uint64_t validBytes = trackWavByteOffset(recTrk, tracks[recTrk].recordedFrames);
-      if (tracks[recTrk].file.fileSize() > validBytes && tracks[recTrk].file.seekSet(validBytes)) {
-        tracks[recTrk].file.truncate();
-      }
-      writeWavHeader(tracks[recTrk].file, tracks[recTrk].recordedFrames, recTrk);
-      tracks[recTrk].file.sync();
+      finalizeTrackWavFile(tracks[recTrk].file, tracks[recTrk].recordedFrames, recTrk);
       songDirty = true;
     }
     recording.windowExited = false;
@@ -2777,13 +3040,17 @@ FLASHMEM void storageStopTransport() {
       }
     }
     if (recording.autoMute) {
-      tr.state = (tr.recordedFrames > 0) ? TrackState::Playing : TrackState::Empty;
+      tr.state = (recording.prevWasMuted && tr.recordedFrames > 0)
+                     ? TrackState::Muted
+                     : ((tr.recordedFrames > 0) ? TrackState::Playing : TrackState::Empty);
       recording.autoMute = false;
+      recording.prevWasMuted = false;
     }
   }
 
   recording.src = AudioRecSrc::Off;
   recording.autoMute = false;
+  recording.prevWasMuted = false;
   recording.reverse = false;
   recording.mode = Recording::Idle;
   recording.track = -1;
@@ -3128,6 +3395,7 @@ FLASHMEM void serviceStorage() {
     interrupts();
     recording.readNow = sNow;
     recording.writeTapeFrame = sTape;
+    recording.firstOverviewCol = 32767;
     recording.lastOverviewCol = -1;
   }
 
@@ -3140,6 +3408,18 @@ FLASHMEM void serviceStorage() {
     for (int t = 0; t < NUM_AUDIO_TRACKS; t++) {
       if (tracks[t].live) {
         fillTrackRing(t, chunks);
+      }
+    }
+    if (transport.loopEnabled) {
+      uint32_t wrapCnt = transport.loopWrapCount;
+      if (wrapCnt != lastAudioScrubWrapCount) {
+        lastAudioScrubWrapCount = wrapCnt;
+        if (abs((int)transport.speedQuarter) > 8 &&
+            recording.mode != Recording::Active &&
+            recording.mode != Recording::Finishing &&
+            !recording.windowExited) {
+          prefillTrackStreams(transport.tapeFrame);
+        }
       }
     }
   }
@@ -3166,21 +3446,18 @@ FLASHMEM void serviceStorage() {
       recording.windowExited = false;
       int recTrk = recording.track;
       if (recTrk >= 0 && tracks[recTrk].file.isOpen()) {
-        uint64_t validBytes = trackWavByteOffset(recTrk, tracks[recTrk].recordedFrames);
-        if (tracks[recTrk].file.fileSize() > validBytes && tracks[recTrk].file.seekSet(validBytes)) {
-          tracks[recTrk].file.truncate();
-        }
-        writeWavHeader(tracks[recTrk].file, tracks[recTrk].recordedFrames, recTrk);
-        tracks[recTrk].file.sync();
+        finalizeTrackWavFile(tracks[recTrk].file, tracks[recTrk].recordedFrames, recTrk);
       }
       if (recTrk >= 0 && recTrk < NUM_AUDIO_TRACKS) {
         tracks[recTrk].armMode = ArmMode::Off;
         if (recording.autoMute) {
-          tracks[recTrk].state = (tracks[recTrk].recordedFrames > 0) ? TrackState::Playing : TrackState::Empty;
+          tracks[recTrk].state = (recording.prevWasMuted && tracks[recTrk].recordedFrames > 0)
+                                     ? TrackState::Muted
+                                     : ((tracks[recTrk].recordedFrames > 0) ? TrackState::Playing : TrackState::Empty);
           recording.autoMute = false;
+          recording.prevWasMuted = false;
         }
-        if (transport.mode == TransportMode::Running && transport.loopEnabled &&
-            (transport.punchOutFrame - transport.punchInFrame) <= (RING_FRAMES + CHUNK_FRAMES)) {
+        if (transport.mode == TransportMode::Running && transport.loopEnabled) {
           Track &tr = tracks[recTrk];
           noInterrupts();
           tr.live = false;
@@ -3197,11 +3474,16 @@ FLASHMEM void serviceStorage() {
       }
       recording.src = AudioRecSrc::Off;
       recording.autoMute = false;
+      recording.prevWasMuted = false;
       recording.mode = Recording::Idle;
       recording.track = -1;
       songDirty = true;
       uiForceRedraw();
     }
+  }
+
+  if (recording.mode == Recording::Idle) {
+    flushSystemSettingsIfDirty(false);
   }
 }
 
@@ -3254,6 +3536,12 @@ FLASHMEM uint32_t storageSongMaxAudibleFrame() {
   return min(maxDataFrame, (uint32_t)MAX_REC_FRAMES);
 }
 
+FLASHMEM bool storageAnyTailFxActive() {
+  const SongSettings &ps = songSettings();
+  return ps.masterDelay > 0 || ps.masterReverb > 0 ||
+         anyAudioTrackDelayOrReverbActive() || fmSynthHasActiveOutput();
+}
+
 FLASHMEM MasterExportResult storageExportMasterAudioWav() {
   if (transport.mode != TransportMode::Stopped) {
     storageStopTransport();
@@ -3296,11 +3584,15 @@ FLASHMEM MasterExportResult storageExportMasterAudioWav() {
     midiTracks[t].armMode = ArmMode::Off;
   }
 
+  midiInSuspend(true);
+  midiInResetClockState();
   fmSynthSetExportTailPhase(false);
   fmSynthAllNotesOff();
   resetMasterFxState();
+  resetInstFxState();
   resetAllAudioTrackFxState();
   resetAudioInputFxState();
+  resetPostFxLimiter();
 
   transport.speedQuarter = DEFAULT_SPEED_QUARTER;
   transport.loopEnabled = false;
@@ -3324,6 +3616,7 @@ FLASHMEM MasterExportResult storageExportMasterAudioWav() {
   bool tailPhaseEntered = false;
   bool cancelled = false;
   bool writeErr = false;
+  bool dropoutErr = false;
 
   for (;;) {
     if (usbDriveTick) usbDriveTick();
@@ -3346,25 +3639,20 @@ FLASHMEM MasterExportResult storageExportMasterAudioWav() {
     uint32_t curNow = transport.now;
     int32_t avail = (int32_t)(curNow - exportReadNow);
     if (avail > (int32_t)INPUT_FRAMES) {
-      uint32_t drop = (uint32_t)avail - INPUT_FRAMES;
-      exportReadNow += drop;
-      avail = (int32_t)INPUT_FRAMES;
+      dropoutErr = true;
+      break;
     }
 
     bool flushingTail = tailPhaseEntered && (writtenFrames >= maxDataFrame);
     uint32_t minBatch = flushingTail ? 512u : 1024u;
     if ((uint32_t)avail >= minBatch || (transport.mode != TransportMode::Running && avail > 0)) {
       uint32_t n = min((uint32_t)avail, (uint32_t)CHUNK_FRAMES);
-      if (!flushingTail && n > 2048u) n = 2048u;
       for (uint32_t i = 0; i < n; i++) {
         chunk[i] = inputRing[(exportReadNow + i) % INPUT_FRAMES];
       }
       exportReadNow += n;
 
-      const SongSettings &ps = songSettings();
-      const bool hasDelayOrVerb = (ps.masterDelay > 0 || ps.masterReverb > 0 ||
-                                   anyAudioTrackDelayOrReverbActive() || fmSynthHasActiveOutput());
-      const uint32_t reqSilent = hasDelayOrVerb ? 16384u : 2048u;
+      const uint32_t reqSilent = storageAnyTailFxActive() ? 16384u : 2048u;
       uint32_t framesToKeep = n;
       bool doneNow = false;
 
@@ -3403,15 +3691,17 @@ FLASHMEM MasterExportResult storageExportMasterAudioWav() {
     }
   }
 
+  fmSynthSetExportTailPhase(false);
+  storageStopTransport();
   noInterrupts();
   masterExportActive = false;
   interrupts();
-  fmSynthSetExportTailPhase(false);
-  storageStopTransport();
   fmSynthAllNotesOff();
   resetMasterFxState();
+  resetInstFxState();
   resetAllAudioTrackFxState();
   resetAudioInputFxState();
+  resetPostFxLimiter();
 
   for (int t = 0; t < NUM_AUDIO_TRACKS; t++) {
     tracks[t].armMode = prevAudioArm[t];
@@ -3424,8 +3714,10 @@ FLASHMEM MasterExportResult storageExportMasterAudioWav() {
   transport.speedQuarter = prevSpeedQuarter;
   storageSeekTape(prevTapeFrame);
   updateMetronomeState();
+  midiInResetClockState();
+  midiInSuspend(false);
 
-  if (cancelled || writeErr) {
+  if (cancelled || writeErr || dropoutErr) {
     outFile.close();
     if (SD.sdfs.exists(wavPath)) {
       SD.sdfs.remove(wavPath);
@@ -3446,6 +3738,7 @@ FLASHMEM MasterExportResult storageExportMasterAudioWav() {
   uiForceRedraw();
 
   if (cancelled) return MasterExportResult::Cancelled;
+  if (dropoutErr) return MasterExportResult::Dropout;
   if (writeErr) return MasterExportResult::Error;
   return MasterExportResult::Ok;
 }
@@ -3466,6 +3759,7 @@ FLASHMEM void flushHeaders() {
 }
 
 FLASHMEM bool storageBegin(void (*progress)(const char *)) {
+  engineInitRings();
   if (progress) progress("Mounting SD card...");
   if (!SD.sdfs.begin(SdioConfig(DMA_SDIO)) || !cardResponds()) {
     return false;

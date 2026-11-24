@@ -3,9 +3,11 @@
 #include "engine.h"
 #include "midi_seq.h"
 #include "app.h"
+#include "page_system_settings.h"
 #include "ui.h"
 #include <Arduino.h>
 #include <math.h>
+#include <string.h>
 
 using namespace looper;
 
@@ -85,6 +87,7 @@ static bool transportSourceAllows(MidiSource from) {
 }
 
 FLASHMEM void midiInSuspend(bool off) { suspended = off; }
+bool midiInIsSuspended() { return suspended; }
 
 FLASHMEM void midiInSongPosition(uint16_t pos16, uint32_t us, MidiSource from) {
   (void)us;
@@ -138,7 +141,7 @@ FLASHMEM void midiInSysEx(const uint8_t *data, uint16_t len, uint32_t us, MidiSo
   }
 }
 
-FLASHMEM __attribute__((noinline)) void midiInByte(uint8_t b, uint32_t us, MidiSource from) {
+__attribute__((noinline)) void midiInByte(uint8_t b, uint32_t us, MidiSource from) {
   if (suspended) return;
 
   // 1. System Real-Time messages (0xF8..0xFF) can appear anywhere, even mid-message or mid-SysEx
@@ -282,7 +285,7 @@ FLASHMEM void midiInResetClockState() {
 
 FLASHMEM void midiInService() {
   uint32_t irq = saveIrq();
-  uint32_t n = tickCount, ne = eventHead;
+  uint32_t ne = eventHead;
   restoreIrq(irq);
 
   bool extEnabled = (songSettings().clockSource != ClockSource::Internal);
@@ -297,7 +300,7 @@ FLASHMEM void midiInService() {
     restoreIrq(irq);
 
     noteUserActivity();
-    if (!transportEnabled) continue;
+    if (!transportEnabled || isSysProjectPlayLocked()) continue;
 
     switch (e.type) {
       case 0xFA: // MIDI Start
@@ -389,14 +392,21 @@ FLASHMEM void midiInService() {
     }
   }
 
-  if (n - seenTicks > TICKS) {
-    seenTicks = n - TICKS;
+  uint32_t snapTicks[TICKS];
+  irq = saveIrq();
+  uint32_t n = tickCount;
+  memcpy(snapTicks, (const void *)tickUs, sizeof(snapTicks));
+  restoreIrq(irq);
+
+  constexpr uint32_t MAX_LOOKBACK = 48u;
+  if (n - seenTicks > TICKS - MAX_LOOKBACK) {
+    seenTicks = n - (TICKS - MAX_LOOKBACK);
     lastTickUs = 0;
     validTickStreak = 0;
     tempoLocked = false;
   }
   for (; seenTicks < n; seenTicks++) {
-    uint32_t us = tickUs[seenTicks % TICKS];
+    uint32_t us = snapTicks[seenTicks % TICKS];
     if (lastTickUs != 0) {
       uint32_t dt = us - lastTickUs;
       if (dt > 150000) {
@@ -411,7 +421,7 @@ FLASHMEM void midiInService() {
 
         // Detect deliberate master tempo jumps (> 4% change over a 6-tick / quarter-beat span)
         if (validTickStreak >= 6) {
-          uint32_t shortSpanUs = us - tickUs[(seenTicks - 6) % TICKS];
+          uint32_t shortSpanUs = us - snapTicks[(seenTicks - 6) % TICKS];
           float shortAvgUs = (float)shortSpanUs * (1.0f / 6.0f);
           if (fabsf(shortAvgUs - smoothedTickUs) > smoothedTickUs * 0.04f) {
             validTickStreak = 6;
@@ -424,7 +434,7 @@ FLASHMEM void midiInService() {
                            : (validTickStreak >= 24) ? 24u
                            : (validTickStreak >= 6)  ? validTickStreak : 1u;
         float windowTickUs = (spanTicks > 1u)
-                                 ? ((float)(us - tickUs[(seenTicks - spanTicks) % TICKS]) / (float)spanTicks)
+                                 ? ((float)(us - snapTicks[(seenTicks - spanTicks) % TICKS]) / (float)spanTicks)
                                  : (float)dt;
 
         if (validTickStreak == 1) {
@@ -475,6 +485,12 @@ FLASHMEM void midiInService() {
       lastTickUs = 0;
       validTickStreak = 0;
       tempoLocked = false;
+    }
+    if (!tempoLocked && extEnabled && transport.mode == TransportMode::Stopped) {
+      const SongSettings &ps = songSettings();
+      if (bpm != ps.bpm) {
+        followTempo(spbForBpm(ps.bpm), ps.bpm);
+      }
     }
   }
 }

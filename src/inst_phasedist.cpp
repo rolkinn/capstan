@@ -451,7 +451,7 @@ PROGMEM static const InstEngineOps PHASEDIST_ENGINE_OPS = {
   phaseDistRenderVoice
 };
 
-FLASHMEM const InstEngineOps &instPhaseDistEngine() {
+const InstEngineOps &instPhaseDistEngine() {
   return PHASEDIST_ENGINE_OPS;
 }
 

@@ -1,6 +1,8 @@
 // inst_sampler.cpp — SD Card WAV Sampler Instrument Engine (4-Octave Keyboard C3..B6)
 #include "inst_sampler.h"
 #include "storage.h"
+#include "paged_dir_scanner.h"
+#include "ui.h"
 #include <Arduino.h>
 #include <stdio.h>
 #include <string.h>
@@ -75,7 +77,7 @@ SamplerStream *samplerStreamSlot(uint32_t streamIdx) {
 // Sample Browser Modal State (32-Entry Sliding Window)
 // ============================================================================
 static constexpr int MAX_BROWSER_ENTRIES = 32;
-static SamplerBrowserEntry *const browserEntries = reinterpret_cast<SamplerBrowserEntry *>(sharedBrowserPoolBuf());
+static SamplerBrowserEntry *const browserEntries = reinterpret_cast<SamplerBrowserEntry *>(sharedBrowserPool);
 static int browserEntryCount = 0;
 static int browserWindowStart = 0;
 static int browserWindowCount = 0;
@@ -153,6 +155,8 @@ FLASHMEM static bool isDirSlotReferenced(uint8_t dirSlot) {
   return false;
 }
 
+static constexpr uint8_t SAMPLER_DIR_POOL_FULL = 0xFEu;
+
 FLASHMEM static uint8_t allocOrFindSamplerDir(const char *dirPath) {
   if (!dirPath || !dirPath[0] || strcasecmp(dirPath, SAMPLES_DIR) == 0) {
     return 0xFFu;
@@ -174,8 +178,7 @@ FLASHMEM static uint8_t allocOrFindSamplerDir(const char *dirPath) {
       return (uint8_t)d;
     }
   }
-  snprintf(samplerDirs[0], SAMPLER_DIR_MAX, "%s", dirPath);
-  return 0u;
+  return SAMPLER_DIR_POOL_FULL;
 }
 
 FLASHMEM static void resolveKeyFullPath(int instIdx, int keyIdx, char *outFull, size_t outSz) {
@@ -489,6 +492,7 @@ FLASHMEM static void fillSf2Stream(SamplerStream &st, int maxPasses, bool forceH
     const bool held = forceHeld || (st.sf2LoopMode == 1) ||
                       ((v != nullptr) && v->active && (v->gate || v->sustained));
     const bool hasLoop = (st.sf2LoopMode != 0) &&
+                         !(st.sf2LoopMode == 3u && st.loopEndFrame <= 640u && st.fileFrame >= 640u) &&
                          (st.loopEndFrame > st.loopStartFrame) &&
                          (st.loopEndFrame <= st.totalFrames);
     const uint32_t loopLen = hasLoop ? (st.loopEndFrame - st.loopStartFrame) : 0u;
@@ -636,9 +640,12 @@ FLASHMEM static void fillSamplerStream(SamplerStream &st, int maxPasses, bool fo
       if (mode == SamplerPressMode::Rep && held) {
         st.fileFrame = 0;
       } else if (mode == SamplerPressMode::RepThru && held) {
-        // Wait until ring buffer has <= 144 frames (~3.2 ms) before wrapping so
-        // releasing the key during the sample exits the loop cleanly at the end
-        if (queued > 144 && st.totalFrames > 144) {
+        // Wait until ring buffer holds <= ~2.5 audio blocks at current pitch before wrapping so
+        // releasing the key exits the loop cleanly without starving pitched-up playback
+        const uint32_t wrapMargin = constrain(
+            (uint32_t)(((uint64_t)st.baseStepFp * (uint64_t)AUDIO_BLOCK_SAMPLES * 5ULL) >> 17),
+            192u, (uint32_t)(SAMPLER_RING_FRAMES >> 1));
+        if (queued > wrapMargin && st.totalFrames > wrapMargin) {
           break;
         }
         st.fileFrame = 0;
@@ -1280,7 +1287,13 @@ FLASHMEM bool samplerAssignSample(int instIdx, int keyIdx, const char *fullOrRel
       size_t subLen = (size_t)(lastSlash - p);
       snprintf(dirPart, sizeof(dirPart), "%s/%.*s", SAMPLES_DIR, (int)subLen, p);
     }
-    samplerKeyDirIdx[instIdx][keyIdx] = allocOrFindSamplerDir(dirPart);
+    uint8_t dIdx = allocOrFindSamplerDir(dirPart);
+    if (dIdx == SAMPLER_DIR_POOL_FULL) {
+      uiShowToast("DIR POOL FULL");
+      uiForceRedraw();
+      return false;
+    }
+    samplerKeyDirIdx[instIdx][keyIdx] = dIdx;
     snprintf(samplerKeyFile[instIdx][keyIdx], SAMPLER_FILE_MAX, "%s", lastSlash + 1);
   }
   if (samplerKeyFile[instIdx][keyIdx][0] != '\0') {
@@ -1561,6 +1574,7 @@ FLASHMEM bool samplerLoadSingleInstData(FsFile &f, int instIdx) {
   }
 
   int keyBase = (fileKeys == 18) ? 12 : 0; // Map legacy 18-key (C4..F5) presets to C4..F5
+  bool dirPoolOverflow = false;
   for (int k = 0; k < fileKeys && (keyBase + k) < SAMPLER_NUM_KEYS; k++) {
     tmpFiles[k][SAMPLER_FILE_MAX - 1] = '\0';
     int dstK = keyBase + k;
@@ -1570,10 +1584,20 @@ FLASHMEM bool samplerLoadSingleInstData(FsFile &f, int instIdx) {
       continue;
     }
     uint8_t rawDir = tmpDir[k];
+    if (rawDir < NUM_SAMPLER_DIRS && dirRemap[rawDir] == SAMPLER_DIR_POOL_FULL) {
+      dirPoolOverflow = true;
+      samplerKeyDirIdx[instIdx][dstK] = 0xFFu;
+      samplerKeyFile[instIdx][dstK][0] = '\0';
+      continue;
+    }
     samplerKeyDirIdx[instIdx][dstK] = (rawDir < NUM_SAMPLER_DIRS) ? dirRemap[rawDir] : 0xFFu;
     memcpy(samplerKeyFile[instIdx][dstK], tmpFiles[k], SAMPLER_FILE_MAX);
   }
   rebuildSamplerSlotMask(instIdx);
+  if (dirPoolOverflow) {
+    uiShowToast("DIR POOL FULL");
+    uiForceRedraw();
+  }
   return true;
 }
 
@@ -1587,155 +1611,28 @@ FLASHMEM static bool hasWavExtension(const char *name) {
   return strcasecmp(name + len - 4, ".wav") == 0;
 }
 
-static inline bool samplerEntryComesBefore(const SamplerBrowserEntry &a, const SamplerBrowserEntry &b) {
-  bool aParent = (a.isDir != 0) && (strcmp(a.name, "..") == 0);
-  bool bParent = (b.isDir != 0) && (strcmp(b.name, "..") == 0);
-  if (aParent != bParent) return aParent;
-  if ((a.isDir != 0) != (b.isDir != 0)) return a.isDir != 0;
-  int cmp = strcasecmp(a.name, b.name);
-  if (cmp != 0) return cmp < 0;
-  return strcmp(a.name, b.name) < 0;
-}
-
-FLASHMEM static void insertSamplerSmallest(SamplerBrowserEntry *arr, int &count, int cap,
-                                           const SamplerBrowserEntry &item) {
-  if (cap <= 0) return;
-  if (count >= cap && !samplerEntryComesBefore(item, arr[cap - 1])) return;
-  int ins = (count < cap) ? count++ : (cap - 1);
-  while (ins > 0 && samplerEntryComesBefore(item, arr[ins - 1])) {
-    arr[ins] = arr[ins - 1];
-    ins--;
-  }
-  arr[ins] = item;
-}
-
-FLASHMEM static void insertSamplerLargest(SamplerBrowserEntry *arr, int &count, int cap,
-                                          const SamplerBrowserEntry &item) {
-  if (cap <= 0) return;
-  if (count >= cap && !samplerEntryComesBefore(arr[0], item)) return;
-  if (count < cap) {
-    int ins = count++;
-    while (ins > 0 && samplerEntryComesBefore(item, arr[ins - 1])) {
-      arr[ins] = arr[ins - 1];
-      ins--;
-    }
-    arr[ins] = item;
-  } else {
-    int ins = 0;
-    while (ins + 1 < cap && samplerEntryComesBefore(arr[ins + 1], item)) {
-      arr[ins] = arr[ins + 1];
-      ins++;
-    }
-    arr[ins] = item;
-  }
+FLASHMEM static bool acceptSamplerWavFile(const char *name, uint64_t) {
+  return hasWavExtension(name);
 }
 
 FLASHMEM static void scanBrowserDirectoryWindow(const SamplerBrowserEntry *pivot, int pivotIdx, int wantStart,
                                                 const char *matchFile = nullptr, int *outMatchIdx = nullptr,
                                                 SamplerBrowserEntry *outMatchEntry = nullptr) {
-  if (outMatchIdx) *outMatchIdx = -1;
-
   if (!SD.sdfs.exists(ROOT_DIR)) {
     SD.sdfs.mkdir(ROOT_DIR);
   }
   if (!SD.sdfs.exists(browserDir)) {
     snprintf(browserDir, sizeof(browserDir), "%s", ROOT_DIR);
   }
+  pagedScanDirWindow<SamplerBrowserEntry>(
+      browserDir, browserEntries, MAX_BROWSER_ENTRIES,
+      browserEntryCount, browserWindowStart, browserWindowCount,
+      acceptSamplerWavFile, pivot, pivotIdx, wantStart,
+      matchFile, outMatchIdx, outMatchEntry);
+}
 
-  SamplerBrowserEntry pivotCopy{};
-  const bool usePivot = (pivot != nullptr);
-  int pOff = 0;
-  int leftCap = 0;
-  int rightCap = MAX_BROWSER_ENTRIES;
-  int leftCount = 0;
-  int rightCount = 0;
-  int totalCount = 0;
-
-  if (usePivot) {
-    pivotCopy = *pivot;
-    pOff = constrain(pivotIdx - wantStart, 0, MAX_BROWSER_ENTRIES - 1);
-    leftCap = pOff;
-    rightCap = (MAX_BROWSER_ENTRIES - 1) - pOff;
-  }
-
-  SamplerBrowserEntry matchTarget{};
-  const bool hasMatchTarget = (matchFile != nullptr && matchFile[0] != '\0' &&
-                               strlen(matchFile) < sizeof(matchTarget.name));
-  int matchRank = 0;
-  bool matchFound = false;
-  if (hasMatchTarget) {
-    snprintf(matchTarget.name, sizeof(matchTarget.name), "%s", matchFile);
-    matchTarget.isDir = 0;
-  }
-
-  auto considerItem = [&](const SamplerBrowserEntry &item) {
-    totalCount++;
-    if (hasMatchTarget) {
-      if (!item.isDir && strcasecmp(item.name, matchTarget.name) == 0) {
-        matchFound = true;
-        if (outMatchEntry) *outMatchEntry = item;
-      } else if (samplerEntryComesBefore(item, matchTarget)) {
-        matchRank++;
-      }
-    }
-    if (!usePivot) {
-      insertSamplerSmallest(browserEntries, rightCount, rightCap, item);
-    } else if (samplerEntryComesBefore(item, pivotCopy)) {
-      insertSamplerLargest(browserEntries, leftCount, leftCap, item);
-    } else if (samplerEntryComesBefore(pivotCopy, item)) {
-      insertSamplerSmallest(&browserEntries[pOff + 1], rightCount, rightCap, item);
-    }
-  };
-
-  // Add ".." parent folder entry whenever not at SD root "/"
-  if (strcmp(browserDir, "/") != 0) {
-    SamplerBrowserEntry parentItem{};
-    snprintf(parentItem.name, sizeof(parentItem.name), "..");
-    parentItem.isDir = 1;
-    considerItem(parentItem);
-  }
-
-  FsFile dir = SD.sdfs.open(browserDir, O_RDONLY);
-  if (dir.isOpen() && dir.isDir()) {
-    FsFile entry;
-    while (entry.openNext(&dir, O_RDONLY)) {
-      char nameBuf[64] = {};
-      entry.getName(nameBuf, sizeof(nameBuf));
-      bool isSubDir = entry.isDir();
-      bool isHidden = entry.isHidden() || (nameBuf[0] == '.') ||
-                      (strcasecmp(nameBuf, "System Volume Information") == 0);
-      entry.close();
-
-      if (isHidden || nameBuf[0] == '\0') continue;
-      if (!isSubDir && !hasWavExtension(nameBuf)) continue;
-      if (strlen(nameBuf) >= sizeof(browserEntries[0].name)) continue;
-
-      SamplerBrowserEntry item{};
-      snprintf(item.name, sizeof(item.name), "%s", nameBuf);
-      item.isDir = isSubDir ? 1 : 0;
-      considerItem(item);
-      keepStreaming();
-    }
-  }
-  if (dir.isOpen()) dir.close();
-
-  browserEntryCount = totalCount;
-  if (!usePivot) {
-    browserWindowStart = 0;
-    browserWindowCount = rightCount;
-  } else {
-    browserEntries[leftCount] = pivotCopy;
-    if (leftCount < pOff && rightCount > 0) {
-      memmove(&browserEntries[leftCount + 1], &browserEntries[pOff + 1],
-              (size_t)rightCount * sizeof(SamplerBrowserEntry));
-    }
-    browserWindowStart = max(0, pivotIdx - leftCount);
-    browserWindowCount = leftCount + 1 + rightCount;
-  }
-
-  if (matchFound && outMatchIdx) {
-    *outMatchIdx = matchRank;
-  }
+FLASHMEM static void rescanSamplerBrowserWindow(const SamplerBrowserEntry *pivot, int pivotIdx, int wantStart) {
+  scanBrowserDirectoryWindow(pivot, pivotIdx, wantStart);
 }
 
 FLASHMEM static void scanBrowserDirectory() {
@@ -1774,40 +1671,9 @@ FLASHMEM const SamplerBrowserEntry *samplerBrowserEntryAt(int idx) {
 }
 
 FLASHMEM static void syncBrowserScroll() {
-  if (browserEntryCount <= 0) {
-    browserCursor = 0;
-    browserScroll = 0;
-    browserWindowStart = 0;
-    browserWindowCount = 0;
-    return;
-  }
-  browserCursor = constrain(browserCursor, 0, browserEntryCount - 1);
-  if (browserCursor < browserScroll) {
-    browserScroll = browserCursor;
-  } else if (browserCursor >= browserScroll + SAMPLER_BROWSER_VISIBLE_ROWS) {
-    browserScroll = browserCursor - SAMPLER_BROWSER_VISIBLE_ROWS + 1;
-  }
-  int maxScroll = max(0, browserEntryCount - SAMPLER_BROWSER_VISIBLE_ROWS);
-  browserScroll = constrain(browserScroll, 0, maxScroll);
-
-  int visEnd = min(browserEntryCount - 1, browserScroll + SAMPLER_BROWSER_VISIBLE_ROWS - 1);
-  if (browserScroll < browserWindowStart || visEnd >= browserWindowStart + browserWindowCount) {
-    int maxWinStart = max(0, browserEntryCount - MAX_BROWSER_ENTRIES);
-    int wantStart = constrain(browserScroll - 12, 0, maxWinStart);
-    if (wantStart == 0) {
-      scanBrowserDirectoryWindow(nullptr, 0, 0);
-    } else {
-      int overlapLo = max(browserWindowStart, wantStart);
-      int overlapHi = min(browserWindowStart + browserWindowCount - 1, wantStart + MAX_BROWSER_ENTRIES - 1);
-      if (browserWindowCount > 0 && overlapLo <= overlapHi) {
-        int pivotIdx = (wantStart < browserWindowStart) ? overlapHi : overlapLo;
-        SamplerBrowserEntry pivot = browserEntries[pivotIdx - browserWindowStart];
-        scanBrowserDirectoryWindow(&pivot, pivotIdx, wantStart);
-      } else {
-        scanBrowserDirectoryWindow(nullptr, 0, 0);
-      }
-    }
-  }
+  pagedSyncWindowScroll(browserEntryCount, SAMPLER_BROWSER_VISIBLE_ROWS, MAX_BROWSER_ENTRIES,
+                        browserCursor, browserScroll, browserWindowStart, browserWindowCount,
+                        browserEntries, rescanSamplerBrowserWindow);
 }
 
 FLASHMEM void openSamplerBrowser(int instIdx, int keyIdx) {
@@ -1887,22 +1753,7 @@ FLASHMEM bool samplerBrowserConfirm() {
   entName[sizeof(entName) - 1] = '\0';
 
   if (isDir) {
-    if (strcmp(entName, "..") == 0) {
-      char *lastSlash = strrchr(browserDir, '/');
-      if (!lastSlash || lastSlash == browserDir) {
-        snprintf(browserDir, sizeof(browserDir), "/");
-      } else {
-        *lastSlash = '\0';
-      }
-    } else {
-      char nextDir[SAMPLER_DIR_MAX];
-      if (strcmp(browserDir, "/") == 0) {
-        snprintf(nextDir, sizeof(nextDir), "/%.42s", entName);
-      } else {
-        snprintf(nextDir, sizeof(nextDir), "%.51s/%.42s", browserDir, entName);
-      }
-      snprintf(browserDir, sizeof(browserDir), "%s", nextDir);
-    }
+    if (!pagedStepBrowserDir(browserDir, sizeof(browserDir), entName)) return false;
     scanBrowserDirectory();
     if (browserEntryCount > 1 && browserWindowCount > 0 && strcmp(browserEntries[0].name, "..") == 0) {
       browserCursor = 1;
@@ -1918,7 +1769,9 @@ FLASHMEM bool samplerBrowserConfirm() {
   } else {
     snprintf(fullPath, sizeof(fullPath), "%.95s/%.42s", browserDir, entName);
   }
-  samplerAssignSample(browserInstIdx, browserKeyIdx, fullPath);
+  if (!samplerAssignSample(browserInstIdx, browserKeyIdx, fullPath)) {
+    return false;
+  }
   browserOpen = false;
   return true;
 }
@@ -2048,7 +1901,7 @@ PROGMEM static const InstEngineOps SAMPLER_ENGINE_OPS = {
   samplerRenderVoice
 };
 
-FLASHMEM const InstEngineOps &instSamplerEngine() {
+const InstEngineOps &instSamplerEngine() {
   return SAMPLER_ENGINE_OPS;
 }
 

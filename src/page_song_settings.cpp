@@ -134,6 +134,12 @@ FLASHMEM void closeSongTuner() {
   uiForceRedraw();
 }
 
+FLASHMEM void resetSongTunerUiState() {
+  tunerSelSource = TunerSource::LineIn;
+  tunerCol = 0;
+  tunerMuteOut = false;
+}
+
 FLASHMEM static int songSettingColCount(int row) {
   if (row == PSET_REC_SRC) return 2;
   if (row == PSET_MONITOR) return 2;
@@ -1114,6 +1120,8 @@ FLASHMEM static void songSettingsOnEditPress(bool shiftHeld) {
       uiShowToast("SONG IS EMPTY");
     } else if (res == MasterExportResult::Cancelled) {
       uiShowToast("EXPORT CANCELLED");
+    } else if (res == MasterExportResult::Dropout) {
+      uiShowToast("EXPORT DROPOUT");
     } else {
       uiShowToast("EXPORT FAILED");
     }

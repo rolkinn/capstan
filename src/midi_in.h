@@ -10,6 +10,7 @@ void midiInBegin(HardwareSerial *port);
 void midiInByte(uint8_t b, uint32_t us, MidiSource from = MIDI_SERIAL);
 void midiInSysEx(const uint8_t *data, uint16_t len, uint32_t us, MidiSource from = MIDI_SERIAL);
 void midiInSuspend(bool off);
+bool midiInIsSuspended();
 void midiInSongPosition(uint16_t pos16, uint32_t us, MidiSource from);
 void midiInService();
 void midiInResetClockState();

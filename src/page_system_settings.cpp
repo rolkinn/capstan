@@ -63,12 +63,18 @@ static int projManageCursor = 0;
 static int projManageScroll = 0;
 static int projManageCol = PROJ_ACT_PLAY;
 
+enum class ProjConfirmKind : uint8_t {
+  DeleteProject  = 0,
+  RemoveSong     = 1,
+  SaveBeforePlay = 2
+};
 static bool projConfirmOpen = false;
+static ProjConfirmKind projConfirmKind = ProjConfirmKind::DeleteProject;
 static int projConfirmCursor = 0; // 0 = YES, 1 = NO
 
 static char projEditingName[MAX_PROJECT_NAME_LEN + 1] = "";
 static char (*const projEditSongs)[MAX_SONG_NAME_LEN + 1] =
-    reinterpret_cast<char (*)[MAX_SONG_NAME_LEN + 1]>(sharedBrowserPoolBuf());
+    reinterpret_cast<char (*)[MAX_SONG_NAME_LEN + 1]>(sharedBrowserPool);
 static_assert(MAX_SONGS_PER_PROJECT * (MAX_SONG_NAME_LEN + 1) <= 2048, "projEditSongs must fit in sharedBrowserPool");
 static int projEditSongCount = 0;
 static int projEditCursor = 0;
@@ -494,6 +500,20 @@ FLASHMEM void sysProjectPlayOnOutputSwitched(bool phonesConnected) {
   prevProjCtrlKey = 0;
 }
 
+FLASHMEM void sysProjectPlayOnMasterVolChanged(uint8_t vol) {
+  if (projModalView != ProjModalView::PlayProject) return;
+  projPlayVol = vol;
+  if (appAreHeadphonesConnected()) projPlayVolHp = vol;
+  else projPlayVolSpk = vol;
+  prevProjCtrlKey = 0;
+}
+
+FLASHMEM void sysProjectPlayOnSpeedChanged(int8_t speedQuarter) {
+  if (projModalView != ProjModalView::PlayProject) return;
+  projPlaySpeedQuarter = speedQuarter;
+  prevProjCtrlKey = 0;
+}
+
 FLASHMEM void sysProjectPlayService() {
   if (projModalView != ProjModalView::PlayProject || !projPlayActive) return;
 
@@ -548,9 +568,7 @@ FLASHMEM void sysProjectPlayService() {
     fmSynthSetExportTailPhase(true);
   }
 
-  const SongSettings &ps = songSettings();
-  const bool hasDelayOrVerb = (ps.masterDelay > 0 || ps.masterReverb > 0 || fmSynthHasActiveOutput());
-  const uint32_t reqSilent = hasDelayOrVerb ? 16384u : 2048u;
+  const uint32_t reqSilent = storageAnyTailFxActive() ? 16384u : 2048u;
 
   if (pkL <= (4.5f / 32768.0f) && pkR <= (4.5f / 32768.0f)) {
     projPlaySilentFrames += dtFrames;
@@ -581,7 +599,7 @@ FLASHMEM bool isSysProjectsModalOpen() {
 
 FLASHMEM uint8_t sysProjectsModalState() {
   if (projModalView == ProjModalView::Closed) return 0;
-  return (uint8_t)projModalView | (projConfirmOpen ? 0x10u : 0x00u);
+  return (uint8_t)projModalView | (projConfirmOpen ? (0x10u | ((uint8_t)projConfirmKind << 5)) : 0x00u);
 }
 
 FLASHMEM bool isSysProjectsConfirmOpen() {
@@ -667,15 +685,18 @@ FLASHMEM void drawSysProjectsConfirmModal(bool full) {
   const int ovY = SY(94);
   const int ovW = SX(296);
   const int ovH = SY(24);
-  const bool isDelProj = (projModalView == ProjModalView::ManageList);
+  const uint8_t kindVal = (uint8_t)projConfirmKind;
 
   uint64_t k = hashMix(hashInit(), (uint64_t)ACCENT | ((uint64_t)cur << 16) |
-                                   ((uint64_t)isDelProj << 24));
+                                   ((uint64_t)kindVal << 24));
   if (full || k != prevProjConfirmKey) {
     prevProjConfirmKey = k;
     Surface s(ovW, ovH);
     s.drawBox(DARK, ACCENT);
-    s.drawText(SX(10), TY(ovH), isDelProj ? "Delete project?" : "Remove song?", INK);
+    const char *promptTxt = (projConfirmKind == ProjConfirmKind::SaveBeforePlay) ? "Save song?"
+                          : (projConfirmKind == ProjConfirmKind::DeleteProject)  ? "Delete project?"
+                                                                                 : "Remove song?";
+    s.drawText(SX(10), TY(ovH), promptTxt, INK);
 
     const char *const OPT_LABELS[2] = {"YES", "NO"};
     const int pillW = SX(42);
@@ -685,7 +706,9 @@ FLASHMEM void drawSysProjectsConfirmModal(bool full) {
 
     for (int i = 0; i < 2; i++) {
       bool sel = (cur == i);
-      uint16_t pBg = sel ? (i == 0 ? COLOR_WARN : ACCENT) : PANEL;
+      uint16_t pBg = (projConfirmKind == ProjConfirmKind::SaveBeforePlay)
+                         ? (sel ? (i == 0 ? COLOR_PLAY : COLOR_WARN) : PANEL)
+                         : (sel ? (i == 0 ? COLOR_WARN : ACCENT) : PANEL);
       uint16_t pFg = sel ? BG : INK;
       uint16_t pBd = sel ? INK : MID;
       s.drawPill(pillX[i], pillY, pillW, pillH, OPT_LABELS[i], pFg, pBg, pBd);
@@ -1177,11 +1200,46 @@ FLASHMEM static void drawProjPlayModal(bool full) {
   }
 }
 
+FLASHMEM static void enterProjPlayView() {
+  snprintf(projEditingName, sizeof(projEditingName), "%s", projectNameAt(projManageCursor));
+  projEditSongCount = loadProjectSongs(projEditingName, projEditSongs, MAX_SONGS_PER_PROJECT);
+  {
+    const SongSettings &curPs = songSettings();
+    projPlayVolHp = (curPs.masterVolHpEnc >= 1 && curPs.masterVolHpEnc <= MASTER_VOLUME_MAX + 1)
+                        ? (uint8_t)(curPs.masterVolHpEnc - 1)
+                        : curPs.masterVolume;
+    projPlayVolSpk = (curPs.masterVolSpkEnc >= 1 && curPs.masterVolSpkEnc <= MASTER_VOLUME_MAX + 1)
+                         ? (uint8_t)(curPs.masterVolSpkEnc - 1)
+                         : curPs.masterVolume;
+    projPlayVol = appAreHeadphonesConnected() ? projPlayVolHp : projPlayVolSpk;
+  }
+  projPlaySpeedQuarter = DEFAULT_SPEED_QUARTER;
+  projPlayLocked = false;
+  projPlayEditHeld = false;
+  projPlayEditModUsed = false;
+  projPlayListCursor = 0;
+  projPlayListScroll = 0;
+  projPlayPlayingIdx = -1;
+  projPlayZone = (projEditSongCount > 0) ? PROJ_PLAY_ZONE_CONTROLS : PROJ_PLAY_ZONE_EXIT;
+  projPlayCtrlCol = PROJ_PLAY_CTRL_PLAY;
+  projPlayAnimMs = 0;
+  projPlayLastTickMs = millis();
+  projModalView = ProjModalView::PlayProject;
+  invalidateSysProjectsModalCache();
+  inputSwallowModalKeys();
+  if (projEditSongCount > 0) {
+    projPlayStartSong(0, true);
+  } else {
+    uiShowToast("PROJECT IS EMPTY");
+    uiForceRedraw();
+  }
+}
+
 FLASHMEM void handleSysProjectsModalInput(uint8_t pressed, uint8_t now, uint32_t ms) {
   (void)ms;
   if (projModalView == ProjModalView::Closed) return;
 
-  // 1. Confirmation Overlay ("Delete project?" or "Remove song?")
+  // 1. Confirmation Overlay ("Delete project?", "Remove song?", or "Save song?")
   if (projConfirmOpen) {
     int step = ((pressed & (BTN_DOWN | BTN_RIGHT)) ? 1 : 0) -
                ((pressed & (BTN_UP | BTN_LEFT)) ? 1 : 0);
@@ -1192,8 +1250,19 @@ FLASHMEM void handleSysProjectsModalInput(uint8_t pressed, uint8_t now, uint32_t
     if (pressed & BTN_EDIT) {
       bool yes = (projConfirmCursor == 0);
       projConfirmOpen = false;
+      if (projConfirmKind == ProjConfirmKind::SaveBeforePlay) {
+        if (yes && !saveCurrentSong()) {
+          uiShowToast("SAVE FAILED");
+          inputSwallowModalKeys();
+          inputClearRepeat();
+          uiForceRedraw();
+          return;
+        }
+        enterProjPlayView();
+        return;
+      }
       if (yes) {
-        if (projModalView == ProjModalView::ManageList) {
+        if (projConfirmKind == ProjConfirmKind::DeleteProject) {
           const char *pName = projectNameAt(projManageCursor);
           if (deleteProjectFile(pName)) {
             if (projManageCursor >= projectCount() && projectCount() > 0) {
@@ -1204,7 +1273,7 @@ FLASHMEM void handleSysProjectsModalInput(uint8_t pressed, uint8_t now, uint32_t
           } else {
             uiShowToast("DELETE FAILED");
           }
-        } else if (projModalView == ProjModalView::EditProject) {
+        } else if (projConfirmKind == ProjConfirmKind::RemoveSong) {
           if (projEditSongCount > 0 && projEditCursor >= 0 && projEditCursor < projEditSongCount) {
             for (int i = projEditCursor; i < projEditSongCount - 1; i++) {
               memcpy(projEditSongs[i], projEditSongs[i + 1], sizeof(projEditSongs[i]));
@@ -1254,37 +1323,17 @@ FLASHMEM void handleSysProjectsModalInput(uint8_t pressed, uint8_t now, uint32_t
           openProjectKeyboard(false, "", true);
           inputSwallowModalKeys();
         } else if (projManageCol == PROJ_ACT_PLAY) {
-          snprintf(projEditingName, sizeof(projEditingName), "%s", projectNameAt(projManageCursor));
-          projEditSongCount = loadProjectSongs(projEditingName, projEditSongs, MAX_SONGS_PER_PROJECT);
-          {
-            const SongSettings &curPs = songSettings();
-            projPlayVolHp = (curPs.masterVolHpEnc >= 1 && curPs.masterVolHpEnc <= MASTER_VOLUME_MAX + 1)
-                                ? (uint8_t)(curPs.masterVolHpEnc - 1)
-                                : curPs.masterVolume;
-            projPlayVolSpk = (curPs.masterVolSpkEnc >= 1 && curPs.masterVolSpkEnc <= MASTER_VOLUME_MAX + 1)
-                                 ? (uint8_t)(curPs.masterVolSpkEnc - 1)
-                                 : curPs.masterVolume;
-            projPlayVol = appAreHeadphonesConnected() ? projPlayVolHp : projPlayVolSpk;
+          if (transport.mode != TransportMode::Stopped) {
+            storageStopTransport();
           }
-          projPlaySpeedQuarter = DEFAULT_SPEED_QUARTER;
-          projPlayLocked = false;
-          projPlayEditHeld = false;
-          projPlayEditModUsed = false;
-          projPlayListCursor = 0;
-          projPlayListScroll = 0;
-          projPlayPlayingIdx = -1;
-          projPlayZone = (projEditSongCount > 0) ? PROJ_PLAY_ZONE_CONTROLS : PROJ_PLAY_ZONE_EXIT;
-          projPlayCtrlCol = PROJ_PLAY_CTRL_PLAY;
-          projPlayAnimMs = 0;
-          projPlayLastTickMs = millis();
-          projModalView = ProjModalView::PlayProject;
-          invalidateSysProjectsModalCache();
-          inputSwallowModalKeys();
-          if (projEditSongCount > 0) {
-            projPlayStartSong(0, true);
-          } else {
-            uiShowToast("PROJECT IS EMPTY");
+          if (songHasUnsavedChanges()) {
+            projConfirmKind = ProjConfirmKind::SaveBeforePlay;
+            projConfirmCursor = 0;
+            projConfirmOpen = true;
+            inputSwallowModalKeys();
             uiForceRedraw();
+          } else {
+            enterProjPlayView();
           }
         } else if (projManageCol == PROJ_ACT_EDIT) {
           snprintf(projEditingName, sizeof(projEditingName), "%s", projectNameAt(projManageCursor));
@@ -1302,6 +1351,7 @@ FLASHMEM void handleSysProjectsModalInput(uint8_t pressed, uint8_t now, uint32_t
           openProjectKeyboard(true, projectNameAt(projManageCursor), false);
           inputSwallowModalKeys();
         } else if (projManageCol == PROJ_ACT_DELETE) {
+          projConfirmKind = ProjConfirmKind::DeleteProject;
           projConfirmCursor = 0;
           projConfirmOpen = true;
           inputSwallowModalKeys();
@@ -1372,6 +1422,7 @@ FLASHMEM void handleSysProjectsModalInput(uint8_t pressed, uint8_t now, uint32_t
             inputSwallowModalKeys();
             uiForceRedraw();
           } else if (act == PROJ_EDIT_ACT_REMOVE && projEditCursor < projEditSongCount) {
+            projConfirmKind = ProjConfirmKind::RemoveSong;
             projConfirmCursor = 0;
             projConfirmOpen = true;
             inputSwallowModalKeys();
@@ -2157,6 +2208,12 @@ FLASHMEM static void sysUsbChargeReenumTick() {
 
 FLASHMEM static void applyAndCommitUsbChargeSetting(bool nextEnable) {
   if (!board.supportsUsbChargeControl()) return;
+  if (transport.mode != TransportMode::Stopped || recording.mode != Recording::Idle) {
+    uiShowToast("STOP TRANSPORT FIRST");
+    inputClearRepeat();
+    uiForceRedraw();
+    return;
+  }
   SystemSettings &ss = systemSettings();
   if (ss.usbChargeWhileOn == nextEnable) return;
   ss.usbChargeWhileOn = nextEnable;
@@ -2194,7 +2251,7 @@ FLASHMEM static void sysSettingsOnOptAdjust(int dx, int dy, int delta) {
       return;
   }
   applySystemSettings();
-  saveSystemSettings();
+  markSystemSettingsDirty();
   uiForceRedraw();
 }
 
@@ -2225,8 +2282,12 @@ FLASHMEM void usbSavePromptModalConfirm() {
   sysSettingsInvalidateCache();
   sysSettingsDrawPage(true);
 
-  if (doSave) {
-    saveCurrentSong();
+  if (doSave && !saveCurrentSong()) {
+    uiShowToast("SAVE FAILED");
+    inputSwallowModalKeys();
+    inputClearRepeat();
+    uiForceRedraw();
+    return;
   }
   if (!usbDriveMode()) {
     uiShowToast("BUILD WITH USB SERIAL+MSC");
@@ -2281,7 +2342,7 @@ FLASHMEM static void sysSettingsOnResetParam() {
     return;
   }
   applySystemSettings();
-  saveSystemSettings();
+  markSystemSettingsDirty();
   uiForceRedraw();
 }
 

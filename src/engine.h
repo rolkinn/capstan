@@ -140,6 +140,7 @@ struct Transport {
   volatile int32_t beat = 0;                       // beat counter
   volatile uint32_t sampleInBeat = 0;
   volatile uint32_t now = 0;                       // monotonic sample counter since boot
+  volatile uint32_t lastBlockMicros = 0;           // micros() captured at Audio ISR block start
 
   // Count-in state
   volatile int32_t countInRemainingBeats = 0;
@@ -151,6 +152,7 @@ struct Transport {
   volatile uint32_t punchInFrame = 0;
   volatile uint32_t punchOutFrame = 4 * 22050;     // default 1 bar (2.0 s at 120 BPM)
   volatile uint32_t loopWrapCount = 0;             // incremented by ISR each time loop wraps OUT -> IN
+  volatile bool clockGridDirty = false;            // loop() sets on seek/count-in start so ISR realigns MIDI ticks
 
   // Threshold trigger state
   volatile bool waitAudioThresh = false;
@@ -175,7 +177,9 @@ struct Recording {
   volatile uint32_t startTapeFrame = 0;            // `transport.tapeFrame` where writing starts
   uint32_t readNow = 0;                            // `loop()` consumer cursor in `inputRing`
   uint32_t writeTapeFrame = 0;                     // `loop()` SD write cursor in tape frames
+  bool prevWasMuted = false;
   uint32_t writtenFrames = 0;
+  int16_t firstOverviewCol = 32767;                // first overview column cleared in Replace mode
   int16_t lastOverviewCol = -1;                    // last overview column cleared in Replace mode
 };
 
@@ -223,7 +227,13 @@ void setHeadphonesConnectedState(bool connected);
 int targetHeadphoneVolumeStep();
 void setLineInDigitalTrim(float gain);
 void setMetronomeVolume(int step);
+void resetPostFxLimiter();
+void engineInitRings();
+#if CAPSTAN_DEBUG
 void takeEngineLoad(float &avg, float &most);
+#else
+inline void takeEngineLoad(float &avg, float &most) { avg = most = 0.0f; }
+#endif
 
 extern volatile bool metronomeOn;
 extern volatile bool masterExportActive;

@@ -104,7 +104,6 @@ static volatile uint8_t csw_pending_after_unjam = 0;
 static const usb_msc_media_t * volatile media = NULL;
 static volatile uint16_t pkt = 64;
 static volatile uint8_t host_seen = 0, ejected = 0, attention = 0;
-static volatile uint32_t n_read = 0, n_written = 0;
 static uint8_t sense_key = 0, sense_asc = 0, sense_ascq = 0;
 
 volatile uint8_t usb_msc_last_op = 0;
@@ -147,14 +146,10 @@ FLASHMEM void usb_msc_clear_host_state(void)
 {
 	host_seen = 0;
 	ejected = 0;
-	n_read = 0;
-	n_written = 0;
 }
 
 FLASHMEM int usb_msc_host_seen(void) { return host_seen; }
 FLASHMEM int usb_msc_ejected(void) { return ejected; }
-FLASHMEM uint32_t usb_msc_sectors_read(void) { return n_read; }
-FLASHMEM uint32_t usb_msc_sectors_written(void) { return n_written; }
 
 FLASHMEM static void prime_cbw_locked(void)
 {
@@ -462,7 +457,6 @@ FLASHMEM static void do_read(cmd_t *c, uint32_t lba, uint32_t count)
 		if (reset_aborted || need_init || !usb_configuration) { c->status = 2; return; }
 		if (!send_in(data_buf, n * SECTOR)) { c->status = 2; return; }
 		sent += n * SECTOR;
-		n_read += n;
 		lba += n;
 		count -= n;
 	}
@@ -493,7 +487,6 @@ FLASHMEM static void do_write(cmd_t *c, uint32_t lba, uint32_t count)
 		}
 		if (reset_aborted || need_init || !usb_configuration) { c->status = 2; return; }
 		got_total += got;
-		n_written += n;
 		lba += n;
 		count -= n;
 	}

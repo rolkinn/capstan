@@ -9,6 +9,7 @@ using namespace m8;
 using namespace looper;
 
 static uint64_t prevMidiTrackKey[VISIBLE_TRACK_ROWS][MID_CELL_COUNT] = {};
+static uint16_t prevMidiWaveBorder[VISIBLE_TRACK_ROWS] = {};
 static int lastMidiTrackRow = -1;
 static int lastMidiTrackCell = -1;
 
@@ -25,6 +26,12 @@ static int64_t noteEdIdx32 = 0;
 static bool noteEdPlacing = false;
 static int64_t noteEdStartIdx32 = 0;
 static int noteEdVelocity = 100;
+static bool noteEdHasPickup = false;
+static uint8_t noteEdOrigNote = 60;
+static uint8_t noteEdOrigVel = 100;
+static uint32_t noteEdOrigStartTick = 0;
+static uint32_t noteEdOrigEndTick = 60;
+static int64_t noteEdOrigCursorIdx32 = 0;
 static uint64_t prevPianoStripKey[PIANO_STRIP_COUNT] = {};
 
 static constexpr uint32_t WAVE_EDIT_MUTE_DELAY_MS = 280;
@@ -93,6 +100,7 @@ FLASHMEM void invalidateMidiNoteEditorCache() {
 
 FLASHMEM static void midiInvalidateCache() {
   memset(prevMidiTrackKey, 0, sizeof(prevMidiTrackKey));
+  memset(prevMidiWaveBorder, 0, sizeof(prevMidiWaveBorder));
   invalidateMidiNoteEditorCache();
 }
 
@@ -125,10 +133,14 @@ FLASHMEM static void drawMidiTrackRow(int visSlot, int t, const TimelineFrameCtx
                            COLOR_MIDI, prevMidiTrackKey[visSlot][MID_CELL_TRIG], full);
   }
 
-  // Cell 2: Scrolling MIDI Timeline (15 Hz 2-row round-robin while running) + Playhead + Activity
+  // Cell 2: Scrolling MIDI Timeline (round-robin while running) + Playhead + Activity
+#if defined(ARDUINO_TEENSY_MICROMOD)
+  const bool rrDue = (visSlot == (int)uiTimelineRrSlot());
+#else
+  const bool rrDue = ((visSlot >> 1) == (int)uiTimelineRrSlot());
+#endif
   const bool waveDue = full || (prevMidiTrackKey[visSlot][MID_CELL_WAVE] == 0) ||
-                       uiIsImmediateFrame() || (transport.mode != TransportMode::Running) ||
-                       ((visSlot >> 1) == (int)uiTimelineRrSlot());
+                       uiIsImmediateFrame() || (transport.mode != TransportMode::Running) || rrDue;
   if (waveDue) {
     const int cx = SX(66), cw = SX(184);
     const int innerW = cw - 4;
@@ -175,14 +187,23 @@ FLASHMEM static void drawMidiTrackRow(int visSlot, int t, const TimelineFrameCtx
                             : 0ULL);
 
     if (full || k != prevMidiTrackKey[visSlot][MID_CELL_WAVE]) {
+      const bool needFullBox = full || (prevMidiTrackKey[visSlot][MID_CELL_WAVE] == 0) ||
+                               (prevMidiWaveBorder[visSlot] != border);
       prevMidiTrackKey[visSlot][MID_CELL_WAVE] = k;
-      Surface s(cw, h);
-      s.drawBox(BG, border);
-
+      prevMidiWaveBorder[visSlot] = border;
       const int innerX = 2;
       const int innerY = 2;
       const int innerH = h - 4;
-      const int midY = innerY + innerH / 2;
+      const int offX = needFullBox ? innerX : 0;
+      const int offY = needFullBox ? innerY : 0;
+      Surface s(needFullBox ? cw : innerW, needFullBox ? h : innerH);
+      if (needFullBox) {
+        s.drawBox(BG, border);
+      } else {
+        s.fillRect(0, 0, innerW, innerH, BG);
+      }
+
+      const int midY = offY + innerH / 2;
       const uint16_t hlFill = blend565(COLOR_MIDI, BG, 56);
 
       // 1. Background, punch/selection regions, timeline ticks, and center reference line
@@ -190,7 +211,7 @@ FLASHMEM static void drawMidiTrackRow(int visSlot, int t, const TimelineFrameCtx
         int px0 = max(0, punchX0);
         int px1 = min(innerW - 1, punchX1);
         if (px0 <= px1) {
-          s.fillRect(innerX + px0, innerY, px1 - px0 + 1, innerH, GREY_12);
+          s.fillRect(offX + px0, offY, px1 - px0 + 1, innerH, GREY_12);
         }
       }
       if (hlActive) {
@@ -198,17 +219,17 @@ FLASHMEM static void drawMidiTrackRow(int visSlot, int t, const TimelineFrameCtx
         int hx1 = min(innerW - 1, hlX1);
         if (hx0 <= hx1) {
           int hw = hx1 - hx0 + 1;
-          s.fillRect(innerX + hx0, innerY, hw, innerH, hlFill);
-          s.fillRect(innerX + hx0, innerY, hw, 1, COLOR_MIDI);
-          s.fillRect(innerX + hx0, innerY + innerH - 1, hw, 1, COLOR_MIDI);
+          s.fillRect(offX + hx0, offY, hw, innerH, hlFill);
+          s.fillRect(offX + hx0, offY, hw, 1, COLOR_MIDI);
+          s.fillRect(offX + hx0, offY + innerH - 1, hw, 1, COLOR_MIDI);
         }
       }
 
-      drawTimelineTicksInWindow(s, innerX, innerY, innerW, innerH, curFrame, playCol, winFrames, bpm, zoom);
+      drawTimelineTicksInWindow(s, offX, offY, innerW, innerH, curFrame, playCol, winFrames, bpm, zoom);
 
       int zeroCol = max(0, timelineFrameToCol(0, curFrame, playCol, innerW, winFrames));
       if (zeroCol < innerW) {
-        s.fillRect(innerX + zeroCol, midY, innerW - zeroCol, 1, DARK);
+        s.fillRect(offX + zeroCol, midY, innerW - zeroCol, 1, DARK);
       }
 
       // 2. Recorded MIDI notes rendered as 2px horizontal lines from Note-On to Note-Off,
@@ -222,8 +243,8 @@ FLASHMEM static void drawMidiTrackRow(int visSlot, int t, const TimelineFrameCtx
         const int64_t windowTicks = ctx.windowTicks;
 
         const int noteH = 2;
-        const int topY = innerY + 1;
-        const int botY = innerY + innerH - 1 - noteH;
+        const int topY = offY + 1;
+        const int botY = offY + innerH - 1 - noteH;
         const int spanY = max(1, botY - topY);
 
         auto drawNoteSpan = [&](uint8_t note, uint32_t t0, uint32_t t1) FLASHMEM {
@@ -238,7 +259,7 @@ FLASHMEM static void drawMidiTrackRow(int visSlot, int t, const TimelineFrameCtx
           int cx1 = constrain(x1, cx0, innerW - 1);
           int barW = max(1, cx1 - cx0 + 1);
           int ny = botY - ((int)(note & 0x7F) * spanY + 63) / 127;
-          s.fillRect(innerX + cx0, ny, barW, noteH, evColor);
+          s.fillRect(offX + cx0, ny, barW, noteH, evColor);
         };
 
         uint32_t noteOnTick[128];
@@ -279,8 +300,8 @@ FLASHMEM static void drawMidiTrackRow(int visSlot, int t, const TimelineFrameCtx
 
         // 2a. Faint 1px line for recorded CC (0xB0) and Pitch Bend (0xE0) events while values are changing
         const uint16_t ccColor = blend565(evColor, BG, 115);
-        const int ccTopY = innerY + 1;
-        const int ccBotY = innerY + innerH - 2;
+        const int ccTopY = offY + 1;
+        const int ccBotY = offY + innerH - 2;
         const int ccSpanY = max(1, ccBotY - ccTopY);
         constexpr uint32_t CC_ACTIVE_GAP_TICKS = MIDI_PPQN; // 1 beat max gap while actively changing
 
@@ -295,7 +316,7 @@ FLASHMEM static void drawMidiTrackRow(int visSlot, int t, const TimelineFrameCtx
           if (x0 == x1) {
             int ymin = min(y0, y1);
             int ymax = max(y0, y1);
-            s.fillRect(innerX + x0, ymin, 1, ymax - ymin + 1, ccColor);
+            s.fillRect(offX + x0, ymin, 1, ymax - ymin + 1, ccColor);
             return;
           }
           int cx0 = max(0, x0);
@@ -307,7 +328,7 @@ FLASHMEM static void drawMidiTrackRow(int visSlot, int t, const TimelineFrameCtx
             int curY = y0 + (cx - x0) * dy / dx;
             int ymin = min(prevY, curY);
             int ymax = max(prevY, curY);
-            s.fillRect(innerX + cx, ymin, 1, ymax - ymin + 1, ccColor);
+            s.fillRect(offX + cx, ymin, 1, ymax - ymin + 1, ccColor);
             prevY = curY;
           }
         };
@@ -378,8 +399,8 @@ FLASHMEM static void drawMidiTrackRow(int visSlot, int t, const TimelineFrameCtx
 
           uint8_t hi = e.status & 0xF0;
           uint8_t note = e.data1 & 0x7F;
-          bool isNoteOn = (hi == 0x90);
-          bool isNoteOff = (hi == 0x80);
+          bool isNoteOn = (hi == 0x90 && e.data2 > 0);
+          bool isNoteOff = (hi == 0x80 || (hi == 0x90 && e.data2 == 0));
 
           if (isNoteOn) {
             if (isOpen(note)) {
@@ -414,28 +435,28 @@ FLASHMEM static void drawMidiTrackRow(int visSlot, int t, const TimelineFrameCtx
       // 3. Punch boundaries, region edit edges, and center playhead
       if (punchOn) {
         if (punchX0 >= 0 && punchX0 < innerW) {
-          s.drawDottedVLine(innerX + punchX0, innerY, innerH, COLOR_MIDI);
+          s.drawDottedVLine(offX + punchX0, offY, innerH, COLOR_MIDI);
         }
         if (punchX1 >= 0 && punchX1 < innerW) {
-          s.drawDottedVLine(innerX + punchX1, innerY, innerH, COLOR_MIDI);
+          s.drawDottedVLine(offX + punchX1, offY, innerH, COLOR_MIDI);
         }
       }
       if (hlActive) {
         if (hlX0 >= 0 && hlX0 < innerW) {
           bool isActiveEdge = (trackEditPhase() == TrackEditPhase::SelectRegion) ? !hlEditEnd : true;
-          s.fillRect(innerX + hlX0, innerY, 1, innerH, isActiveEdge ? COLOR_WARN : COLOR_MIDI);
+          s.fillRect(offX + hlX0, offY, 1, innerH, isActiveEdge ? COLOR_WARN : COLOR_MIDI);
         }
         if (hlX1 >= 0 && hlX1 < innerW) {
           bool isActiveEdge = (trackEditPhase() == TrackEditPhase::SelectRegion) ? hlEditEnd : true;
-          s.fillRect(innerX + hlX1, innerY, 1, innerH, isActiveEdge ? COLOR_WARN : COLOR_MIDI);
+          s.fillRect(offX + hlX1, offY, 1, innerH, isActiveEdge ? COLOR_WARN : COLOR_MIDI);
         }
       }
-      s.fillRect(innerX + playCol, innerY, 1, innerH, mt.recWindowActive ? COLOR_REC : INK);
+      s.fillRect(offX + playCol, offY, 1, innerH, mt.recWindowActive ? COLOR_REC : INK);
 
       if (mt.muted) {
-        s.drawText(SX(6), SY(8), "MUTED", DIM, BG);
+        s.drawText(SX(6) - (innerX - offX), SY(8) - (innerY - offY), "MUTED", DIM, BG);
       } else if (mt.eventCount == 0) {
-        s.drawText(SX(6), SY(8), "EMPTY", DIM, BG);
+        s.drawText(SX(6) - (innerX - offX), SY(8) - (innerY - offY), "EMPTY", DIM, BG);
       }
 
       const bool anyNoteActive = (mt.activeNoteMask[0] | mt.activeNoteMask[1] |
@@ -458,10 +479,11 @@ FLASHMEM static void drawMidiTrackRow(int visSlot, int t, const TimelineFrameCtx
           }
         }
         if (act[0] != '\0') {
-          s.drawText(cw - textWidth(act) - SX(4), SY(8), act, COLOR_MIDI, BG);
+          s.drawText((cw - (innerX - offX)) - textWidth(act) - SX(4),
+                     SY(8) - (innerY - offY), act, COLOR_MIDI, BG);
         }
       }
-      s.blit(cx, y);
+      s.blit(needFullBox ? cx : (cx + innerX), needFullBox ? y : (y + innerY));
     }
   }
 
@@ -833,6 +855,7 @@ FLASHMEM void openMidiNoteEditor(int track) {
   noteEdBaseNote = noteEdCursorNote - (PIANO_VIS_KEYS - 1 - PIANO_CURSOR_ROW);
 
   noteEdPlacing = false;
+  noteEdHasPickup = false;
   noteEdVelocity = 100;
   noteEdStartIdx32 = noteEdIdx32;
   noteEdActive = true;
@@ -852,6 +875,7 @@ FLASHMEM void midiNoteEditorCommitIfPlacing() {
   midiSeqInsertNote(noteEdTrack, (uint8_t)noteEdCursorNote, startTick, endTick,
                     (uint8_t)constrain(noteEdVelocity, 0, 127), bpm);
   noteEdPlacing = false;
+  noteEdHasPickup = false;
   noteEdIdx32 = constrain(noteEdStartIdx32, 0LL, maxIdx32 - 1LL);
   appSeekTapeTo32nd(noteEdIdx32);
 }
@@ -861,6 +885,7 @@ FLASHMEM void closeMidiNoteEditor() {
   midiNoteEditorCommitIfPlacing();
   noteEdActive = false;
   noteEdPlacing = false;
+  noteEdHasPickup = false;
   midiRow = constrain(noteEdTrack, 0, TRACK_ROWS - 1);
   midiCell = MID_CELL_WAVE;
   syncMidiScroll();
@@ -954,7 +979,13 @@ FLASHMEM void midiNoteEditorEditPress(bool shiftHeld) {
     uint8_t foundVel = 100;
     if (midiSeqFindNoteAt(noteEdTrack, (uint8_t)noteEdCursorNote, curTick,
                           foundStartTick, foundEndTick, foundVel)) {
-      // Cursor is on an already placed note: pick it up for editing and jump cursor to note end
+      // Cursor is on an already placed note: snapshot for cancel, pick it up, and jump cursor to note end
+      noteEdOrigNote = (uint8_t)constrain(noteEdCursorNote, 0, 127);
+      noteEdOrigVel = (uint8_t)constrain((int)foundVel, 1, 127);
+      noteEdOrigStartTick = foundStartTick;
+      noteEdOrigEndTick = foundEndTick;
+      noteEdOrigCursorIdx32 = noteEdIdx32;
+      noteEdHasPickup = true;
       midiSeqDeleteNoteAt(noteEdTrack, (uint8_t)noteEdCursorNote, curTick, bpm);
       noteEdPlacing = true;
       noteEdVelocity = constrain((int)foundVel, 0, 127);
@@ -964,6 +995,7 @@ FLASHMEM void midiNoteEditorEditPress(bool shiftHeld) {
       appSeekTapeTo32nd(noteEdIdx32);
     } else {
       // First EDIT press on empty cell: anchor Note-On at current cursor cell without advancing cursor
+      noteEdHasPickup = false;
       noteEdPlacing = true;
       noteEdVelocity = 100;
       noteEdStartIdx32 = constrain(noteEdIdx32, 0LL, maxIdx32 - 1LL);
@@ -985,7 +1017,16 @@ FLASHMEM void midiNoteEditorResetPress() {
   if (!noteEdActive) return;
   if (noteEdPlacing) {
     noteEdPlacing = false;
-    noteEdIdx32 = noteEdStartIdx32;
+    if (noteEdHasPickup) {
+      noteEdHasPickup = false;
+      midiSeqInsertNote(noteEdTrack, noteEdOrigNote, noteEdOrigStartTick,
+                        noteEdOrigEndTick, noteEdOrigVel, bpm);
+      noteEdCursorNote = (int)noteEdOrigNote;
+      noteEdBaseNote = noteEdCursorNote - (PIANO_VIS_KEYS - 1 - PIANO_CURSOR_ROW);
+      noteEdIdx32 = noteEdOrigCursorIdx32;
+    } else {
+      noteEdIdx32 = noteEdStartIdx32;
+    }
     appSeekTapeTo32nd(noteEdIdx32);
     uiForceRedraw();
     return;
@@ -1172,8 +1213,8 @@ FLASHMEM void drawMidiNoteEditorOverlay(bool full) {
 
       uint8_t hi = e.status & 0xF0;
       uint8_t note = e.data1 & 0x7F;
-      bool isNoteOn = (hi == 0x90);
-      bool isNoteOff = (hi == 0x80);
+      bool isNoteOn = (hi == 0x90 && e.data2 > 0);
+      bool isNoteOff = (hi == 0x80 || (hi == 0x90 && e.data2 == 0));
 
       if (isNoteOn) {
         if (isOpen(note)) {

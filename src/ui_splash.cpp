@@ -1,5 +1,6 @@
 // ui_splash.cpp — Animated Tape Deck startup screen for Capstan
 #include "ui.h"
+#include "pages.h"
 #include "ui_font.h"
 #include "config.h"
 #include "storage.h"
@@ -348,7 +349,8 @@ FLASHMEM void drawTapeDeckGraphic(int x, int y, int w, int h, uint32_t ms, uint1
   if (w > DECK_W) w = DECK_W;
   static constexpr int STRIP_H = 16;
   static constexpr float MAX_D = 4.2f;
-  uint16_t strip[DECK_W * STRIP_H];
+  static_assert(DECK_W * STRIP_H <= CELL_BUF_MAX, "Splash deck strip must fit in cellBuf");
+  uint16_t *const strip = cellBuf;
 
   // Smooth rotation of the 6-tooth sprocket hubs (60-degree / pi/3 symmetry)
   float baseAngle = (float)M_PI * 0.5f + (float)ms * 0.0024f;
@@ -507,7 +509,8 @@ FLASHMEM static void renderTapeDeck(uint32_t ms, uint8_t fadeWeight, uint16_t lo
 // 2. Render Bottom Status (Minimal loading bar during boot, then "Press any button..." when loaded)
 FLASHMEM static void renderBottomPrompt(uint32_t ms, uint8_t fadeWeight, uint16_t logoCol) {
   static constexpr int STRIP_H = 15;
-  uint16_t strip[BOTTOM_W * STRIP_H];
+  static_assert(BOTTOM_W * STRIP_H <= CELL_BUF_MAX, "Splash bottom strip must fit in cellBuf");
+  uint16_t *const strip = cellBuf;
 
   auto fade = [&](uint16_t c) { return (fadeWeight == 255) ? c : blend565(c, BG, fadeWeight); };
 

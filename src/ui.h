@@ -10,6 +10,7 @@ constexpr int FONT_SCALE = 1;
 constexpr int FONT_GAP = 3;
 constexpr int FONT_ROWS = 13;
 constexpr int FONT_H = 13;
+constexpr uint8_t METER_TIER_PERIOD = 2;
 #else
 constexpr int SCREEN_W = 320;
 constexpr int SCREEN_H = 240;
@@ -18,6 +19,7 @@ constexpr int FONT_SCALE = 2;
 constexpr int FONT_GAP = 2;
 constexpr int FONT_ROWS = 5;
 constexpr int FONT_H = 5 * PX;
+constexpr uint8_t METER_TIER_PERIOD = 1;
 #endif
 
 constexpr int SX(int x) { return (x * SCREEN_W) / 320; }

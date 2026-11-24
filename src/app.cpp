@@ -477,8 +477,11 @@ FLASHMEM static void startTransportConfirmed(bool useCountInAndThresh) {
   bool waitMidi = false;
   if (useCountInAndThresh) {
     for (int t = 0; t < NUM_AUDIO_TRACKS; t++) {
+      const AudioRecSrc src = tracks[t].recSrc;
+      const bool isAudioTrackStem = (src >= AudioRecSrc::Audio1 && src <= AudioRecSrc::Audio8);
       if (tracks[t].armMode != ArmMode::Off &&
-          tracks[t].recSrc != AudioRecSrc::Off &&
+          src != AudioRecSrc::Off &&
+          !isAudioTrackStem &&
           tracks[t].trigMode == TrigMode::Threshold) {
         waitAudio = true;
         break;
@@ -873,6 +876,7 @@ FLASHMEM void appServiceCodecHardware() {
         codec.inputSelect(AUDIO_INPUT_LINEIN);
         codec.micGain(0);
         appliedCodecMicMode = 0;
+        appliedCodecLineIn = -1;
       }
       if (appliedCodecLineIn != wantLineIn) {
         codec.lineInLevel((uint8_t)wantLineIn);
@@ -885,7 +889,7 @@ FLASHMEM void appServiceCodecHardware() {
   if (wantHpStep != appliedCodecHpStep) {
     const uint32_t nowMs = millis();
     int nextStep = appliedCodecHpStep;
-    if (appliedCodecHpStep < 0) {
+    if (appliedCodecHpStep < 0 || wantHpStep <= 0) {
       nextStep = wantHpStep;
       lastCodecHpSlewMs = nowMs;
     } else {

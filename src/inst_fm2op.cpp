@@ -239,7 +239,7 @@ PROGMEM static const InstEngineOps FM2OP_ENGINE_OPS = {
   fm2OpRenderVoice
 };
 
-FLASHMEM const InstEngineOps &instFm2OpEngine() {
+const InstEngineOps &instFm2OpEngine() {
   return FM2OP_ENGINE_OPS;
 }
 

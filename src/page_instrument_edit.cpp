@@ -110,15 +110,7 @@ FLASHMEM static void instEditInvalidateCache() {
 
 FLASHMEM static void blitBgStrip(int x, int y, int w, int h) {
   if (w <= 0 || h <= 0) return;
-  const int maxStepH = SY(24);
-  while (h > 0) {
-    int stepH = min(h, maxStepH);
-    Surface s(w, stepH);
-    s.fillRect(0, 0, w, stepH, BG);
-    s.blit(x, y);
-    y += stepH;
-    h -= stepH;
-  }
+  board.tft().fillRect(x, y, w, h, BG);
 }
 
 FLASHMEM static void drawSectionTitle(int slotIdx, int y, int h, const char *title, uint16_t color, bool force) {
@@ -1811,7 +1803,7 @@ FLASHMEM static void instEditDrawPage(bool full) {
   // Body Viewport (y = INST_EDIT_VIEWPORT_TOP_Y..INST_EDIT_VIEWPORT_BOTTOM_Y): Specific controls at top, scrolling down to AMP / FLT / FX
   const int viewportBottomY = INST_EDIT_VIEWPORT_BOTTOM_Y;
   if (iType == InstType::Sampler && instEditScroll == 0) {
-    if (scrollOrTypeChanged && !full) {
+    if (scrollOrTypeChanged) {
       const int leftEnd = SX(6) + SX(128);
       blitBgStrip(leftEnd, SY(54), SX(138) - leftEnd, SY(24));
       const int pressBottomY = SY(54) + SY(24);
@@ -1836,7 +1828,7 @@ FLASHMEM static void instEditDrawPage(bool full) {
     const int sec1CellY  = SY(158);
     const int cellH      = SY(40);
 
-    if (scrollOrTypeChanged && !full) {
+    if (scrollOrTypeChanged) {
       const int algoRightX = SX(6) + SX(96);
       blitBgStrip(algoRightX, algoY, (SX(6) + SX(308)) - algoRightX, algoH);
       blitBgStrip(SX(6), algoY + algoH, SX(308), sec0TitleY - (algoY + algoH));
@@ -1882,14 +1874,14 @@ FLASHMEM static void instEditDrawPage(bool full) {
       if (slotIdx > 0 && nextBottom > viewportBottomY) {
         break;
       }
-      if (scrollOrTypeChanged && !full && gapY > 0) {
+      if (scrollOrTypeChanged && gapY > 0) {
         blitBgStrip(SX(6), curY, SX(308), gapY);
       }
       drawSectionRowInSlot(p, iType, ops, slotIdx, rowIdx, curY + gapY, hasHdr, scrollOrTypeChanged);
       curY = nextBottom;
       keepStreaming();
     }
-    if (scrollOrTypeChanged && !full && curY < viewportBottomY) {
+    if (scrollOrTypeChanged && curY < viewportBottomY) {
       blitBgStrip(SX(6), curY, SX(308), viewportBottomY - curY);
     }
   }

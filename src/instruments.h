@@ -231,6 +231,7 @@ void fmSynthAllNotesOff();
 // Audition helper (triggers a preview note and schedules automatic release)
 void fmSynthAudition(int instIdx, uint8_t note = 60, uint8_t velocity = 104, uint32_t durationMs = 360);
 void fmSynthService();
+void fmSynthRefreshEnvelopeRates(int instIdx);
 void fmSynthSetExportTailPhase(bool inTail);
 bool fmSynthHasActiveOutput();
 
@@ -291,8 +292,8 @@ void closeTypePresetModal();
 void typePresetModalMove(int dy, int pageDelta = 0);
 bool typePresetModalConfirm(int targetSlot); // returns true if preset was loaded into targetSlot
 
-// Shared modal browser pool (2,048 B in DMAMEM) & directory buffer (96 B in RAM1)
+// Shared modal browser pool (2,048 B in DMAMEM)
+extern uint8_t sharedBrowserPool[];
 void *sharedBrowserPoolBuf();
-char *sharedBrowserDirBuf();
 
 }  // namespace looper

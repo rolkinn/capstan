@@ -34,15 +34,13 @@ int (*usbAudioRead)(uint32_t *frames) = nullptr;
 int16_t *(*usbAudioWrite)() = nullptr;
 void (*usbAudioWritten)() = nullptr;
 
-static struct RingInit {
-  RingInit() {
-    uint32_t *ptr = rings;
-    for (int t = 0; t < NUM_AUDIO_TRACKS; t++) {
-      tracks[t].ring = ptr;
-      ptr += isAudioTrackMono(t) ? (RING_FRAMES / 2) : RING_FRAMES;
-    }
+FLASHMEM void engineInitRings() {
+  uint32_t *ptr = rings;
+  for (int t = 0; t < NUM_AUDIO_TRACKS; t++) {
+    tracks[t].ring = ptr;
+    ptr += isAudioTrackMono(t) ? (RING_FRAMES / 2) : RING_FRAMES;
   }
-} ringInit;
+}
 
 FLASHMEM uint32_t spbForBpm(float bpm) {
   float b = constrain(bpm, MIN_BPM, MAX_BPM);
@@ -368,6 +366,7 @@ static float clickSample() {
 
 // ---- CPU Load Measurement
 static volatile uint32_t loadCycles = 0, loadMost = 0, loadBlocks = 0;
+#if CAPSTAN_DEBUG
 FLASHMEM void takeEngineLoad(float &avg, float &most) {
 #if defined(ARM_DWT_CYCCNT)
   noInterrupts();
@@ -381,6 +380,7 @@ FLASHMEM void takeEngineLoad(float &avg, float &most) {
   avg = most = 0.0f;
 #endif
 }
+#endif
 
 // ---- MIDI Out Queues (Dedicated TRS Byte Queue + Lock-Free USB Packet Queue)
 static HardwareSerial *midiPort = nullptr;
@@ -445,7 +445,7 @@ void midiServiceTrsInOut() {
 }
 
 FLASHMEM void midiBegin(HardwareSerial *port) {
-  if (!MIDI_OUT_ENABLED) return;
+  if (!MIDI_OUT_ENABLED || port == &Serial1) return;
   midiPort = port;
 #if !defined(MIDI_INTERFACE)
   midiTimer.begin(midiServiceTrsInOut, 250);
@@ -460,7 +460,8 @@ FLASHMEM void midiEnd() {
   midiInPollHook = nullptr;
 }
 
-FLASHMEM void midiSendNow(uint8_t status, uint8_t portMask) {
+void midiSendNow(uint8_t status, uint8_t portMask) {
+  if (masterExportActive) return;
   if (status >= 0xF8) {
     portMask &= midiActiveClockOutPorts();
   }
@@ -480,12 +481,12 @@ FLASHMEM void midiSendNow(uint8_t status, uint8_t portMask) {
   restoreIrq(irq);
 }
 
-FLASHMEM void midiSendClockNow(uint8_t status) {
+void midiSendClockNow(uint8_t status) {
   midiSendNow(status, midiActiveClockOutPorts());
 }
 
-FLASHMEM void midiSendMsg(uint8_t status, uint8_t d1, uint8_t d2, int len, uint8_t portMask) {
-  if (!portMask || len <= 0) return;
+void midiSendMsg(uint8_t status, uint8_t d1, uint8_t d2, int len, uint8_t portMask) {
+  if (masterExportActive || !portMask || len <= 0) return;
   uint32_t irq = saveIrq();
   if ((portMask & MIDI_PORT_TRS) && midiPort) {
     uint32_t availTrs = TRS_MSG_QUEUE - (trsMsgHead - trsMsgTail);
@@ -509,6 +510,7 @@ FLASHMEM void midiSendMsg(uint8_t status, uint8_t d1, uint8_t d2, int len, uint8
 }
 
 static void queueTick(uint32_t due) {
+  if (masterExportActive) return;
   uint8_t clkMask = midiActiveClockOutPorts();
   if (!clkMask) return;
   uint32_t irq = saveIrq();
@@ -584,7 +586,14 @@ using PostFxLimiter = LookaheadMonitorLimiter;
 static PostFxLimiter postFxLimiter(29000.0f, 30800.0f, LIMIT_CEILING);
 static LookaheadMonitorLimiter monLimiter(30500.0f, 31600.0f, 32766.0f);
 
-FLASHMEM __attribute__((noinline)) static void pushTunerInputBlock(
+FLASHMEM void resetPostFxLimiter() {
+  uint32_t irq = saveIrq();
+  postFxLimiter.reset();
+  monLimiter.reset();
+  restoreIrq(irq);
+}
+
+__attribute__((noinline)) static void pushTunerInputBlock(
     TunerSource tSrc, const int16_t *lineBufL, const int16_t *lineBufR,
     bool usbIn, const uint32_t *usbFrames) {
   if (tSrc == TunerSource::LineIn) {
@@ -604,6 +613,7 @@ FLASHMEM __attribute__((noinline)) static void pushTunerInputBlock(
 
 FLASHMEM __attribute__((noinline)) static void checkWaitThresholdInputBlock(
     int targetTrk, AudioRecSrc targetSrc, MonoInput targetMonoIn, int capMidiTrk,
+    bool allowRecLine, bool allowRecUsb,
     const int16_t *lineBufL, const int16_t *lineBufR,
     bool usbIn, const uint32_t *usbFrames,
     const int32_t *midiCapL, const int32_t *midiCapR,
@@ -611,7 +621,9 @@ FLASHMEM __attribute__((noinline)) static void checkWaitThresholdInputBlock(
   float trigPeak = 0.0f;
   const bool tgtMono = isAudioTrackMono(targetTrk);
   int16_t pkL = 0, pkR = 0, pkSum = 0;
-  if (targetSrc == AudioRecSrc::Line || targetSrc == AudioRecSrc::Usb || capMidiTrk >= 0) {
+  if ((targetSrc == AudioRecSrc::Line && allowRecLine) ||
+      (targetSrc == AudioRecSrc::Usb && allowRecUsb) ||
+      capMidiTrk >= 0) {
     for (int i = 0; i < AUDIO_BLOCK_SAMPLES; i++) {
       int32_t sL = 0, sR = 0;
       if (targetSrc == AudioRecSrc::Line) {
@@ -673,6 +685,8 @@ void LooperEngine::update() {
     return;
   }
 
+  transport.lastBlockMicros = micros();
+
   uint32_t usbFrames[AUDIO_BLOCK_SAMPLES];
   const bool usbIn = usbAudioRead && (usbAudioRead(usbFrames) != 0);
   int16_t *usbOutBuf = usbAudioWrite ? usbAudioWrite() : nullptr;
@@ -720,61 +734,32 @@ void LooperEngine::update() {
 
   const MonitorMode lMon = lineMonitorMode;
   const MonitorMode uMon = usbMonitorMode;
+  const bool allowRecLine = micMode || recLineInEnabled;
+  const bool allowRecUsb  = !micMode && recUsbInEnabled;
   const bool monLine     = ((lMon == MonitorMode::On) || (lMon == MonitorMode::Arm && audioArmed)) &&
                            !(tMute && tSrc == TunerSource::LineIn);
   const bool monUsbWant  = ((uMon == MonitorMode::On) || (uMon == MonitorMode::Arm && audioArmed)) &&
                            !(tMute && tSrc == TunerSource::UsbIn);
-  const bool lineWanted  = useLine || monLine || (targetSrc == AudioRecSrc::Line);
-  const bool usbWanted   = !micMode && (useUsb || monUsbWant || (targetSrc == AudioRecSrc::Usb));
+  const bool lineWanted  = useLine || monLine || (allowRecLine && targetSrc == AudioRecSrc::Line);
+  const bool usbWanted   = !micMode && (useUsb || monUsbWant || (allowRecUsb && targetSrc == AudioRecSrc::Usb));
   const bool inputBusOn  = !masterExportActive && (lineWanted || usbWanted);
 
-  // Sync Input FX Chor/Dly/Verb targets BEFORE fmSynthRenderBlock so Instrument & Input FX arbitrate cleanly
-  updateAudioInputFxTargets(inputBusOn);
-
-  int32_t fmL[AUDIO_BLOCK_SAMPLES];
-  int32_t fmR[AUDIO_BLOCK_SAMPLES];
-  int32_t midiCapL[AUDIO_BLOCK_SAMPLES];
-  int32_t midiCapR[AUDIO_BLOCK_SAMPLES];
-  uint32_t instAuxPacked[AUDIO_BLOCK_SAMPLES];
-  bool hasInstAuxSend = false;
-  const bool hasFm = fmSynthRenderBlock(fmL, fmR, AUDIO_BLOCK_SAMPLES,
-                                        capMidiTrk,
-                                        (capMidiTrk >= 0) ? midiCapL : nullptr,
-                                        (capMidiTrk >= 0) ? midiCapR : nullptr,
-                                        instAuxPacked, &hasInstAuxSend);
-
-  const float liTrim = micMode ? 1.0f : lineInDigitalTrim;
-  int16_t lineBufL[AUDIO_BLOCK_SAMPLES];
-  int16_t lineBufR[AUDIO_BLOCK_SAMPLES];
-  for (int i = 0; i < AUDIO_BLOCK_SAMPLES; i++) {
-    int32_t rawL = inL ? inL->data[i] : 0;
-    int32_t rawR = inR ? inR->data[i] : 0;
-    if (liTrim != 1.0f) {
-      rawL = constrain((int32_t)((float)rawL * liTrim), -32768, 32767);
-      rawR = constrain((int32_t)((float)rawR * liTrim), -32768, 32767);
-    }
-    lineBufL[i] = (int16_t)rawL;
-    lineBufR[i] = (int16_t)rawR;
-  }
-
-  // Tap Chromatic Tuner pre-Input-FX (clean dry Line In / USB In pitch detection)
-  if (tSrc != TunerSource::Off) {
-    pushTunerInputBlock(tSrc, lineBufL, lineBufR, usbIn, usbFrames);
-  }
-
-  uint32_t blockMicros = micros();
-  const float usPerSample = 1e6f / AUDIO_SAMPLE_RATE_EXACT;
-
-  // Apply pending tempo changes immediately
+  // Apply pending tempo changes and seek/start clock-grid realignment before transport/Aux arbitration
   if (transport.pendingSpb) {
-    uint32_t spb = transport.pendingSpb;
-    transport.sampleInBeat = (uint64_t)transport.sampleInBeat * spb / max(1u, transport.spb);
-    transport.spb = spb;
+    uint32_t newSpb = transport.pendingSpb;
+    transport.sampleInBeat = (uint64_t)transport.sampleInBeat * newSpb / max(1u, transport.spb);
+    transport.spb = newSpb;
     transport.pendingSpb = 0;
-    nextTickAt_ = (uint64_t)tickInBeat_ * spb / 24;
+    nextTickAt_ = (uint64_t)tickInBeat_ * newSpb / 24;
+  }
+  uint32_t spb = transport.spb;
+  if (transport.clockGridDirty) {
+    transport.clockGridDirty = false;
+    uint32_t safeSpb = max(1u, spb);
+    tickInBeat_ = (int)((uint64_t)transport.sampleInBeat * 24 / safeSpb);
+    nextTickAt_ = (uint64_t)tickInBeat_ * safeSpb / 24;
   }
 
-  uint32_t spb = transport.spb;
   TransportMode tMode = transport.mode;
   const bool anyAudioSolo = anyTrackSolo();
 
@@ -809,6 +794,50 @@ void LooperEngine::update() {
       activeTracks[numActiveTracks++] = (uint8_t)t;
     }
   }
+
+  uint32_t ringReadIdx[NUM_AUDIO_TRACKS];
+  for (int aIdx = 0; aIdx < numActiveTracks; aIdx++) {
+    const int t = activeTracks[aIdx];
+    ringReadIdx[t] = tracks[t].tail % RING_FRAMES;
+  }
+
+  // Sync Input FX & Audio Track Aux targets BEFORE fmSynthRenderBlock so shared tanks arbitrate with zero 1-block lag
+  updateAudioInputFxTargets(inputBusOn);
+  syncAudioTrackAuxTargets((tMode == TransportMode::Running) ? audibleTrackMask : 0u);
+
+  int32_t fmL[AUDIO_BLOCK_SAMPLES];
+  int32_t fmR[AUDIO_BLOCK_SAMPLES];
+  int32_t midiCapL[AUDIO_BLOCK_SAMPLES];
+  int32_t midiCapR[AUDIO_BLOCK_SAMPLES];
+  uint32_t instAuxPacked[AUDIO_BLOCK_SAMPLES];
+  bool hasInstAuxSend = false;
+  const bool hasFm = fmSynthRenderBlock(fmL, fmR, AUDIO_BLOCK_SAMPLES,
+                                        capMidiTrk,
+                                        (capMidiTrk >= 0) ? midiCapL : nullptr,
+                                        (capMidiTrk >= 0) ? midiCapR : nullptr,
+                                        instAuxPacked, &hasInstAuxSend);
+
+  const float liTrim = micMode ? 1.0f : lineInDigitalTrim;
+  int16_t lineBufL[AUDIO_BLOCK_SAMPLES];
+  int16_t lineBufR[AUDIO_BLOCK_SAMPLES];
+  for (int i = 0; i < AUDIO_BLOCK_SAMPLES; i++) {
+    int32_t rawL = inL ? inL->data[i] : 0;
+    int32_t rawR = inR ? inR->data[i] : 0;
+    if (liTrim != 1.0f) {
+      rawL = constrain((int32_t)((float)rawL * liTrim), -32768, 32767);
+      rawR = constrain((int32_t)((float)rawR * liTrim), -32768, 32767);
+    }
+    lineBufL[i] = (int16_t)rawL;
+    lineBufR[i] = (int16_t)rawR;
+  }
+
+  // Tap Chromatic Tuner pre-Input-FX (clean dry Line In / USB In pitch detection)
+  if (tSrc != TunerSource::Off) {
+    pushTunerInputBlock(tSrc, lineBufL, lineBufR, usbIn, usbFrames);
+  }
+
+  uint32_t blockMicros = micros();
+  const float usPerSample = 1e6f / AUDIO_SAMPLE_RATE_EXACT;
 
   AudioTrackFxBlockCtx fxCtx;
   AudioInputFxBlockCtx inFxCtx;
@@ -853,7 +882,16 @@ void LooperEngine::update() {
   // Check per-track recording source threshold trigger when waiting (sees post-Input-FX signal)
   if (tMode == TransportMode::WaitThreshold && transport.waitAudioThresh && targetTrk >= 0) {
     checkWaitThresholdInputBlock(targetTrk, targetSrc, targetMonoIn, capMidiTrk,
+                                 allowRecLine, allowRecUsb,
                                  lineBufL, lineBufR, usbEffective, usbFrames, midiCapL, midiCapR, tMode);
+    if (tMode == TransportMode::Running) {
+      uint32_t curTf = transport.tapeFrame;
+      uint32_t safeSpb = max(1u, spb);
+      transport.beat = (int32_t)(curTf / safeSpb);
+      transport.sampleInBeat = curTf % safeSpb;
+      tickInBeat_ = (int)((uint64_t)transport.sampleInBeat * 24 / safeSpb);
+      nextTickAt_ = (uint64_t)tickInBeat_ * safeSpb / 24;
+    }
   }
 
   const bool runAnyTrackAux = fxCtx.runChorAux || fxCtx.runDlyAux || fxCtx.runVerbAux ||
@@ -861,6 +899,9 @@ void LooperEngine::update() {
   const bool srcAudioGetsAuxWet = (srcAudioTrkBlock >= 0) &&
                                   !fxCtx.hasInstAux && !inFxCtx.hasAuxSend &&
                                   (fxCtx.auxSendMask == (uint8_t)(1u << srcAudioTrkBlock));
+  const bool srcLineGetsAuxWet = (targetSrc == AudioRecSrc::Line) && allowRecLine &&
+                                 inFxCtx.hasAuxSend && monLine && !masterExportActive &&
+                                 !fxCtx.hasInstAux && (fxCtx.auxSendMask == 0);
 
   int16_t tunerAudioMono[AUDIO_BLOCK_SAMPLES];
 
@@ -888,6 +929,7 @@ void LooperEngine::update() {
     bool recActiveHere = false;
     float recTrackSl = 0.0f, recTrackSr = 0.0f;
     float srcAudioL = 0.0f, srcAudioR = 0.0f;
+    float srcLineAuxL = 0.0f, srcLineAuxR = 0.0f;
     int16_t tunerSampleMono = 0;
 
     // Monitor bus for Master Out in floating-point with -3.0 dB mix-bus headroom matching Audio Tracks 1..8
@@ -919,9 +961,15 @@ void LooperEngine::update() {
     if (tMode == TransportMode::CountIn) {
       if (transport.sampleInBeat == 0) {
         if (transport.countInRemainingBeats <= 0) {
+          uint32_t curTf = transport.tapeFrame;
+          uint32_t safeSpb = max(1u, spb);
           tMode = TransportMode::Running;
           transport.mode = TransportMode::Running;
           transport.running = true;
+          transport.beat = (int32_t)(curTf / safeSpb);
+          transport.sampleInBeat = curTf % safeSpb;
+          tickInBeat_ = (int)((uint64_t)transport.sampleInBeat * 24 / safeSpb);
+          nextTickAt_ = (uint64_t)tickInBeat_ * safeSpb / 24;
           midiSendNow(0xFA);
         } else {
           startClick(((transport.countInTotalBeats - transport.countInRemainingBeats) % BEATS_PER_BAR) == 0);
@@ -1049,12 +1097,13 @@ void LooperEngine::update() {
             uint32_t tail = tr.tail;
             int32_t avail = (int32_t)(tr.head - tail);
             if (avail >= 1) {
+              uint32_t rIdx = ringReadIdx[t];
               if (isAudioTrackMono(t)) {
-                int16_t sm = reinterpret_cast<const int16_t *>(tr.ring)[tail % RING_FRAMES];
+                int16_t sm = reinterpret_cast<const int16_t *>(tr.ring)[rIdx];
                 sl = (float)sm;
                 sr = (float)sm;
               } else {
-                uint32_t packed = tr.ring[tail % RING_FRAMES];
+                uint32_t packed = tr.ring[rIdx];
                 sl = (int16_t)(packed & 0xFFFF);
                 sr = (int16_t)(packed >> 16);
               }
@@ -1062,6 +1111,9 @@ void LooperEngine::update() {
                 uint32_t ringStep = (absQ > 8u) ? min(stepFrames, 2u) : stepFrames;
                 uint32_t adv = min((uint32_t)avail, ringStep);
                 tr.tail = tail + adv;
+                rIdx += adv;
+                if (rIdx >= RING_FRAMES) rIdx -= RING_FRAMES;
+                ringReadIdx[t] = rIdx;
               }
             }
           } else if (tr.live && stepFrames > 0) {
@@ -1072,6 +1124,9 @@ void LooperEngine::update() {
               uint32_t ringStep = (absQ > 8u) ? min(stepFrames, 2u) : stepFrames;
               uint32_t adv = min((uint32_t)avail, ringStep);
               tr.tail = tail + adv;
+              uint32_t rIdx = ringReadIdx[t] + adv;
+              if (rIdx >= RING_FRAMES) rIdx -= RING_FRAMES;
+              ringReadIdx[t] = rIdx;
             }
           }
 
@@ -1148,6 +1203,11 @@ void LooperEngine::update() {
         srcAudioL += auxWetL * invMg;
         srcAudioR += auxWetR * invMg;
       }
+      if (srcLineGetsAuxWet) {
+        const float invMg = 1.0f / masterGain;
+        srcLineAuxL = (float)lineL * inFxCtx.dryTrim + auxWetL * invMg;
+        srcLineAuxR = (float)lineR * inFxCtx.dryTrim + auxWetR * invMg;
+      }
     }
     const float preFxL = mixL;
     const float preFxR = mixR;
@@ -1167,10 +1227,15 @@ void LooperEngine::update() {
                                                          : fabsf(0.5f * (rL + rR)))
                       : max(fabsf(rL), fabsf(rR));
       if (rPk >= transport.audioThreshLinear * 32768.0f) {
+        uint32_t curTf = transport.tapeFrame;
+        uint32_t safeSpb = max(1u, spb);
         tMode = TransportMode::Running;
         transport.mode = TransportMode::Running;
         transport.running = true;
-        transport.sampleInBeat = 0;
+        transport.beat = (int32_t)(curTf / safeSpb);
+        transport.sampleInBeat = curTf % safeSpb;
+        tickInBeat_ = (int)((uint64_t)transport.sampleInBeat * 24 / safeSpb);
+        nextTickAt_ = (uint64_t)tickInBeat_ * safeSpb / 24;
         midiSendNow(0xFA);
       }
     }
@@ -1189,12 +1254,16 @@ void LooperEngine::update() {
         default:
           break;
         case AudioRecSrc::Line:
-          rawSrcL = lineL;
-          rawSrcR = lineR;
+          if (allowRecLine) {
+            rawSrcL = srcLineGetsAuxWet ? (int32_t)srcLineAuxL : lineL;
+            rawSrcR = srcLineGetsAuxWet ? (int32_t)srcLineAuxR : lineR;
+          }
           break;
         case AudioRecSrc::Usb:
-          rawSrcL = uL;
-          rawSrcR = uR;
+          if (allowRecUsb) {
+            rawSrcL = uL;
+            rawSrcR = uR;
+          }
           break;
         case AudioRecSrc::Midi1:
         case AudioRecSrc::Midi2:

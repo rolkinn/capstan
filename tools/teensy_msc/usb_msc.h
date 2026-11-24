@@ -53,8 +53,6 @@ extern const uint8_t usb_msc_config_descriptor_12[];
 int usb_msc_host_seen(void);
 void usb_msc_clear_host_state(void);
 int usb_msc_ejected(void);
-uint32_t usb_msc_sectors_read(void);
-uint32_t usb_msc_sectors_written(void);
 
 extern volatile uint8_t usb_msc_last_op;
 extern volatile uint32_t usb_msc_commands;

@@ -127,6 +127,7 @@ FLASHMEM bool usbDriveMode() {
   flushHeaders();
 
   drawUsbOverlayHeader();
+  drawBatteryIcon(true, LIGHT, PANEL);
   drawUsbOverlayStatus(ST_SWITCHING, COLOR_WARN);
   drawUsbOverlayHint();
 
@@ -145,7 +146,7 @@ FLASHMEM bool usbDriveMode() {
   bool reconnected = false;
 
   int shown = -1;
-  uint32_t battAt = 0;
+  uint32_t battAt = millis();
   while (board.keys()) {
     if (usbDriveTick) usbDriveTick();
     usb_msc_poll();
@@ -200,9 +201,9 @@ FLASHMEM bool usbDriveMode() {
     }
     if (usb_msc_ejected()) return leave("EJECTED");
     int state = !card ? 3 : !usb_configuration ? 0 : usb_msc_host_seen() ? 2 : 1;
-    if (millis() - battAt >= 40) {
+    if (millis() - battAt >= 1000) {
       battAt = millis();
-      drawBatteryIcon(false, LIGHT, PANEL);
+      drawBatteryIcon(true, LIGHT, PANEL);
     }
     if (state != shown) {
       shown = state;

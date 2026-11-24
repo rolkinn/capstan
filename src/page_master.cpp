@@ -216,7 +216,8 @@ FLASHMEM static void drawMasterTrackBlock(int t, int x, int y, int w, int h,
                    ((uint64_t)(uint8_t)meterHL << 8) |
                    ((uint64_t)(uint8_t)meterHR << 16) |
                    ((uint64_t)outerBorder << 32));
-  if (full || hk != prevMasterTrackHdrKey[t]) {
+  if (full || prevMasterTrackHdrKey[t] == 0 ||
+      (uiTierDue(METER_TIER_PERIOD) && hk != prevMasterTrackHdrKey[t])) {
     prevMasterTrackHdrKey[t] = hk;
     Surface sTop(w, topH);
     sTop.fillRect(0, 0, w, topH, PANEL);

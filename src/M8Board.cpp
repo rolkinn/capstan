@@ -22,27 +22,10 @@ public:
   using ILI9488Spi::ILI9488Spi;
 };
 #else
-// ILI9341_t3n wrapper exposing command transmission for Variant B IPS gamma/power register tuning.
-class M8Display : public ILI9341_t3n {
+class M8Display : public ILI9341Spi {
 public:
-  using ILI9341_t3n::ILI9341_t3n;
-  size_t write(uint8_t) override { return 1; }
-  void sendCmd(uint8_t cmd, const uint8_t *data, uint8_t n);
+  using ILI9341Spi::ILI9341Spi;
 };
-
-FLASHMEM void M8Display::sendCmd(uint8_t cmd, const uint8_t *data, uint8_t n) {
-  beginSPITransaction(_SPI_CLOCK);
-  if (n == 0) {
-    writecommand_last(cmd);
-  } else {
-    writecommand_cont(cmd);
-    for (uint8_t i = 0; i < n; i++) {
-      if (i == n - 1) writedata8_last(data[i]);
-      else            writedata8_cont(data[i]);
-    }
-  }
-  endSPITransaction();
-}
 #endif
 
 FLASHMEM bool Board::begin(uint32_t spiHz) {
@@ -101,20 +84,24 @@ FLASHMEM bool Board::begin(uint32_t spiHz) {
 
   // --- 3. Key Expander ---
   pinMode(p.keyInt, _variant == VARIANT_A ? INPUT : INPUT_PULLUP);
+#if M8_MODEL == 2
+  bool keysOk = initSX1508();
+#else
   bool keysOk = (_variant == VARIANT_A) ? initMCP23008() : initSX1508();
+#endif
 
   // --- 4. Display ---
 #if M8_MODEL == 2
-  // ILI9488 480x320 panel on LPSPI4 (MOSI 11, SCK 13, MISO 12) at 56 MHz SPI clock
+  // ILI9488 480x320 panel on LPSPI4 (MOSI 11, SCK 13, MISO 12) at 60 MHz SPI clock
   // with display inversion enabled for IPS color polarity.
   (void)spiHz;
   M8Display *d = new M8Display(SPI, p.tftCS, p.tftDC, p.tftRST);
   _tft = d;
-  d->begin(56000000);
+  d->begin(60000000);
   d->invertDisplay(true);
 #else
   // ILI9341 320x240 panel on LPSPI4 (MOSI 11, SCK 13, MISO 12)
-  M8Display *d = new M8Display(p.tftCS, p.tftDC, p.tftRST, 11, 13, 12);
+  M8Display *d = new M8Display(SPI, p.tftCS, p.tftDC, p.tftRST);
   _tft = d;
   d->begin(spiHz);
   if (_variant == VARIANT_B) {
@@ -163,8 +150,10 @@ FLASHMEM HardwareSerial *Board::midiOutBegin() {
   HardwareSerial *port = _pins->midiOut;
   port->begin(31250);
   if (_variant == VARIANT_B) {
-    pinMode(_pins->keyInt, INPUT_PULLUP);   // Reclaim pin 15 from Serial3 RX for key expander INT
+    noInterrupts();
     IMXRT_LPUART2.CTRL &= ~(LPUART_CTRL_RE | LPUART_CTRL_RIE | LPUART_CTRL_ILIE);
+    pinMode(_pins->keyInt, INPUT_PULLUP);   // Reclaim pin 15 from Serial3 RX for key expander INT
+    interrupts();
   }
   return port;
 }
@@ -172,11 +161,16 @@ FLASHMEM HardwareSerial *Board::midiOutBegin() {
 FLASHMEM HardwareSerial *Board::midiInBegin() {
   HardwareSerial *port = _pins->midiIn;
   if (port == _pins->midiOut) return port;         // Variant A shares Serial7 for both TX and RX
-  port->begin(31250);
   if (_variant == VARIANT_B) {                     // Disable LPUART6 TX on pin 1 so pin 1 stays driven HIGH
+    noInterrupts();
+    digitalWriteFast(1, HIGH);
+    port->begin(31250);
     IMXRT_LPUART6.CTRL &= ~(LPUART_CTRL_TE | LPUART_CTRL_TIE | LPUART_CTRL_TCIE);
     pinMode(1, OUTPUT);
-    digitalWrite(1, HIGH);
+    digitalWriteFast(1, HIGH);
+    interrupts();
+  } else {
+    port->begin(31250);
   }
   return port;
 }
@@ -291,6 +285,8 @@ FLASHMEM void Board::powerOff() {
     bqWrite(0x00, _bqDefaultReg00);
     bqWrite(0x02, 0x00);
     bqWrite(0x03, _cgPaused ? 0x06 : 0x16);
+    pinMode(1, OUTPUT);
+    digitalWrite(1, LOW);
 #if M8_MODEL == 2
     // Model:02 power-latch shutdown sequence:
     // 1. De-assert pin 40 and wait 10 ms.
@@ -307,8 +303,6 @@ FLASHMEM void Board::powerOff() {
     digitalWrite(6, LOW);
     delay(1000);
 #endif
-    pinMode(1, OUTPUT);
-    digitalWrite(1, LOW);
   }
 
   SNVS_LPSR = SNVS_LPSR_SPO | SNVS_LPSR_EO;
@@ -372,13 +366,13 @@ FLASHMEM int Board::batteryPercent() {
   return _batPct;
 }
 
+#if defined(CAPSTAN_DEBUG) && CAPSTAN_DEBUG
 FLASHMEM void Board::batteryLog() {
-#if CAPSTAN_DEBUG
   Serial.printf("battery %d%%: gauge mode 0x%02x%s, its charge %d%%, current %d (raw), %d mV; charger REG0B 0x%02x (charging: %s), %d mV (%d%% by voltage)\n",
                 _batPct, _batGaugeMode & 0xFF, _batGaugeMode < 0 ? " (no answer)" : (_batGaugeMode & 0x10) ? " (running)" : " (standby)",
                 _batSoc, _batCurrent, _batGaugeMv, _batStatus & 0xFF, _batCharging ? "yes" : "no", _batMv, _batMv > 0 ? percentForMv(_batMv) : -1);
-#endif
 }
+#endif
 
 FLASHMEM bool Board::initChargerB() {
   delay(2);
@@ -402,6 +396,12 @@ FLASHMEM bool Board::initChargerB() {
 FLASHMEM void Board::setUsbChargeWhileOn(bool enable) {
   _usbChargeWhileOn = enable;
   if (_variant != VARIANT_B) return;
+  if (!enable) {
+    _cgPaused = false;
+    _cgLatched = false;
+    _cgStrikes = 0;
+    _cgHealthyChecks = 0;
+  }
   bqWrite(0x00, enable ? _bqDefaultReg00 : (uint8_t)(_bqDefaultReg00 & 0x40u));
   bqWrite(0x03, (enable && !_cgPaused) ? 0x36 : 0x26);
   _batPolled = false;
@@ -415,10 +415,24 @@ FLASHMEM bool Board::usbVbusPresent() {
 }
 
 FLASHMEM void Board::chargeGuard() {
-  if (_variant != VARIANT_B || _cgLatched) return;
+  if (_variant != VARIANT_B) return;
   uint32_t ms = millis();
   if (ms - _cgCheckedMs < (_cgPaused ? 300000u : 5000u)) return;
   _cgCheckedMs = ms;
+
+  int r11 = bqRead(0x11);
+  if (r11 >= 0 && (r11 & 0x80) == 0) {
+    // VBUS detached: clear prior fault strikes and latch
+    _cgStrikes = 0;
+    _cgHealthyChecks = 0;
+    _cgLatched = false;
+    if (_cgPaused) {
+      _cgPaused = false;
+      bqWrite(0x03, _usbChargeWhileOn ? 0x36 : 0x26);
+    }
+    return;
+  }
+  if (_cgLatched) return;
 
   bqRead(0x0C);                          // First read clears latched historical faults;
   int fault = bqRead(0x0C);              // second read reports active fault state
@@ -435,10 +449,10 @@ FLASHMEM void Board::chargeGuard() {
   else if (ima > 900) why = "charge current high";
 
   if (why) {
+    _cgHealthyChecks = 0;
     if (!_cgPaused) {
       bqWrite(0x03, 0x26);               // Disable CHG_CONFIG while keeping OTG and SYS_MIN=3.3 V
       _cgPaused = true;
-      _cgPausedMs = ms;
       if (++_cgStrikes >= 3) _cgLatched = true;
 #if CAPSTAN_DEBUG
       Serial.printf("charge guard: charging paused (%s; fault 0x%02X, %d mV, %d mA)%s\n",
@@ -450,9 +464,14 @@ FLASHMEM void Board::chargeGuard() {
       bqWrite(0x03, 0x36);               // Clear to resume charging
     }
     _cgPaused = false;
+    _cgHealthyChecks = 0;
 #if CAPSTAN_DEBUG
     Serial.printf("charge guard: charging resumed (%d mV, %d mA)\n", mv, ima);
 #endif
+  } else if (_cgStrikes > 0 && ++_cgHealthyChecks >= 60) {
+    // 5 minutes (60 x 5 s) of healthy charging resets prior fault strike count
+    _cgStrikes = 0;
+    _cgHealthyChecks = 0;
   }
 }
 
@@ -474,6 +493,7 @@ FLASHMEM int Board::readReg(uint8_t reg) {
   return w.read();
 }
 
+#if M8_MODEL != 2
 // Variant A: Microchip MCP23008 @ 0x20 on Wire1 (SDA 17 / SCL 16), INT -> pin 5
 FLASHMEM bool Board::initMCP23008() {
   bool ok = true;
@@ -485,6 +505,7 @@ FLASHMEM bool Board::initMCP23008() {
   readReg(0x09);               // Read GPIO register once to clear any pending interrupt
   return ok;
 }
+#endif
 
 // Variant B / Model:02: Semtech SX1508 @ 0x20 on Wire (SDA 18 / SCL 19), INT -> pin 15
 FLASHMEM bool Board::initSX1508() {
@@ -504,29 +525,38 @@ FLASHMEM bool Board::initSX1508() {
 
 FLASHMEM int Board::readExpander() {
   int v;
+#if M8_MODEL == 2
+  writeReg(0x0C, 0xFF);                  // Clear interrupt source first so no concurrent edge is missed
+  v = readReg(0x08);                     // SX1508 RegData register
+#else
   if (_variant == VARIANT_A) {
     v = readReg(0x09);                   // MCP23008 GPIO register
   } else {
     writeReg(0x0C, 0xFF);                // Clear interrupt source first so no concurrent edge is missed
     v = readReg(0x08);                   // SX1508 RegData register
   }
+#endif
   if (v < 0) return -1;                  // Bus error: caller retains last valid key state
   return (uint8_t)~v;                    // Switches pull to GND when pressed -> invert
 }
 
 FLASHMEM uint8_t Board::keys() {
-  // Poll the I2C expander when INT is asserted (LOW), while any key is currently held (_keys != 0),
-  // or on the initial read, throttled by _keyGap.
+  // Poll the I2C expander at 1 ms when INT is asserted, retry after bus errors,
+  // and run a 50 ms fallback poll while keys remain held with INT deasserted.
   const uint32_t now = micros();
-  if (_first || ((digitalReadFast(_pins->keyInt) == LOW || _keys != 0) && now - _keyReadAt >= _keyGap)) {
+  const bool intLow = (digitalReadFast(_pins->keyInt) == LOW);
+  const uint32_t minGap = _keyRetryPending ? _keyGap : (intLow ? 1000u : 50000u);
+  if (_first || ((_keyRetryPending || intLow || _keys != 0) && (now - _keyReadAt >= minGap))) {
     _keyReadAt = now;
     _first = false;
     int v = readExpander();
     if (v >= 0) {
       _keys = (uint8_t)v;
-      _keyGap = 1000;
+      _keyRetryPending = false;
+      _keyGap = 1000u;
     } else {
-      _keyGap = 50000;
+      _keyRetryPending = true;
+      _keyGap = 50000u;
       _keyErrors++;
       if (millis() - _keyErrorLogAt >= 1000) {
         _keyErrorLogAt = millis();

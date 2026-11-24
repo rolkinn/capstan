@@ -190,7 +190,6 @@ static inline float nextFxRandMinus1To1() {
 // 1. Chorus ("CHOR") — Stereo Quadrature Modulated Chorus (0% Dry .. 100% Wet)
 // ============================================================================
 
-static constexpr int CHORUS_BUF_LEN = 688; // ~15.6 ms max delay capacity at 44.1 kHz (max tap is 684 samples)
 static int16_t chorBufL[CHORUS_BUF_LEN];
 static int16_t chorBufR[CHORUS_BUF_LEN];
 
@@ -213,7 +212,7 @@ static inline int16_t floatToQ14(float x) {
   return (int16_t)((c >= 0.0f) ? (c + 0.5f) : (c - 0.5f));
 }
 
-static inline float readChorusTapQ14(const int16_t *buf, int bufLen, int writeIdx, float delaySamples) {
+static inline float readDelayTapQ14(const int16_t *buf, int bufLen, int writeIdx, float delaySamples) {
   int dInt = (int)delaySamples;
   float dFrac = delaySamples - (float)dInt;
   if (dInt < 1) dInt = 1;
@@ -268,10 +267,10 @@ FLASHMEM static void resetChorusUnit(ChorusState &u) {
 
 FLASHMEM static void configureChorusUnit(ChorusState &u, uint8_t pct, bool clearBuffers = true) {
   pct = (uint8_t)constrain((int)pct, 0, 100);
-  u.curPct = pct;
   if (pct == 0) {
-    bool wasEnabled = u.enabled;
     uint32_t irq = saveIrq();
+    bool wasEnabled = u.enabled;
+    u.curPct = 0;
     u.enabled = false;
     u.wetMix = 0.0f;
     u.curWetMix = 0.0f;
@@ -300,6 +299,7 @@ FLASHMEM static void configureChorusUnit(ChorusState &u, uint8_t pct, bool clear
     u.curWetMix = mix;
     u.curModDepth = modSamples;
   }
+  u.curPct = pct;
   u.wetMix = mix;
   u.lfoInc = lfoStep;
   u.modDepthSamples = modSamples;
@@ -319,8 +319,8 @@ __attribute__((noinline)) static void stepChorusTank(ChorusState &u, float inL, 
   float dL = baseDel + modExc * fastSin01(u.lfoPhase);
   float dR = baseDel + modExc * fastSin01(u.lfoPhase + 0.25f);
 
-  float tapL = readChorusTapQ14(u.bufL, CHORUS_BUF_LEN, u.writeIdx, dL);
-  float tapR = readChorusTapQ14(u.bufR, CHORUS_BUF_LEN, u.writeIdx, dR);
+  float tapL = readDelayTapQ14(u.bufL, CHORUS_BUF_LEN, u.writeIdx, dL);
+  float tapR = readDelayTapQ14(u.bufR, CHORUS_BUF_LEN, u.writeIdx, dR);
 
   u.bufL[u.writeIdx] = floatToQ14(softLimitQ14(inL));
   u.bufR[u.writeIdx] = floatToQ14(softLimitQ14(inR));
@@ -361,6 +361,22 @@ FLASHMEM void setMasterChorus(uint8_t pct) {
 
 __attribute__((noinline)) static void processChorusSample(float &xL, float &xR) {
   processChorusUnit(chor, xL, xR);
+}
+
+__attribute__((noinline)) static void processMasterChorusSample(float &xL, float &xR) {
+  const float mMix = (float)masterChorPct * 0.01f;
+  const float tankMix = chor.curWetMix;
+  const float masterScale = (tankMix > 1e-5f) ? min(1.0f, mMix / tankMix) : 1.0f;
+  const float feedL = masterScale * xL + masterChorAuxBoostL;
+  const float feedR = masterScale * xR + masterChorAuxBoostR;
+  masterChorAuxBoostL = 0.0f;
+  masterChorAuxBoostR = 0.0f;
+  float wetL = 0.0f, wetR = 0.0f;
+  stepChorusTank(chor, feedL, feedR, wetL, wetR);
+  const float appliedMix = min(mMix, tankMix);
+  const float dryG = 1.0f - 0.25f * appliedMix;
+  xL = dryG * xL + wetL;
+  xR = dryG * xR + wetR;
 }
 
 // ============================================================================
@@ -410,20 +426,6 @@ static uint8_t inDlyPct = 0;
 static uint8_t inDfbPct = 0;
 static float masterDlyAuxBoostL = 0.0f;
 static float masterDlyAuxBoostR = 0.0f;
-
-static inline float readDelayTapQ14(const int16_t *buf, int bufLen, int writeIdx, float delaySamples) {
-  int dInt = (int)delaySamples;
-  float dFrac = delaySamples - (float)dInt;
-  if (dInt < 1) dInt = 1;
-  else if (dInt > bufLen - 2) dInt = bufLen - 2;
-  int r0 = writeIdx + dInt;
-  if (r0 >= bufLen) r0 -= bufLen;
-  int r1 = r0 + 1;
-  if (r1 >= bufLen) r1 -= bufLen;
-  float s0 = (float)buf[r0] * (1.0f / 16384.0f);
-  float s1 = (float)buf[r1] * (1.0f / 16384.0f);
-  return s0 + dFrac * (s1 - s0);
-}
 
 static inline float warmDelaySaturate(float x, float drive, float invDrive, float asym) {
   constexpr float HEADROOM = 1.85f;
@@ -486,10 +488,10 @@ FLASHMEM static void updateDelayUnitFeedback(DelayState &u, uint8_t fbPct) {
 
 FLASHMEM static void configureDelayUnit(DelayState &u, uint8_t pct, bool clearBuffers = true) {
   pct = (uint8_t)constrain((int)pct, 0, 100);
-  u.wetPct = pct;
   if (pct == 0) {
-    bool wasEnabled = u.enabled;
     uint32_t irq = saveIrq();
+    bool wasEnabled = u.enabled;
+    u.wetPct = 0;
     u.enabled = false;
     u.wetMix = 0.0f;
     u.curWetMix = 0.0f;
@@ -509,6 +511,7 @@ FLASHMEM static void configureDelayUnit(DelayState &u, uint8_t pct, bool clearBu
     u.curWetMix = mix;
     u.curWowExc = u.wowExcursion;
   }
+  u.wetPct = pct;
   u.wetMix = mix;
   u.enabled = true;
   restoreIrq(irq);
@@ -600,6 +603,22 @@ __attribute__((noinline)) static void processDelaySample(float &xL, float &xR) {
   processDelayUnit(dly, xL, xR);
 }
 
+__attribute__((noinline)) static void processMasterDelaySample(float &xL, float &xR) {
+  const float mMix = (float)masterDlyPct * 0.01f;
+  const float tankMix = dly.curWetMix;
+  const float masterScale = (tankMix > 1e-5f) ? min(1.0f, mMix / tankMix) : 1.0f;
+  const float feedL = masterScale * xL + masterDlyAuxBoostL;
+  const float feedR = masterScale * xR + masterDlyAuxBoostR;
+  masterDlyAuxBoostL = 0.0f;
+  masterDlyAuxBoostR = 0.0f;
+  float wetL = 0.0f, wetR = 0.0f;
+  stepDelayTank(dly, feedL, feedR, wetL, wetR);
+  const float appliedMix = min(mMix, tankMix);
+  const float dryG = 1.0f - 0.12f * appliedMix;
+  xL = dryG * xL + wetL;
+  xR = dryG * xR + wetR;
+}
+
 // ============================================================================
 // 3. Reverb ("RVRB") — 3 Series Schroeder Allpasses/ch + Global Feedback + LPF
 // ============================================================================
@@ -650,6 +669,7 @@ enum VerbOwner : uint8_t {
   VERB_OWNER_INPUT  = 3
 };
 static uint8_t masterVerbPct = 0;
+static float masterVerbTargetMix = 0.0f;
 static uint8_t instVerbPct = 0;
 static uint8_t trackVerbPct = 0;
 static uint8_t inVerbPct = 0;
@@ -753,11 +773,14 @@ FLASHMEM static void resetReverbUnit(ReverbState &u) {
 
 FLASHMEM static void configureReverbUnit(ReverbState &u, uint8_t pct, bool clearBuffers = true) {
   pct = (uint8_t)constrain((int)pct, 0, 100);
-  u.curPct = pct;
   if (pct == 0) {
-    if (!u.enabled) return;
-    // Keep u.enabled true while stepReverbTank smoothly glides curMix -> 0 (~95 ms, zero clicks/pops)
     uint32_t irq = saveIrq();
+    u.curPct = 0;
+    if (!u.enabled) {
+      restoreIrq(irq);
+      return;
+    }
+    // Keep u.enabled true while stepReverbTank smoothly glides curMix -> 0 (~95 ms, zero clicks/pops)
     u.mix = 0.0f;
     if (u.feedback > 0.85f) u.feedback = 0.85f;
     restoreIrq(irq);
@@ -784,6 +807,7 @@ FLASHMEM static void configureReverbUnit(ReverbState &u, uint8_t pct, bool clear
     // Tank is guaranteed idle in ISR while !u.enabled: clear stale samples before smooth curMix 0->mix ramp
     clearReverbUnitBuffers(u);
     uint32_t irq = saveIrq();
+    u.curPct = pct;
     u.idx1aL = u.idx1bL = u.idx1cL = 0;
     u.idx2L = u.idx3L = 0;
     u.idx1aR = u.idx1bR = u.idx1cR = 0;
@@ -804,6 +828,7 @@ FLASHMEM static void configureReverbUnit(ReverbState &u, uint8_t pct, bool clear
   }
 
   uint32_t irq = saveIrq();
+  u.curPct = pct;
   u.feedback = fb;
   u.dampAlpha = damp;
   u.inGain = inG;
@@ -905,6 +930,7 @@ FLASHMEM static void resetReverbState() {
 
 FLASHMEM void setMasterReverb(uint8_t pct) {
   masterVerbPct = (uint8_t)constrain((int)pct, 0, 100);
+  masterVerbTargetMix = computeReverbMix(masterVerbPct);
   refreshVerbOwner();
   uint8_t eff = max(max(masterVerbPct, instVerbPct), max(trackVerbPct, inVerbPct));
   if (eff != verb.curPct || eff == 0) {
@@ -914,6 +940,24 @@ FLASHMEM void setMasterReverb(uint8_t pct) {
 
 __attribute__((noinline)) static void processReverbSample(float &xL, float &xR) {
   processReverbUnit(verb, xL, xR);
+}
+
+__attribute__((noinline)) static void processMasterReverbSample(float &xL, float &xR) {
+  const float mMix = masterVerbTargetMix;
+  const float tankMix = verb.curMix;
+  const float masterScale = (tankMix > 1e-5f)
+                                ? min(1.0f, mMix / tankMix)
+                                : ((mMix > 0.0f) ? 1.0f : 0.0f);
+  const float feedL = masterScale * xL + masterVerbAuxBoostL;
+  const float feedR = masterScale * xR + masterVerbAuxBoostR;
+  masterVerbAuxBoostL = 0.0f;
+  masterVerbAuxBoostR = 0.0f;
+  float wetL = 0.0f, wetR = 0.0f;
+  stepReverbTank(verb, feedL, feedR, wetL, wetR);
+  const float appliedMix = min(mMix, tankMix);
+  const float dryG = 1.0f - 0.18f * appliedMix;
+  xL = dryG * xL + wetL;
+  xR = dryG * xR + wetR;
 }
 
 // ============================================================================
@@ -1516,12 +1560,12 @@ static void processCompSample(float &xL, float &xR) {
 // ============================================================================
 
 PROGMEM static const MasterFxOps MASTER_FX_TABLE[MASTER_FX_COUNT] = {
-  { MASTER_FX_CHOR, "CHOR", setMasterChorus,        resetChorusState, isChorusEnabled,        processChorusSample },
-  { MASTER_FX_DLAY, "DLAY", setMasterDelay,         resetDelayState,  isDelayEnabled,         processDelaySample  },
-  { MASTER_FX_DFB,  "D.FB", setMasterDelayFeedback, nullptr,          isDelayFeedbackActive,  nullptr             },
-  { MASTER_FX_RVRB, "RVRB", setMasterReverb,        resetReverbState, isReverbEnabled,        processReverbSample },
-  { MASTER_FX_TAPE, "TAPE", setMasterTape,          resetTapeState,   isTapeEnabled,          processTapeSample   },
-  { MASTER_FX_COMP, "COMP", setMasterComp,          resetCompState,   isCompEnabled,          processCompSample   },
+  { MASTER_FX_CHOR, "CHOR", setMasterChorus,        resetChorusState, isChorusEnabled,        processMasterChorusSample },
+  { MASTER_FX_DLAY, "DLAY", setMasterDelay,         resetDelayState,  isDelayEnabled,         processMasterDelaySample  },
+  { MASTER_FX_DFB,  "D.FB", setMasterDelayFeedback, nullptr,          isDelayFeedbackActive,  nullptr                   },
+  { MASTER_FX_RVRB, "RVRB", setMasterReverb,        resetReverbState, isReverbEnabled,        processMasterReverbSample },
+  { MASTER_FX_TAPE, "TAPE", setMasterTape,          resetTapeState,   isTapeEnabled,          processTapeSample         },
+  { MASTER_FX_COMP, "COMP", setMasterComp,          resetCompState,   isCompEnabled,          processCompSample         },
 };
 
 FLASHMEM const MasterFxOps &masterFxOpsFor(int slot) {
@@ -1541,14 +1585,16 @@ FLASHMEM void setMasterFxSlot(int slot, uint8_t pct) {
 }
 
 FLASHMEM void resetMasterFxState() {
-  for (int i = 0; i < MASTER_FX_COUNT; i++) {
-    if (MASTER_FX_TABLE[i].resetState) {
-      MASTER_FX_TABLE[i].resetState();
-    }
-  }
+  if (instChorPct == 0 && trackChorPct == 0 && inChorPct == 0) resetChorusState();
+  if (instDlyPct  == 0 && trackDlyPct  == 0 && inDlyPct  == 0) resetDelayState();
+  if (instVerbPct == 0 && trackVerbPct == 0 && inVerbPct == 0) resetReverbState();
+  resetTapeState();
+  resetCompState();
+  uint32_t irq = saveIrq();
   masterChorAuxBoostL = masterChorAuxBoostR = 0.0f;
   masterDlyAuxBoostL = masterDlyAuxBoostR = 0.0f;
   masterVerbAuxBoostL = masterVerbAuxBoostR = 0.0f;
+  restoreIrq(irq);
 }
 
 // ============================================================================
@@ -1587,25 +1633,29 @@ static inline int trackDriveBaseChan(int t) {
 
 FLASHMEM __attribute__((noinline)) static void configureDriveCoeffs(DriveCoeffs &c, uint8_t drivePct) {
   uint8_t clamped = (uint8_t)constrain((int)drivePct, 0, 100);
-  c.cachedPct = clamped;
+  DriveCoeffs next;
+  next.cachedPct = clamped;
   if (clamped == 0) {
-    c.bodyGain = 0.0f;
-    c.drive1 = 1.0f;
-    c.asym = 0.0f;
-    c.drive2 = 1.0f;
-    c.trim = 0.68f;
-    c.lpAlpha = 0.78f;
-    c.mix = 0.0f;
-    return;
+    next.bodyGain = 0.0f;
+    next.drive1 = 1.0f;
+    next.asym = 0.0f;
+    next.drive2 = 1.0f;
+    next.trim = 0.68f;
+    next.lpAlpha = 0.78f;
+    next.mix = 0.0f;
+  } else {
+    float d = (float)clamped * 0.01f;
+    next.bodyGain = 0.45f * d;
+    next.drive1 = 1.0f + d * (3.5f + 6.5f * d);
+    next.asym = 0.28f * d;
+    next.drive2 = 1.0f + d * (1.2f + 1.8f * d);
+    next.trim = 0.68f / (1.0f + 1.35f * d);
+    next.lpAlpha = 0.78f - 0.36f * d;
+    next.mix = min(1.0f, d * 2.5f);
   }
-  float d = (float)clamped * 0.01f;
-  c.bodyGain = 0.45f * d;
-  c.drive1 = 1.0f + d * (3.5f + 6.5f * d);
-  c.asym = 0.28f * d;
-  c.drive2 = 1.0f + d * (1.2f + 1.8f * d);
-  c.trim = 0.68f / (1.0f + 1.35f * d);
-  c.lpAlpha = 0.78f - 0.36f * d;
-  c.mix = min(1.0f, d * 2.5f);
+  uint32_t irq = saveIrq();
+  c = next;
+  restoreIrq(irq);
 }
 
 __attribute__((noinline)) static float stepDriveChannel(DriveChanState &st, const DriveCoeffs &c, float x) {
@@ -1627,12 +1677,14 @@ __attribute__((noinline)) static float stepDriveChannel(DriveChanState &st, cons
 
 FLASHMEM void resetInstDriveState(int instIdx) {
   if (instIdx < 0 || instIdx >= NUM_INSTRUMENTS) return;
+  int capSlot = NUM_INSTRUMENTS + instIdx;
+  uint32_t irq = saveIrq();
   instDriveCh[instIdx][0] = DriveChanState{};
   instDriveCh[instIdx][1] = DriveChanState{};
   instDriveCoeffs[instIdx] = DriveCoeffs{};
-  int capSlot = NUM_INSTRUMENTS + instIdx;
   instDriveCh[capSlot][0] = DriveChanState{};
   instDriveCh[capSlot][1] = DriveChanState{};
+  restoreIrq(irq);
 }
 
 FLASHMEM static void syncSharedAuxTanksSlow() {
@@ -1764,7 +1816,7 @@ FLASHMEM __attribute__((noinline)) static void applyInstFxParamsSlow(
   }
 }
 
-FLASHMEM void setInstFxParams(uint8_t chorusPct, uint8_t delayPct, uint8_t delayFbPct, uint8_t reverbPct,
+void setInstFxParams(uint8_t chorusPct, uint8_t delayPct, uint8_t delayFbPct, uint8_t reverbPct,
                               uint8_t tapePct, uint8_t compPct) {
   uint8_t c = (chorusPct > 100u) ? 100u : chorusPct;
   uint8_t d = (delayPct > 100u) ? 100u : delayPct;
@@ -1787,7 +1839,7 @@ bool isInstFxChainEnabled() {
          (instCompBusPct > 0 && instComp.enabled);
 }
 
-bool instNeedsSharedAuxSend() {
+FLASHMEM bool instNeedsSharedAuxSend() {
   const bool chorDeferred = (instChorPct > 0) &&
                             !(masterChorPct == 0 && trackChorPct == 0 && inChorPct == 0 && chor.enabled);
   const bool dlyDeferred  = (instDlyPct > 0) &&
@@ -1796,10 +1848,27 @@ bool instNeedsSharedAuxSend() {
   return chorDeferred || dlyDeferred || verbDeferred;
 }
 
-void processInstFxSample(float &xL, float &xR) {
-  if (instChorPct > 0 && masterChorPct == 0 && trackChorPct == 0 && inChorPct == 0 && chor.enabled) processChorusSample(xL, xR);
-  if (instDlyPct  > 0 && masterDlyPct  == 0 && trackDlyPct  == 0 && inDlyPct  == 0 && dly.enabled)  processDelaySample(xL, xR);
-  if (isInstReverbBusActive()) processReverbSample(xL, xR);
+void processInstFxSample(float &xL, float &xR,
+                         float *outPureAuxWetL,
+                         float *outPureAuxWetR,
+                         float *outAuxDryTrim) {
+  const float preL = xL, preR = xR;
+  float dryTrim = 1.0f;
+  if (instChorPct > 0 && masterChorPct == 0 && trackChorPct == 0 && inChorPct == 0 && chor.enabled) {
+    dryTrim *= (1.0f - 0.25f * chor.curWetMix);
+    processChorusSample(xL, xR);
+  }
+  if (instDlyPct  > 0 && masterDlyPct  == 0 && trackDlyPct  == 0 && inDlyPct  == 0 && dly.enabled) {
+    dryTrim *= (1.0f - 0.12f * dly.curWetMix);
+    processDelaySample(xL, xR);
+  }
+  if (isInstReverbBusActive()) {
+    dryTrim *= (1.0f - 0.18f * verb.curMix);
+    processReverbSample(xL, xR);
+  }
+  if (outPureAuxWetL) *outPureAuxWetL = xL - dryTrim * preL;
+  if (outPureAuxWetR) *outPureAuxWetR = xR - dryTrim * preR;
+  if (outAuxDryTrim)  *outAuxDryTrim  = dryTrim;
   if (instTapeBusPct > 0 && instTape.enabled) processTapeUnit(instTape, xL, xR, true);
   if (instCompBusPct > 0 && instComp.enabled) processCompUnit(instComp, xL, xR, true);
 }
@@ -1830,6 +1899,7 @@ static CompUnit inputComp[2] = {
 };
 
 static int32_t usbInputTailSamples = 0;
+static uint16_t usbInputSilentBlocks = 0;
 static uint8_t lastInputInlineStrip = 0; // 0 = Line In, 1 = USB Audio In
 static uint8_t inputOutVolStep = VOLUME_UNITY;
 static float inputOutTargetGain = 1.0f;
@@ -1841,6 +1911,7 @@ FLASHMEM void resetAudioInputFxState() {
     inputDrivePool[i] = DriveChanState{};
   }
   usbInputTailSamples = 0;
+  usbInputSilentBlocks = 0;
   lastInputInlineStrip = 0;
   inputOutCurGain[0] = inputOutTargetGain;
   inputOutCurGain[1] = inputOutTargetGain;
@@ -1898,7 +1969,7 @@ FLASHMEM void syncAudioInputFxParams(const AudioTrackFxParams &fx) {
   configureCompUnit(inputComp[1], clamped.comp);
 }
 
-FLASHMEM void updateAudioInputFxTargets(bool inputBusEnabled) {
+void updateAudioInputFxTargets(bool inputBusEnabled) {
   const AudioTrackFxParams &fx = inputFxCfg;
   uint8_t wantChor = inputBusEnabled ? fx.chorus : 0;
   uint8_t wantDly  = inputBusEnabled ? fx.delay  : 0;
@@ -1922,33 +1993,13 @@ static inline int16_t floatToClippedInt16(float x) {
   return (int16_t)((y >= 0.0f) ? (y + 0.5f) : (y - 0.5f));
 }
 
-FLASHMEM void processAudioInputFxBlock(AudioInputFxBlockCtx &inCtx,
-                                       bool inputBusEnabled,
-                                       bool lineActive, int16_t *lineBufL, int16_t *lineBufR,
-                                       bool usbStreamActive, bool usbWanted, uint32_t *usbFrames,
-                                       bool preferUsbInline) {
-  inCtx.usbTailActive = false;
-  if (!inputBusEnabled) {
-    usbInputTailSamples = 0;
-    inputOutCurGain[0] = inputOutTargetGain;
-    inputOutCurGain[1] = inputOutTargetGain;
-    return;
-  }
-
-  const AudioTrackFxParams &fx = inputFxCfg;
-  const float tgtGain = inputOutTargetGain;
-  const bool gainAtUnity = (inputOutVolStep == VOLUME_UNITY) &&
-                           (fabsf(inputOutCurGain[0] - 1.0f) < 1e-4f) &&
-                           (fabsf(inputOutCurGain[1] - 1.0f) < 1e-4f);
-  const bool hasInsert = (fx.drive > 0 || fx.tape > 0 || fx.comp > 0);
-  const bool hasOutGain = !gainAtUnity;
-  const bool anyInlineTank = inCtx.inlineChor || inCtx.inlineDly || inCtx.inlineVerb;
-  if (!hasInsert && !hasOutGain && !anyInlineTank && usbInputTailSamples <= 0) {
-    inputOutCurGain[0] = 1.0f;
-    inputOutCurGain[1] = 1.0f;
-    return;
-  }
-
+FLASHMEM __attribute__((noinline)) static void processAudioInputFxBlockSlow(
+    AudioInputFxBlockCtx &inCtx,
+    const AudioTrackFxParams &fx, float tgtGain,
+    bool hasInsert, bool hasOutGain, bool anyInlineTank,
+    bool lineActive, int16_t *lineBufL, int16_t *lineBufR,
+    bool usbStreamActive, bool usbWanted, uint32_t *usbFrames,
+    bool preferUsbInline) {
   uint32_t usbOr = 0;
   if (usbStreamActive && usbFrames) {
     for (int i = 0; i < (int)AUDIO_BLOCK_SAMPLES; i++) {
@@ -1990,99 +2041,134 @@ FLASHMEM void processAudioInputFxBlock(AudioInputFxBlockCtx &inCtx,
     int32_t minT = (int32_t)CHORUS_BUF_LEN;
     int32_t reqT = max(minT, max(dlyT, revT));
     if (reqT > usbInputTailSamples) usbInputTailSamples = reqT;
+    usbInputSilentBlocks = 0;
   } else if (usbInputTailSamples > 0) {
     if (!usbWanted || (fx.delay == 0 && fx.reverb == 0 && fx.chorus == 0 && fx.tape == 0)) {
       usbInputTailSamples = 0;
+      usbInputSilentBlocks = 0;
     } else {
       usbInputTailSamples = max((int32_t)0, usbInputTailSamples - (int32_t)AUDIO_BLOCK_SAMPLES);
     }
+  } else {
+    usbInputSilentBlocks = 0;
   }
 
   const bool doLine = lineActive && lineBufL && lineBufR &&
                       (hasInsert || hasOutGain || (anyInlineTank && inlineStrip == 0));
-  const bool usbHasTail = usbWanted && (usbInputTailSamples > 0 || (inlineStrip == 1 && anyInlineTank));
+  const bool usbHasTail = usbWanted && (usbInputTailSamples > 0);
   const bool doUsb = usbWanted && usbFrames && (usbStreamActive || usbHasTail) &&
                      (hasInsert || hasOutGain || (anyInlineTank && inlineStrip == 1));
   if (!doLine) inputOutCurGain[0] = tgtGain;
-  if (!doUsb)  inputOutCurGain[1] = tgtGain;
+  if (!doUsb) {
+    inputOutCurGain[1] = tgtGain;
+    if (!usbWanted) usbInputSilentBlocks = 0;
+  }
 
   if (fx.drive > 0 && inputDriveCoeffs.cachedPct != fx.drive) {
     configureDriveCoeffs(inputDriveCoeffs, fx.drive);
   }
 
-  constexpr float IN_GAIN_GLIDE = 1.0f - __builtin_expf(-1000.0f / (5.0f * (float)SAMPLE_RATE_HZ));
-
-  if (doLine) {
-    const bool runTank = anyInlineTank && (inlineStrip == 0);
-    float g = inputOutCurGain[0];
+  auto runStrip = [&](int stripIdx, bool runTank, bool stereoPacked, bool packedActive,
+                      int16_t *bL, int16_t *bR, uint32_t *uFrames) FLASHMEM -> float {
+    constexpr float IN_GAIN_GLIDE = 1.0f - __builtin_expf(-1000.0f / (5.0f * (float)SAMPLE_RATE_HZ));
+    float g = inputOutCurGain[stripIdx];
     const bool applyGain = (g != 1.0f || tgtGain != 1.0f);
+    DriveChanState *drv = &inputDrivePool[stripIdx * 2];
+    TapeUnit &tapeU = inputTape[stripIdx];
+    CompUnit &compU = inputComp[stripIdx];
+    float outPeak = 0.0f;
     for (int i = 0; i < (int)AUDIO_BLOCK_SAMPLES; i++) {
-      float xL = (float)lineBufL[i] * (1.0f / 32768.0f);
-      float xR = (float)lineBufR[i] * (1.0f / 32768.0f);
+      int16_t inL0 = stereoPacked ? (packedActive ? (int16_t)(uFrames[i] & 0xFFFF) : 0) : bL[i];
+      int16_t inR0 = stereoPacked ? (packedActive ? (int16_t)(uFrames[i] >> 16) : 0) : bR[i];
+      float xL = (float)inL0 * (1.0f / 32768.0f);
+      float xR = (float)inR0 * (1.0f / 32768.0f);
       if (fx.drive > 0) {
-        xL = stepDriveChannel(inputDrivePool[0], inputDriveCoeffs, xL);
-        xR = stepDriveChannel(inputDrivePool[1], inputDriveCoeffs, xR);
+        xL = stepDriveChannel(drv[0], inputDriveCoeffs, xL);
+        xR = stepDriveChannel(drv[1], inputDriveCoeffs, xR);
       }
       if (runTank) {
         if (inCtx.inlineChor) processChorusSample(xL, xR);
         if (inCtx.inlineDly)  processDelaySample(xL, xR);
         if (inCtx.inlineVerb) processReverbSample(xL, xR);
       }
-      if (fx.tape > 0 && inputTape[0].enabled) {
-        processTapeUnit(inputTape[0], xL, xR, true);
+      if (fx.tape > 0 && tapeU.enabled) {
+        processTapeUnit(tapeU, xL, xR, true);
       }
-      if (fx.comp > 0 && inputComp[0].enabled) {
-        processCompUnit(inputComp[0], xL, xR, true);
+      if (fx.comp > 0 && compU.enabled) {
+        processCompUnit(compU, xL, xR, true);
       }
       if (applyGain) {
         g += (tgtGain - g) * IN_GAIN_GLIDE;
         xL *= g;
         xR *= g;
       }
-      lineBufL[i] = floatToClippedInt16(xL);
-      lineBufR[i] = floatToClippedInt16(xR);
+      if (stereoPacked) {
+        float pk = max(fabsf(xL), fabsf(xR));
+        if (pk > outPeak) outPeak = pk;
+        int16_t outUL = floatToClippedInt16(xL);
+        int16_t outUR = floatToClippedInt16(xR);
+        uFrames[i] = (uint16_t)outUL | ((uint32_t)(uint16_t)outUR << 16);
+      } else {
+        bL[i] = floatToClippedInt16(xL);
+        bR[i] = floatToClippedInt16(xR);
+      }
     }
     if (fabsf(tgtGain - g) < 1e-4f) g = tgtGain;
-    inputOutCurGain[0] = g;
+    inputOutCurGain[stripIdx] = g;
+    return outPeak;
+  };
+
+  if (doLine) {
+    runStrip(0, anyInlineTank && (inlineStrip == 0), false, false, lineBufL, lineBufR, nullptr);
   }
 
   if (doUsb) {
-    const bool runTank = anyInlineTank && (inlineStrip == 1);
-    float g = inputOutCurGain[1];
-    const bool applyGain = (g != 1.0f || tgtGain != 1.0f);
-    for (int i = 0; i < (int)AUDIO_BLOCK_SAMPLES; i++) {
-      int16_t uL0 = usbStreamActive ? (int16_t)(usbFrames[i] & 0xFFFF) : 0;
-      int16_t uR0 = usbStreamActive ? (int16_t)(usbFrames[i] >> 16) : 0;
-      float xL = (float)uL0 * (1.0f / 32768.0f);
-      float xR = (float)uR0 * (1.0f / 32768.0f);
-      if (fx.drive > 0) {
-        xL = stepDriveChannel(inputDrivePool[2], inputDriveCoeffs, xL);
-        xR = stepDriveChannel(inputDrivePool[3], inputDriveCoeffs, xR);
+    float usbOutPeak = runStrip(1, anyInlineTank && (inlineStrip == 1), true, usbStreamActive,
+                                nullptr, nullptr, usbFrames);
+    if (usbHasSignal || usbOutPeak >= 1.5e-4f) {
+      usbInputSilentBlocks = 0;
+    } else if (usbInputTailSamples > 0) {
+      uint16_t gateBlocks = (inlineStrip == 1 && (inCtx.inlineDly || inCtx.inlineVerb)) ? 132u : 8u;
+      if (++usbInputSilentBlocks >= gateBlocks) {
+        usbInputTailSamples = 0;
+        usbInputSilentBlocks = 0;
       }
-      if (runTank) {
-        if (inCtx.inlineChor) processChorusSample(xL, xR);
-        if (inCtx.inlineDly)  processDelaySample(xL, xR);
-        if (inCtx.inlineVerb) processReverbSample(xL, xR);
-      }
-      if (fx.tape > 0 && inputTape[1].enabled) {
-        processTapeUnit(inputTape[1], xL, xR, true);
-      }
-      if (fx.comp > 0 && inputComp[1].enabled) {
-        processCompUnit(inputComp[1], xL, xR, true);
-      }
-      if (applyGain) {
-        g += (tgtGain - g) * IN_GAIN_GLIDE;
-        xL *= g;
-        xR *= g;
-      }
-      int16_t outUL = floatToClippedInt16(xL);
-      int16_t outUR = floatToClippedInt16(xR);
-      usbFrames[i] = (uint16_t)outUL | ((uint32_t)(uint16_t)outUR << 16);
     }
-    if (fabsf(tgtGain - g) < 1e-4f) g = tgtGain;
-    inputOutCurGain[1] = g;
     inCtx.usbTailActive = usbHasTail;
   }
+}
+
+void processAudioInputFxBlock(AudioInputFxBlockCtx &inCtx,
+                              bool inputBusEnabled,
+                              bool lineActive, int16_t *lineBufL, int16_t *lineBufR,
+                              bool usbStreamActive, bool usbWanted, uint32_t *usbFrames,
+                              bool preferUsbInline) {
+  inCtx.usbTailActive = false;
+  if (!inputBusEnabled) {
+    usbInputTailSamples = 0;
+    usbInputSilentBlocks = 0;
+    inputOutCurGain[0] = inputOutTargetGain;
+    inputOutCurGain[1] = inputOutTargetGain;
+    return;
+  }
+
+  const AudioTrackFxParams &fx = inputFxCfg;
+  const float tgtGain = inputOutTargetGain;
+  const bool gainAtUnity = (inputOutVolStep == VOLUME_UNITY) &&
+                           (fabsf(inputOutCurGain[0] - 1.0f) < 1e-4f) &&
+                           (fabsf(inputOutCurGain[1] - 1.0f) < 1e-4f);
+  const bool hasInsert = (fx.drive > 0 || fx.tape > 0 || fx.comp > 0);
+  const bool hasOutGain = !gainAtUnity;
+  const bool anyInlineTank = inCtx.inlineChor || inCtx.inlineDly || inCtx.inlineVerb;
+  if (!hasInsert && !hasOutGain && !anyInlineTank && usbInputTailSamples <= 0) {
+    inputOutCurGain[0] = 1.0f;
+    inputOutCurGain[1] = 1.0f;
+    return;
+  }
+
+  processAudioInputFxBlockSlow(inCtx, fx, tgtGain, hasInsert, hasOutGain, anyInlineTank,
+                               lineActive, lineBufL, lineBufR,
+                               usbStreamActive, usbWanted, usbFrames, preferUsbInline);
 }
 
 // ============================================================================
@@ -2090,6 +2176,7 @@ FLASHMEM void processAudioInputFxBlock(AudioInputFxBlockCtx &inCtx,
 // ============================================================================
 
 DMAMEM static AudioTrackFxParams trackFxCfg[NUM_AUDIO_TRACKS];
+static bool trackFxAnyConfigured = false;
 static int32_t trackChorTailSamples = 0;
 static int32_t trackDlyTailSamples = 0;
 static int32_t trackVerbTailSamples = 0;
@@ -2097,6 +2184,21 @@ static uint8_t tailHoldChorPct = 0;
 static uint8_t tailHoldDlyPct = 0;
 static uint8_t tailHoldDfbPct = 0;
 static uint8_t tailHoldVerbPct = 0;
+static float trackAuxBlockPeak = 0.0f;
+static uint16_t trackAuxSilentBlocks = 0;
+
+FLASHMEM static void recomputeTrackFxAnyConfigured() {
+  bool any = false;
+  for (int t = 0; t < NUM_AUDIO_TRACKS; t++) {
+    const AudioTrackFxParams &fx = trackFxCfg[t];
+    if (fx.drive > 0 || fx.chorus > 0 || fx.delay > 0 ||
+        fx.reverb > 0 || fx.tape > 0 || fx.comp > 0) {
+      any = true;
+      break;
+    }
+  }
+  trackFxAnyConfigured = any;
+}
 
 FLASHMEM void resetAudioTrackFxState(int trackIdx) {
   if (trackIdx < 0 || trackIdx >= NUM_AUDIO_TRACKS) return;
@@ -2123,6 +2225,8 @@ FLASHMEM void resetAllAudioTrackFxState() {
   tailHoldDlyPct = 0;
   tailHoldDfbPct = 0;
   tailHoldVerbPct = 0;
+  trackAuxBlockPeak = 0.0f;
+  trackAuxSilentBlocks = 0;
   trackChorPct = 0;
   trackDlyPct = 0;
   trackDfbPct = 0;
@@ -2135,6 +2239,7 @@ FLASHMEM void resetAllAudioTrackFxState() {
   if (masterChorPct == 0 && instChorPct == 0 && inChorPct == 0) resetChorusUnit(chor);
   if (masterDlyPct == 0  && instDlyPct == 0  && inDlyPct == 0)  resetDelayUnit(dly);
   if (masterVerbPct == 0 && instVerbPct == 0 && inVerbPct == 0) resetReverbUnit(verb);
+  recomputeTrackFxAnyConfigured();
 }
 
 FLASHMEM void syncAudioTrackFxParams(int trackIdx, const AudioTrackFxParams &fx) {
@@ -2164,6 +2269,7 @@ FLASHMEM void syncAudioTrackFxParams(int trackIdx, const AudioTrackFxParams &fx)
   }
   configureTapeUnit(trackTape[trackIdx], clamped.tape);
   configureCompUnit(trackComp[trackIdx], clamped.comp);
+  recomputeTrackFxAnyConfigured();
 }
 
 FLASHMEM bool anyAudioTrackDelayOrReverbActive() {
@@ -2183,9 +2289,86 @@ FLASHMEM __attribute__((noinline)) static void updateTrackAuxTankTargets(uint8_t
   syncSharedAuxTanksSlow();
 }
 
-FLASHMEM void prepareAudioTrackFxBlock(AudioTrackFxBlockCtx &ctx, uint8_t processTrackMask,
-                                       uint8_t audibleTrackMask, bool instAuxAvailable,
-                                       AudioInputFxBlockCtx *inCtx) {
+FLASHMEM __attribute__((noinline)) static void syncAudioTrackAuxTargetsSlow(uint8_t audibleTrackMask) {
+  uint8_t maxChor = 0, maxDly = 0, maxDfb = 0, maxVerb = 0;
+  bool anyCfgChor = false, anyCfgDly = false, anyCfgVerb = false;
+  for (int t = 0; t < NUM_AUDIO_TRACKS; t++) {
+    const AudioTrackFxParams &fx = trackFxCfg[t];
+    if (fx.chorus > 0) anyCfgChor = true;
+    if (fx.delay > 0)  anyCfgDly  = true;
+    if (fx.reverb > 0) anyCfgVerb = true;
+    if ((audibleTrackMask & (uint8_t)(1u << t)) == 0) continue;
+    if (fx.chorus > maxChor) maxChor = fx.chorus;
+    if (fx.delay > maxDly)   maxDly  = fx.delay;
+    if (fx.delay > 0 && fx.delayFeedback > maxDfb) maxDfb = fx.delayFeedback;
+    if (fx.reverb > maxVerb) maxVerb = fx.reverb;
+  }
+
+  const bool hasAuxSignal = (trackAuxBlockPeak >= 1.5e-4f);
+  trackAuxBlockPeak = 0.0f;
+  if (hasAuxSignal) {
+    trackAuxSilentBlocks = 0;
+  } else if (trackAuxSilentBlocks < 0xFFFFu) {
+    trackAuxSilentBlocks++;
+  }
+
+  if (!anyCfgChor) trackChorTailSamples = 0;
+  if (!anyCfgDly)  trackDlyTailSamples  = 0;
+  if (!anyCfgVerb) trackVerbTailSamples = 0;
+
+  if (maxChor > 0) {
+    tailHoldChorPct = maxChor;
+    trackChorTailSamples = max(trackChorTailSamples, (int32_t)CHORUS_BUF_LEN);
+  } else if (trackChorTailSamples > 0) {
+    trackChorTailSamples = max((int32_t)0, trackChorTailSamples - (int32_t)AUDIO_BLOCK_SAMPLES);
+    if (trackAuxSilentBlocks >= 8u) trackChorTailSamples = 0;
+    if (trackChorTailSamples > 0) maxChor = tailHoldChorPct;
+  }
+
+  if (maxDly > 0) {
+    tailHoldDlyPct = maxDly;
+    tailHoldDfbPct = maxDfb;
+    int32_t reqTail = (int32_t)(SAMPLE_RATE_HZ * (0.6f + 0.044f * (float)maxDfb));
+    if (reqTail > trackDlyTailSamples) trackDlyTailSamples = reqTail;
+  } else if (trackDlyTailSamples > 0) {
+    trackDlyTailSamples = max((int32_t)0, trackDlyTailSamples - (int32_t)AUDIO_BLOCK_SAMPLES);
+    if (trackAuxSilentBlocks >= 132u) trackDlyTailSamples = 0;
+    if (trackDlyTailSamples > 0) {
+      maxDly = tailHoldDlyPct;
+      maxDfb = tailHoldDfbPct;
+    }
+  }
+
+  if (maxVerb > 0) {
+    tailHoldVerbPct = maxVerb;
+    int32_t reqTail = (int32_t)(SAMPLE_RATE_HZ * (0.8f + 0.25f * (float)maxVerb));
+    if (reqTail > trackVerbTailSamples) trackVerbTailSamples = reqTail;
+  } else if (trackVerbTailSamples > 0) {
+    trackVerbTailSamples = max((int32_t)0, trackVerbTailSamples - (int32_t)AUDIO_BLOCK_SAMPLES);
+    if (trackAuxSilentBlocks >= 132u) trackVerbTailSamples = 0;
+    if (trackVerbTailSamples > 0) maxVerb = tailHoldVerbPct;
+  }
+
+  if (maxChor != trackChorPct || maxDly != trackDlyPct || maxDfb != trackDfbPct || maxVerb != trackVerbPct) {
+    updateTrackAuxTankTargets(maxChor, maxDly, maxDfb, maxVerb);
+  }
+}
+
+void syncAudioTrackAuxTargets(uint8_t audibleTrackMask) {
+  if (!trackFxAnyConfigured &&
+      (trackChorPct | trackDlyPct | trackDfbPct | trackVerbPct) == 0 &&
+      trackChorTailSamples <= 0 && trackDlyTailSamples <= 0 && trackVerbTailSamples <= 0) {
+    trackAuxBlockPeak = 0.0f;
+    trackAuxSilentBlocks = 0;
+    return;
+  }
+  syncAudioTrackAuxTargetsSlow(audibleTrackMask);
+}
+
+FLASHMEM __attribute__((noinline)) static void prepareAudioTrackFxBlockSlow(
+    AudioTrackFxBlockCtx &ctx, uint8_t processTrackMask,
+    uint8_t audibleTrackMask, bool instAuxAvailable,
+    AudioInputFxBlockCtx *inCtx) {
   ctx = AudioTrackFxBlockCtx{};
   if (inCtx) {
     *inCtx = AudioInputFxBlockCtx{};
@@ -2193,13 +2376,9 @@ FLASHMEM void prepareAudioTrackFxBlock(AudioTrackFxBlockCtx &ctx, uint8_t proces
   }
 
   uint8_t maxChor = 0, maxDly = 0, maxDfb = 0, maxVerb = 0;
-  bool anyCfgChor = false, anyCfgDly = false, anyCfgVerb = false;
   for (int t = 0; t < NUM_AUDIO_TRACKS; t++) {
     ctx.dryTrim[t] = 1.0f;
     const AudioTrackFxParams &fx = trackFxCfg[t];
-    if (fx.chorus > 0) anyCfgChor = true;
-    if (fx.delay > 0)  anyCfgDly  = true;
-    if (fx.reverb > 0) anyCfgVerb = true;
     const uint8_t bit = (uint8_t)(1u << t);
     if ((processTrackMask & bit) == 0) continue;
     if (fx.drive > 0 || fx.tape > 0 || fx.comp > 0) {
@@ -2214,41 +2393,13 @@ FLASHMEM void prepareAudioTrackFxBlock(AudioTrackFxBlockCtx &ctx, uint8_t proces
     }
   }
 
-  // Refresh Aux tail timers when audible tracks actively feed Chor / Dly / Verb
-  // (if the user zeroed all tracks' FX amount, release the tail hold so it fades out cleanly)
-  if (!anyCfgChor) trackChorTailSamples = 0;
-  if (!anyCfgDly)  trackDlyTailSamples  = 0;
-  if (!anyCfgVerb) trackVerbTailSamples = 0;
-
-  if (maxChor > 0) {
-    tailHoldChorPct = maxChor;
-    trackChorTailSamples = max(trackChorTailSamples, (int32_t)CHORUS_BUF_LEN);
-  } else if (trackChorTailSamples > 0) {
-    trackChorTailSamples = max((int32_t)0, trackChorTailSamples - (int32_t)AUDIO_BLOCK_SAMPLES);
-    if (trackChorTailSamples > 0) maxChor = tailHoldChorPct;
+  // Tail counters are updated once per block in syncAudioTrackAuxTargets() before fmSynthRenderBlock()
+  if (maxChor == 0 && trackChorTailSamples > 0) maxChor = tailHoldChorPct;
+  if (maxDly == 0 && trackDlyTailSamples > 0) {
+    maxDly = tailHoldDlyPct;
+    maxDfb = tailHoldDfbPct;
   }
-
-  if (maxDly > 0) {
-    tailHoldDlyPct = maxDly;
-    tailHoldDfbPct = maxDfb;
-    int32_t reqTail = (int32_t)(SAMPLE_RATE_HZ * (0.6f + 0.044f * (float)maxDfb));
-    if (reqTail > trackDlyTailSamples) trackDlyTailSamples = reqTail;
-  } else if (trackDlyTailSamples > 0) {
-    trackDlyTailSamples = max((int32_t)0, trackDlyTailSamples - (int32_t)AUDIO_BLOCK_SAMPLES);
-    if (trackDlyTailSamples > 0) {
-      maxDly = tailHoldDlyPct;
-      maxDfb = tailHoldDfbPct;
-    }
-  }
-
-  if (maxVerb > 0) {
-    tailHoldVerbPct = maxVerb;
-    int32_t reqTail = (int32_t)(SAMPLE_RATE_HZ * (0.8f + 0.25f * (float)maxVerb));
-    if (reqTail > trackVerbTailSamples) trackVerbTailSamples = reqTail;
-  } else if (trackVerbTailSamples > 0) {
-    trackVerbTailSamples = max((int32_t)0, trackVerbTailSamples - (int32_t)AUDIO_BLOCK_SAMPLES);
-    if (trackVerbTailSamples > 0) maxVerb = tailHoldVerbPct;
-  }
+  if (maxVerb == 0 && trackVerbTailSamples > 0) maxVerb = tailHoldVerbPct;
 
   if (maxChor != trackChorPct || maxDly != trackDlyPct || maxDfb != trackDfbPct || maxVerb != trackVerbPct) {
     updateTrackAuxTankTargets(maxChor, maxDly, maxDfb, maxVerb);
@@ -2270,7 +2421,8 @@ FLASHMEM void prepareAudioTrackFxBlock(AudioTrackFxBlockCtx &ctx, uint8_t proces
   const bool auxDly  = ((maxDly  > 0) || (inSharedDly  && masterDlyPct  == 0)) && (masterDlyPct  == 0) && dly.enabled;
   const bool auxVerb = (((maxVerb > 0) || (inSharedVerb && masterVerbPct == 0)) && (masterVerbPct == 0) && verb.enabled) || verbFadeTrack;
 
-  if (maxChor == 0 && maxDly == 0 && maxVerb == 0 && !inSharedChor && !inSharedDly && !inSharedVerb) {
+  if (maxChor == 0 && maxDly == 0 && maxVerb == 0 &&
+      !inSharedChor && !inSharedDly && !inSharedVerb && !instAuxAvailable) {
     ctx.runVerbAux = verbFadeTrack;
     return;
   }
@@ -2323,26 +2475,34 @@ FLASHMEM void prepareAudioTrackFxBlock(AudioTrackFxBlockCtx &ctx, uint8_t proces
     }
   }
 
-  // Merge any deferred Instrument FX sends when Track Aux owns the shared tank
+  // Merge any deferred Instrument FX sends when Track or Master Aux owns the shared tank
   if (instAuxAvailable) {
-    float ic = (ctx.runChorAux && instChorPct > 0) ? ((float)instChorPct * 0.01f) : 0.0f;
-    float id = (ctx.runDlyAux  && instDlyPct  > 0) ? ((float)instDlyPct  * 0.01f) : 0.0f;
-    float iv = (ctx.runVerbAux && instVerbPct > 0) ? computeReverbMix(instVerbPct) : 0.0f;
-    if (ic > 0.0f || id > 0.0f || iv > 0.0f) {
+    const bool instChorDeferred = (instChorPct > 0) &&
+                                  !(masterChorPct == 0 && trackChorPct == 0 && inChorPct == 0 && chor.enabled);
+    const bool instDlyDeferred  = (instDlyPct  > 0) &&
+                                  !(masterDlyPct  == 0 && trackDlyPct  == 0 && inDlyPct  == 0 && dly.enabled);
+    const bool instVerbDeferred = (instVerbPct > 0) && !isInstReverbBusActive();
+    float ic = instChorDeferred ? ((float)instChorPct * 0.01f) : 0.0f;
+    float id = instDlyDeferred  ? ((float)instDlyPct  * 0.01f) : 0.0f;
+    float iv = instVerbDeferred ? computeReverbMix(instVerbPct) : 0.0f;
+    float icEff = (masterChorPct == 0) ? ic : max(0.0f, ic - (float)masterChorPct * 0.01f);
+    float idEff = (masterDlyPct  == 0) ? id : max(0.0f, id - (float)masterDlyPct  * 0.01f);
+    float ivEff = (masterVerbPct == 0) ? iv : max(0.0f, iv - masterVerbTargetMix);
+    if (icEff > 0.0f || idEff > 0.0f || ivEff > 0.0f) {
       ctx.hasInstAux = true;
-      if (ic > 0.0f && effChor > 0) {
-        ctx.instChorSend = ic / effChorMix;
-        sumC += ic;
-        sumCD += ic * id;
-        sumCV += ic * (1.0f - 0.12f * id) * iv;
+      if (icEff > 0.0f && effChor > 0) {
+        ctx.instChorSend = icEff / effChorMix;
+        sumC += icEff;
+        sumCD += icEff * idEff;
+        sumCV += icEff * (1.0f - 0.12f * idEff) * ivEff;
       }
-      if (id > 0.0f && effDly > 0) {
-        ctx.instDlySend = (id * (1.0f - 0.25f * ic)) / effDlyMix;
-        sumD += id;
-        sumDV += id * iv;
+      if (idEff > 0.0f && effDly > 0) {
+        ctx.instDlySend = (idEff * (1.0f - 0.25f * icEff)) / effDlyMix;
+        sumD += idEff;
+        sumDV += idEff * ivEff;
       }
-      if (iv > 0.0f && effVerb > 0) {
-        ctx.instVerbSend = (iv * (1.0f - 0.25f * ic) * (1.0f - 0.12f * id)) / effVerbMix;
+      if (ivEff > 0.0f && effVerb > 0) {
+        ctx.instVerbSend = (ivEff * (1.0f - 0.25f * icEff) * (1.0f - 0.12f * idEff)) / effVerbMix;
       }
     }
   }
@@ -2389,6 +2549,24 @@ FLASHMEM void prepareAudioTrackFxBlock(AudioTrackFxBlockCtx &ctx, uint8_t proces
   if (sumD > 1e-5f && effVerb > 0) {
     ctx.dlyToVerb = (sumDV / sumD) / effVerbMix;
   }
+}
+
+void prepareAudioTrackFxBlock(AudioTrackFxBlockCtx &ctx, uint8_t processTrackMask,
+                              uint8_t audibleTrackMask, bool instAuxAvailable,
+                              AudioInputFxBlockCtx *inCtx) {
+  if (!trackFxAnyConfigured && !instAuxAvailable &&
+      (trackChorPct | trackDlyPct | trackDfbPct | trackVerbPct |
+       inChorPct | inDlyPct | inVerbPct) == 0 &&
+      trackChorTailSamples <= 0 && trackDlyTailSamples <= 0 && trackVerbTailSamples <= 0 &&
+      !(verb.enabled && verbOwner == VERB_OWNER_TRACK)) {
+    ctx = AudioTrackFxBlockCtx{};
+    if (inCtx) {
+      *inCtx = AudioInputFxBlockCtx{};
+      inCtx->dryTrim = 1.0f;
+    }
+    return;
+  }
+  prepareAudioTrackFxBlockSlow(ctx, processTrackMask, audibleTrackMask, instAuxAvailable, inCtx);
 }
 
 void processAudioTrackInsertSample(int trackIdx, bool stereo, float &sl, float &sr) {
@@ -2471,6 +2649,12 @@ void processAudioTrackAuxSample(const AudioTrackFxBlockCtx &ctx, uint32_t instPa
     masterVerbAuxBoostR = verbInR;
   }
 
+  float sigAbs = max(max(fabsf(wL), fabsf(wR)),
+                     max(max(fabsf(chorInL), fabsf(chorInR)),
+                         max(max(fabsf(dlyInL), fabsf(dlyInR)),
+                             max(fabsf(verbInL), fabsf(verbInR)))));
+  if (sigAbs > trackAuxBlockPeak) trackAuxBlockPeak = sigAbs;
+
   wetOutL = wL * 32768.0f;
   wetOutR = wR * 32768.0f;
 }
@@ -2493,9 +2677,9 @@ void processMasterFx(float &mixL, float &mixR) {
   float xR = mixR * (1.0f / 32768.0f);
 
   // Signal chain: Chorus -> Delay -> Reverb -> Tape -> Comp
-  if (doChor) processChorusSample(xL, xR);
-  if (doDlay) processDelaySample(xL, xR);
-  if (doVerb) processReverbSample(xL, xR);
+  if (doChor) processMasterChorusSample(xL, xR);
+  if (doDlay) processMasterDelaySample(xL, xR);
+  if (doVerb) processMasterReverbSample(xL, xR);
   if (doTape) processTapeSample(xL, xR);
   if (doComp) processCompSample(xL, xR);
 

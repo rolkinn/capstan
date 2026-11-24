@@ -96,7 +96,8 @@ enum class MasterExportResult : uint8_t {
   Ok        = 0,
   Empty     = 1,
   Cancelled = 2,
-  Error     = 3
+  Error     = 3,
+  Dropout   = 4
 };
 
 bool storageCopyAudioRegionToClip(int srcTrack, uint32_t startFrame, uint32_t endFrame);
@@ -105,6 +106,7 @@ bool storageLoadWavFileToTrack(int dstTrack, uint32_t destStartFrame, const char
 bool storageDeleteAudioRegion(int t, uint32_t startFrame, uint32_t endFrame);
 void storageRemoveClipboardFiles();
 uint32_t storageSongMaxAudibleFrame();
+bool storageAnyTailFxActive();
 MasterExportResult storageExportMasterAudioWav();
 enum class SamplerRecMode : uint8_t {
   ThreshAutoStartStop  = 0,
@@ -124,6 +126,8 @@ void flushHeaders();
 
 // System settings persistence
 bool saveSystemSettings();
+void markSystemSettingsDirty();
+void flushSystemSettingsIfDirty(bool force = false);
 
 // Shared 16 KB RAM1 staging buffer (also reused by USB Mass Storage mode when transport is stopped)
 uint32_t *storageSharedChunkBuf();

@@ -101,7 +101,8 @@ FLASHMEM static void handlePowerButton(bool allowProjectPlayLock = false) {
 }
 
 FLASHMEM static void fatal(const char *msg) {
-  drawText(4, SY(160) + 16, msg, TEXT_ERROR, BG);
+  int x = max(SX(4), (SCREEN_W - textWidth(msg)) / 2);
+  drawText(x, SY(176), msg, TEXT_ERROR, BG);
   for (;;) handlePowerButton();
 }
 
@@ -126,23 +127,40 @@ FLASHMEM static void waitForCard() {
   uiGeneration++;
 }
 
+FLASHMEM static void onReloadProgress(const char *msg) {
+#if CAPSTAN_DEBUG
+  Serial.println(msg);
+#else
+  (void)msg;
+#endif
+}
+
 FLASHMEM static void reloadFromCard() {
+  midiInSuspend(true);
   for (;;) {
     storageForget();
-    if (storageBegin([](const char *msg) FLASHMEM {
-#if CAPSTAN_DEBUG
-      Serial.println(msg);
-#else
-      (void)msg;
-#endif
-    })) break;
-    if (cardResponds()) fatal("SD card error: check free space in /Capstan.");
+    if (storageBegin(onReloadProgress)) break;
+    if (cardResponds()) fatal("SD error: check /Capstan space.");
     waitForCard();
   }
   beginSession();
   appSyncUsbChargeEnumeration(usbDriveTick);
   transport.spb = spbForBpm(bpm);
+  midiInResetClockState();
+  midiInSuspend(false);
   uiForceRedraw();
+}
+
+FLASHMEM static void onSetupProgress(const char *msg) {
+#if CAPSTAN_DEBUG
+  if (msg && msg[0]) Serial.println(msg);
+#endif
+  splashProgress(msg);
+}
+
+FLASHMEM static void onUsbDriveTick() {
+  loopCount++;
+  handlePowerButton();
 }
 
 static bool phonesInState = false;
@@ -182,6 +200,7 @@ FLASHMEM void setup() {
   usbAudioWritten = usb_audio_tx_written;
 #endif
   board.begin();
+  looper::engineInitRings();
   board.powerButtonPressed();
   {
     bool initPhones = false;
@@ -205,19 +224,13 @@ FLASHMEM void setup() {
 
   showSplash();
   splashIntro();
-  auto progress = [](const char *msg) FLASHMEM {
-#if CAPSTAN_DEBUG
-    if (msg && msg[0]) Serial.println(msg);
-#endif
-    splashProgress(msg);
-  };
-  while (!storageBegin(progress)) {
-    if (cardResponds()) fatal("SD card error: check free space in /Capstan.");
+  while (!storageBegin(onSetupProgress)) {
+    if (cardResponds()) fatal("SD error: check /Capstan space.");
     storageForget();
     waitForCard();
     showSplash();
   }
-  progress("");
+  onSetupProgress("");
   splashTick();
   beginSession();
   appSyncUsbChargeEnumeration(splashTick);
@@ -225,15 +238,15 @@ FLASHMEM void setup() {
   transport.spb = spbForBpm(bpm);
 
   while (millis() - codecReadyAt < 150) delay(1);
-  codec.dacVolume(1.0f);
   appEnableCodecHardware();
   updateSpeakerFromHeadphones();
+  codec.dacVolume(1.0f);
 
   if (MIDI_OUT_ENABLED) midiBegin(board.midiOutBegin());
   if (MIDI_OUT_ENABLED && MIDI_IN_ENABLED) midiInBegin(board.midiInBegin());
   if (MIDI_OUT_ENABLED && MIDI_USB_ENABLED) midiUsbBegin();
 
-  usbDriveTick = []() FLASHMEM { loopCount++; handlePowerButton(); };
+  usbDriveTick = onUsbDriveTick;
   usbDriveReload = reloadFromCard;
 
   hideSplash();
@@ -291,8 +304,10 @@ void loop() {
       takeEngineLoad(avg, most);
       int playing = 0;
       for (const auto &tr : tracks) if (tr.live) playing++;
-      Serial.printf("engine: %.1f%% avg, %.1f%% max (%d audio tracks active)\n",
-                    avg * 100, most * 100, playing);
+      int avgTenths = (int)(avg * 1000.0f + 0.5f);
+      int mostTenths = (int)(most * 1000.0f + 0.5f);
+      Serial.printf("engine: %d.%d%% avg, %d.%d%% max (%d audio tracks active)\n",
+                    avgTenths / 10, avgTenths % 10, mostTenths / 10, mostTenths % 10, playing);
     }
   }
 

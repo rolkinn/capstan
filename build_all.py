@@ -262,7 +262,7 @@ def main():
     verify_script = ROOT / "tools" / "recorder_sim" / "verify_firmware.py"
     if verify_script.exists():
         print("\n=== Running Automated Firmware Verification ===")
-        res = subprocess.run([sys.executable, str(verify_script)], cwd=str(ROOT))
+        res = subprocess.run([sys.executable, str(verify_script), *selected], cwd=str(ROOT))
         if res.returncode != 0:
             sys.exit(res.returncode)
 

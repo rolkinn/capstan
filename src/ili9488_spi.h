@@ -15,7 +15,6 @@ public:
   void begin(uint32_t hz);                  // Hardware reset, register initialization, sleep out, display on
   void setRotation(uint8_t r);              // 0..3 rotation (1 and 3 are 480x320 landscape; Model:02 uses 3)
   void invertDisplay(bool on);
-  void setClipRect(int16_t x, int16_t y, int16_t w, int16_t h);
   void setClipRect() { _cx = 0; _cy = 0; _cw = _w; _ch = _h; }   // Full 480x320 viewport
   void clearPanel(uint16_t c = 0);          // Clear the full physical 480x320 panel
   void fillScreen(uint16_t c) { fillRect(0, 0, _w, _h, c); }

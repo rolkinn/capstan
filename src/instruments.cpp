@@ -9,7 +9,9 @@
 #include "midi_map.h"
 #include "master_fx.h"
 #include "storage.h"
+#include "paged_dir_scanner.h"
 #include "tuner.h"
+#include "ui.h"
 #include <Arduino.h>
 #include <math.h>
 #include <string.h>
@@ -40,7 +42,7 @@ PROGMEM static const float INST_LEVEL_LUT[VOLUME_MAX + 1] = {
 
 // Exact 32-bit phase steps at 44.1 kHz for Octave 9 (MIDI notes 108..119 = C8..B8);
 // all other octaves are derived in O(1) via exact power-of-2 bit shifts in noteToBaseStep().
-static const uint32_t semitoneStepOct9[12] = {
+PROGMEM static const uint32_t semitoneStepOct9[12] = {
   407680855u, // C8  (108)
   431922813u, // C#8 (109)
   457606307u, // D8  (110)
@@ -106,6 +108,7 @@ static int32_t instFxSilentBlocks = 0;
 static int32_t instLimTailFrames = 0;
 static int8_t lastFxInst = -1;
 static int8_t lastFxMidiTrack = -1;
+static float lastCapFxShare = 0.0f;
 static bool lastInstWantCap = false;
 static LookaheadMonitorLimiter instBusLimiter(28500.0f, 30800.0f, 32200.0f);
 DMAMEM static float instCapDelayL[LookaheadMonitorLimiter::LOOKAHEAD];
@@ -121,7 +124,7 @@ static uint8_t autoDroneMask = 0;
 // SD Card Instrument File Browser Modal state (.FMI files) & shared modal browser pool (32-Entry Sliding Window)
 static constexpr int MAX_INST_BROWSER_ENTRIES = 32;
 static constexpr size_t SHARED_BROWSER_POOL_BYTES = 32 * 64; // 2,048 B shared across FMI, MIDI, & WAV browsers
-DMAMEM static uint8_t sharedBrowserPool[SHARED_BROWSER_POOL_BYTES] __attribute__((aligned(4)));
+DMAMEM uint8_t sharedBrowserPool[SHARED_BROWSER_POOL_BYTES] __attribute__((aligned(4)));
 static InstBrowserEntry *const instBrowserEntries = reinterpret_cast<InstBrowserEntry *>(sharedBrowserPool);
 static int instBrowserCount = 0;
 static int instBrowserWinStart = 0;
@@ -141,10 +144,6 @@ static char instBrowserDir[INST_BROWSER_DIR_MAX] = "";
 
 FLASHMEM void *sharedBrowserPoolBuf() {
   return sharedBrowserPool;
-}
-
-FLASHMEM char *sharedBrowserDirBuf() {
-  return instBrowserDir;
 }
 
 // ============================================================================
@@ -465,6 +464,7 @@ FLASHMEM void fmSynthCreateInSlot(int instIdx, InstType type) {
     patches[instIdx].type = (uint8_t)InstType::None;
   }
   syncInstCurLevel(instIdx);
+  instMidiMapRebuildMask();
 }
 
 FLASHMEM void fmSynthDeleteSlot(int instIdx) {
@@ -479,6 +479,7 @@ FLASHMEM void fmSynthDeleteSlot(int instIdx) {
   memset(&patches[instIdx], 0, sizeof(FmPatch));
   patches[instIdx].type = (uint8_t)InstType::None;
   instCurLevel[instIdx] = 1.0f;
+  instMidiMapRebuildMask();
 }
 
 FLASHMEM bool fmSynthCopySlot(int instIdx) {
@@ -594,7 +595,7 @@ FLASHMEM static float decayMultiplierForParam127(uint8_t param) {
   return expf(-6.907755f / max(1.0f, sec * (float)SAMPLE_RATE_HZ));
 }
 
-FLASHMEM static void refreshInstEnvelopeRates(int instIdx, const FmPatch &p) {
+FLASHMEM __attribute__((noinline)) static void refreshInstEnvelopeRates(int instIdx, const FmPatch &p) {
   FmInstEnvRates &er = instEnvRates[constrain(instIdx, 0, NUM_INSTRUMENTS - 1)];
   constexpr float invMax = 1.0f / (float)INST_ENV_MAX;
   if (memcmp(&er.lastAmp, &p.amp, sizeof(InstEnvParams)) != 0) {
@@ -613,6 +614,11 @@ FLASHMEM static void refreshInstEnvelopeRates(int instIdx, const FmPatch &p) {
     er.fltSusLvl = constrain((int)p.flt.sustain, 0, (int)INST_ENV_MAX) * invMax;
     er.fltRelMul = decayMultiplierForParam127(p.flt.release);
   }
+}
+
+FLASHMEM void fmSynthRefreshEnvelopeRates(int instIdx) {
+  if (instIdx < 0 || instIdx >= NUM_INSTRUMENTS) return;
+  refreshInstEnvelopeRates(instIdx, patches[instIdx]);
 }
 
 static inline uint32_t noteToBaseStep(uint8_t note) {
@@ -670,7 +676,7 @@ static inline bool enqueueSynthEvent(SynthEvType type, uint8_t packedInstTrack, 
   return true;
 }
 
-FLASHMEM static void applySilenceInstInIsr(int instIdx) {
+static void applySilenceInstInIsr(int instIdx) {
   if (instIdx < 0 || instIdx >= NUM_INSTRUMENTS) return;
   latchedDroneMask &= ~(uint8_t)(1u << instIdx);
   autoDroneMask &= ~(uint8_t)(1u << instIdx);
@@ -691,7 +697,7 @@ FLASHMEM static void applySilenceInstInIsr(int instIdx) {
   sf2SilenceInst(instIdx);
 }
 
-FLASHMEM static void applySilenceMidiTrackInIsr(int midiTrack) {
+static void applySilenceMidiTrackInIsr(int midiTrack) {
   if (midiTrack < 0 || midiTrack >= NUM_MIDI_TRACKS) return;
   for (int i = 0; i < NUM_FM_VOICES; i++) {
     if (voices[i].active && voices[i].midiTrack == (uint8_t)midiTrack) {
@@ -703,13 +709,19 @@ FLASHMEM static void applySilenceMidiTrackInIsr(int midiTrack) {
   }
 }
 
-FLASHMEM static void applyNoteOnInIsr(int instIdx, uint8_t note, uint8_t velocity,
+static void applyNoteOnInIsr(int instIdx, uint8_t note, uint8_t velocity,
                                       uint8_t sampleOffset, uint32_t samplerStreamIdx, uint32_t samplerStreamGen,
                                       uint8_t midiTrack = 0xFFu) {
   if (instIdx < 0 || instIdx >= NUM_INSTRUMENTS) return;
   const FmPatch &p = patches[instIdx];
   const InstType iType = (InstType)p.type;
   if (iType == InstType::None) return;
+
+  const FmInstEnvRates &erCheck = instEnvRates[instIdx];
+  if (memcmp(&erCheck.lastAmp, &p.amp, sizeof(InstEnvParams)) != 0 ||
+      memcmp(&erCheck.lastFlt, &p.flt, sizeof(InstEnvParams)) != 0) {
+    refreshInstEnvelopeRates(instIdx, p);
+  }
 
   uint32_t bStep = noteToBaseStep(note);
   float velNorm = constrain((int)velocity, 1, 127) * (1.0f / 127.0f);
@@ -781,7 +793,7 @@ FLASHMEM static void applyNoteOnInIsr(int instIdx, uint8_t note, uint8_t velocit
     }
   }
 
-  auto voiceStealScore = [&](const FmVoice &cand) FLASHMEM -> float {
+  auto voiceStealScore = [&](const FmVoice &cand) -> float {
     if (!cand.gate && !cand.sustained) {
       return cand.ampEnv; // 0.0..1.0: quietest releasing tail first
     }
@@ -898,7 +910,7 @@ FLASHMEM static void applyNoteOnInIsr(int instIdx, uint8_t note, uint8_t velocit
   }
 }
 
-FLASHMEM static void applyNoteOffInIsr(int instIdx, uint8_t note, uint8_t midiTrack = 0xFFu) {
+static void applyNoteOffInIsr(int instIdx, uint8_t note, uint8_t midiTrack = 0xFFu) {
   if (instIdx < 0 || instIdx >= NUM_INSTRUMENTS) return;
   const FmPatch &p = patches[instIdx];
   const InstType iType = (InstType)p.type;
@@ -929,9 +941,16 @@ FLASHMEM static void applyNoteOffInIsr(int instIdx, uint8_t note, uint8_t midiTr
   }
 }
 
-FLASHMEM static void applyCcInIsr(int instIdx, uint8_t cc, uint8_t val) {
+static void applyCcInIsr(int instIdx, uint8_t cc, uint8_t val) {
   if (instIdx < 0 || instIdx >= NUM_INSTRUMENTS) return;
   val &= 0x7F;
+  if (cc == 120 || cc == 123) {
+    applySilenceInstInIsr(instIdx);
+    return;
+  }
+  if (instMidiMapHasRoutedCc(instIdx, cc)) {
+    return;
+  }
   if (cc == 1) {
     instRt[instIdx].modWheelBoost = (float)val * (1.0f / 127.0f);
   } else if (cc == 64) {
@@ -957,15 +976,13 @@ FLASHMEM static void applyCcInIsr(int instIdx, uint8_t cc, uint8_t val) {
         }
       }
     }
-  } else if (cc == 120 || cc == 123) {
-    applySilenceInstInIsr(instIdx);
   }
-  if ((InstType)patches[instIdx].type == InstType::SoundFont && cc != 120 && cc != 123) {
+  if ((InstType)patches[instIdx].type == InstType::SoundFont) {
     sf2HandleCcInIsr(instIdx, cc, val);
   }
 }
 
-FLASHMEM static void applyPitchBendInIsr(int instIdx, uint8_t lsb, uint8_t msb) {
+static void applyPitchBendInIsr(int instIdx, uint8_t lsb, uint8_t msb) {
   if (instIdx < 0 || instIdx >= NUM_INSTRUMENTS) return;
   int bend = ((int)(msb & 0x7F) << 7) | (int)(lsb & 0x7F);
   float norm = (float)(bend - 8192) * (1.0f / 8192.0f); // -1.0 .. +1.0 (+/- 2 semitones)
@@ -975,7 +992,7 @@ FLASHMEM static void applyPitchBendInIsr(int instIdx, uint8_t lsb, uint8_t msb) 
   }
 }
 
-FLASHMEM static void fmSynthProcessQueuedEvents() {
+static void fmSynthProcessQueuedEvents() {
   while (synthEvTail != synthEvHead) {
     uint32_t t = synthEvTail;
     SynthEvent ev = synthEvRing[t & SYNTH_EV_RING_MASK];
@@ -1001,7 +1018,7 @@ FLASHMEM static void fmSynthProcessQueuedEvents() {
   }
 }
 
-FLASHMEM bool fmSynthNoteOn(int instIdx, uint8_t note, uint8_t velocity, uint8_t sampleOffset,
+bool fmSynthNoteOn(int instIdx, uint8_t note, uint8_t velocity, uint8_t sampleOffset,
                             bool allowSdIo, uint8_t midiTrack) {
   if (instIdx < 0 || instIdx >= NUM_INSTRUMENTS) return true;
   const FmPatch &p = patches[instIdx];
@@ -1069,7 +1086,7 @@ FLASHMEM bool fmSynthNoteOn(int instIdx, uint8_t note, uint8_t velocity, uint8_t
   return true;
 }
 
-FLASHMEM void fmSynthNoteOff(int instIdx, uint8_t note, uint8_t sampleOffset, uint8_t midiTrack) {
+void fmSynthNoteOff(int instIdx, uint8_t note, uint8_t sampleOffset, uint8_t midiTrack) {
   if (instIdx < 0 || instIdx >= NUM_INSTRUMENTS) return;
   const FmPatch &p = patches[instIdx];
   const InstType iType = (InstType)p.type;
@@ -1086,12 +1103,12 @@ FLASHMEM void fmSynthNoteOff(int instIdx, uint8_t note, uint8_t sampleOffset, ui
   }
 }
 
-FLASHMEM void fmSynthPitchBend(int instIdx, uint8_t lsb, uint8_t msb, uint8_t midiTrack) {
+void fmSynthPitchBend(int instIdx, uint8_t lsb, uint8_t msb, uint8_t midiTrack) {
   if (instIdx < 0 || instIdx >= NUM_INSTRUMENTS) return;
   enqueueSynthEvent(SynthEvType::PitchBend, packSynthInstTrack(instIdx, midiTrack), lsb & 0x7Fu, msb & 0x7Fu);
 }
 
-FLASHMEM void fmSynthCC(int instIdx, uint8_t cc, uint8_t val, uint8_t midiTrack) {
+void fmSynthCC(int instIdx, uint8_t cc, uint8_t val, uint8_t midiTrack) {
   if (instIdx < 0 || instIdx >= NUM_INSTRUMENTS) return;
   instMidiMapApplyRoutedCc(instIdx, cc & 0x7Fu, val & 0x7Fu);
   enqueueSynthEvent(SynthEvType::ControlChange, packSynthInstTrack(instIdx, midiTrack), cc & 0x7Fu, val & 0x7Fu);
@@ -1228,10 +1245,12 @@ FLASHMEM bool fmSynthHasActiveOutput() {
   for (int i = 0; i < NUM_FM_VOICES; i++) {
     if (voices[i].active) return true;
   }
-  return instFxTailFrames > 0 || instLimTailFrames > 0 || isInstFxChainEnabled();
+  return instFxTailFrames > 0 || instLimTailFrames > 0;
 }
 
 FLASHMEM void fmSynthService() {
+  instMidiMapFlushRoutedCc();
+
   if (auditionInst >= 0 && (int32_t)(millis() - auditionOffMs) >= 0) {
     int aInst = auditionInst;
     uint8_t aNote = auditionNote;
@@ -1366,7 +1385,7 @@ FLASHMEM __attribute__((noinline)) static void renderSharedCapInstVoices(
   }
 }
 
-FLASHMEM __attribute__((noinline)) static void noteInstFxTailSend(
+__attribute__((noinline)) static void noteInstFxTailSend(
     int inst, const InstFxParams &fx, uint8_t tapePct, uint8_t compPct, int numFrames,
     uint8_t &maxChor, uint8_t &maxDly, uint8_t &maxDfb, uint8_t &maxVerb,
     uint8_t &maxTape, uint8_t &maxComp) {
@@ -1388,6 +1407,9 @@ FLASHMEM __attribute__((noinline)) static void noteInstFxTailSend(
     if (reqTail > instFxTailFrames) instFxTailFrames = reqTail;
   } else {
     int32_t minTail = (tapePct > 0) ? (2 * numFrames) : numFrames;
+    if (fx.chorus > 0) {
+      minTail = max(minTail, (int32_t)CHORUS_BUF_LEN);
+    }
     if (instFxTailFrames < minTail) {
       instFxTailFrames = minTail;
     }
@@ -1395,7 +1417,7 @@ FLASHMEM __attribute__((noinline)) static void noteInstFxTailSend(
   instFxSilentBlocks = 0;
 }
 
-FLASHMEM __attribute__((noinline)) static void finishInstFxTailBlock(int numFrames, float tailPeak,
+__attribute__((noinline)) static void finishInstFxTailBlock(int numFrames, float tailPeak,
                                                                      uint8_t maxDly, bool measuredPeak) {
   instFxTailFrames = max((int32_t)0, instFxTailFrames - (int32_t)numFrames);
   if (measuredPeak) {
@@ -1411,11 +1433,12 @@ FLASHMEM __attribute__((noinline)) static void finishInstFxTailBlock(int numFram
   if (instFxTailFrames == 0) {
     instFxSilentBlocks = 0;
     lastFxMidiTrack = -1;
+    lastCapFxShare = 0.0f;
     setInstFxParams(0, 0, 0, 0, 0, 0);
   }
 }
 
-FLASHMEM __attribute__((noinline)) static void packInstAuxBlock(const int32_t *sendL, const int32_t *sendR,
+__attribute__((noinline)) static void packInstAuxBlock(const int32_t *sendL, const int32_t *sendR,
                                                                 int numFrames, uint32_t *instAuxOut,
                                                                 bool *outHasInstAux) {
   if (!instAuxOut || !outHasInstAux) return;
@@ -1428,7 +1451,7 @@ FLASHMEM __attribute__((noinline)) static void packInstAuxBlock(const int32_t *s
   *outHasInstAux = true;
 }
 
-FLASHMEM __attribute__((noinline)) static bool computeInstFxMaxOutLvl(
+__attribute__((noinline)) static bool computeInstFxMaxOutLvl(
     bool anyActive, int tunerInst, bool tunerMuteInst, float &outMaxLvl) {
   float maxLvl = 0.0f;
   bool anyFxBus = false;
@@ -1478,6 +1501,39 @@ FLASHMEM __attribute__((noinline)) static void runInstFxBusBlock(
                              (!anyFxSend && lastFxMidiTrack == (int8_t)captureMidiTrack));
   const bool routeDryFxToCap = wantCap && capUsedFxSend && otherUsedFxSend;
 
+  float capShare = 0.0f;
+  if (!wantCap) {
+    lastCapFxShare = 0.0f;
+  } else if (routeFxToCap) {
+    capShare = 1.0f;
+    lastCapFxShare = 1.0f;
+  } else if (anyFxSend) {
+    if (capUsedFxSend) {
+      float sumTotal = 0.0f;
+      float sumCap = 0.0f;
+      for (int i = 0; i < numFrames; i++) {
+        sumTotal += fabsf((float)fxSendL[i]) + fabsf((float)fxSendR[i]);
+        sumCap   += fabsf((float)capDryFxL[i]) + fabsf((float)capDryFxR[i]);
+      }
+      const float midFxG = 0.5f * (fxOutStart + fxOutTarget);
+      const float denom = sumTotal * midFxG;
+      if (denom > 16.0f) {
+        float instShare = constrain(sumCap / denom, 0.0f, 1.0f);
+        capShare = instShare;
+        lastCapFxShare += 0.5f * (instShare - lastCapFxShare);
+      } else {
+        capShare = lastCapFxShare;
+      }
+    } else if (otherUsedFxSend) {
+      lastCapFxShare *= 0.94f;
+      if (lastCapFxShare < 1e-4f) lastCapFxShare = 0.0f;
+      capShare = lastCapFxShare;
+    }
+  } else if (instFxTailFrames > 0) {
+    capShare = lastCapFxShare;
+  }
+  const bool routeSharedCap = wantCap && !routeFxToCap && (capUsedFxSend || capShare > 1e-4f);
+
   if (instFxTailFrames > 0 && lastFxInst >= 0 && lastFxInst < NUM_INSTRUMENTS &&
       patches[lastFxInst].type != (uint8_t)InstType::None) {
     const InstFxParams &tfx = patches[lastFxInst].fx;
@@ -1513,17 +1569,28 @@ FLASHMEM __attribute__((noinline)) static void runInstFxBusBlock(
         }
       }
     }
+    if (routeDryFxToCap) {
+      for (int i = 0; i < numFrames; i++) {
+        capOutL[i] += capDryFxL[i];
+        capOutR[i] += capDryFxR[i];
+      }
+    }
   } else {
     for (int i = 0; i < numFrames; i++) {
-      float xL = anyFxSend ? ((float)fxSendL[i] * (1.0f / 32768.0f)) : 0.0f;
-      float xR = anyFxSend ? ((float)fxSendR[i] * (1.0f / 32768.0f)) : 0.0f;
-      processInstFxSample(xL, xR);
+      const float preL = anyFxSend ? ((float)fxSendL[i] * (1.0f / 32768.0f)) : 0.0f;
+      const float preR = anyFxSend ? ((float)fxSendR[i] * (1.0f / 32768.0f)) : 0.0f;
+      float xL = preL;
+      float xR = preR;
+      float pureWetL = 0.0f, pureWetR = 0.0f, auxDryTrim = 1.0f;
+      processInstFxSample(xL, xR, &pureWetL, &pureWetR, &auxDryTrim);
       float absSum = fabsf(xL) + fabsf(xR);
       if (absSum > tailPeak) tailPeak = absSum;
+      float curFxG = 1.0f;
       if (scaleFxOut) {
         fxG += fxGStep;
-        xL *= fxG;
-        xR *= fxG;
+        curFxG = fxG;
+        xL *= curFxG;
+        xR *= curFxG;
       }
       int32_t wetL = (int32_t)(xL * 32768.0f);
       int32_t wetR = (int32_t)(xR * 32768.0f);
@@ -1534,6 +1601,15 @@ FLASHMEM __attribute__((noinline)) static void runInstFxBusBlock(
       if (routeFxToCap) {
         capOutL[i] += wetL;
         capOutR[i] += wetR;
+      } else if (routeSharedCap) {
+        const float dryC_L = (capUsedFxSend ? (float)capDryFxL[i] : 0.0f) * auxDryTrim;
+        const float dryC_R = (capUsedFxSend ? (float)capDryFxR[i] : 0.0f) * auxDryTrim;
+        const float tcDeltaL = xL - (auxDryTrim * preL + pureWetL) * curFxG;
+        const float tcDeltaR = xR - (auxDryTrim * preR + pureWetR) * curFxG;
+        const float capWetL = (pureWetL * curFxG + tcDeltaL) * capShare * 32768.0f;
+        const float capWetR = (pureWetR * curFxG + tcDeltaR) * capShare * 32768.0f;
+        capOutL[i] += (int32_t)(dryC_L + capWetL);
+        capOutR[i] += (int32_t)(dryC_R + capWetR);
       }
     }
     if (needSharedAux) {
@@ -1541,12 +1617,6 @@ FLASHMEM __attribute__((noinline)) static void runInstFxBusBlock(
     }
   }
   instFxCurOutLvl = fxOutTarget;
-  if (routeDryFxToCap) {
-    for (int i = 0; i < numFrames; i++) {
-      capOutL[i] += capDryFxL[i];
-      capOutR[i] += capDryFxR[i];
-    }
-  }
   if (!anyFxSend && instFxTailFrames > 0) {
     finishInstFxTailBlock(numFrames, tailPeak, maxDly, instChainActive);
   }
@@ -1582,6 +1652,7 @@ bool fmSynthRenderBlock(int32_t *outL, int32_t *outR, int numFrames,
   }
   if (!anyActive && instFxTailFrames <= 0 && instLimTailFrames <= 0 && !isInstFxChainEnabled()) {
     lastInstWantCap = false;
+    lastCapFxShare = 0.0f;
     return false;
   }
 
@@ -1642,6 +1713,7 @@ bool fmSynthRenderBlock(int32_t *outL, int32_t *outR, int numFrames,
       const float startLvl = instCurLevel[inst];
       const bool rampingLvl = (fabsf(targetLvl - startLvl) > 1e-4f);
       const bool hasLevelScale = rampingLvl || (instLvl != (int)VOLUME_UNITY);
+      const bool silentInst = (!rampingLvl && instLvl <= 0);
       const FmInstRuntime &rt = instRt[inst];
 
       if (inst != tunerInst && !hasCapVoice && !hasDrive && !hasBusFx && !hasLevelScale) {
@@ -1654,12 +1726,15 @@ bool fmSynthRenderBlock(int32_t *outL, int32_t *outR, int numFrames,
         continue;
       }
 
+      const bool routeSharedCapToBusFx = hasBusFx && !silentInst && !(inst == tunerInst && tunerMuteInst);
       int32_t instL[AUDIO_BLOCK_SAMPLES] = {};
       int32_t instR[AUDIO_BLOCK_SAMPLES] = {};
       if (hasCapVoice && hasOtherVoice) {
         renderSharedCapInstVoices(inst, captureMidiTrack, numFrames, p, rt, ops,
                                   hasDrive, hasLevelScale, startLvl, targetLvl, rampingLvl,
-                                  instL, instR, capOutL, capOutR);
+                                  instL, instR,
+                                  routeSharedCapToBusFx ? capDryFxL : capOutL,
+                                  routeSharedCapToBusFx ? capDryFxR : capOutR);
       } else {
         for (int vIdx = 0; vIdx < NUM_FM_VOICES; vIdx++) {
           FmVoice &v = voices[vIdx];
@@ -1694,7 +1769,6 @@ bool fmSynthRenderBlock(int32_t *outL, int32_t *outR, int numFrames,
         continue;
       }
 
-      const bool silentInst = (!rampingLvl && instLvl <= 0);
       if (hasBusFx && !silentInst) {
         // Apply relative trim into FX bus so OUT: OUTPUT LEVEL acts post-COMP
         const float preTgt = (fxOutTarget > 1e-5f) ? (targetLvl / fxOutTarget) : 0.0f;
@@ -1716,6 +1790,9 @@ bool fmSynthRenderBlock(int32_t *outL, int32_t *outR, int numFrames,
             capDryFxL[i] += (int32_t)((float)instL[i] * dryRatio);
             capDryFxR[i] += (int32_t)((float)instR[i] * dryRatio);
           }
+        } else if (hasCapVoice && hasOtherVoice) {
+          capUsedFxSend = true;
+          otherUsedFxSend = true;
         } else {
           otherUsedFxSend = true;
         }
@@ -1811,6 +1888,7 @@ bool fmSynthRenderBlock(int32_t *outL, int32_t *outR, int numFrames,
   if (!anyActive && instFxTailFrames <= 0 && instLimTailFrames <= 0) {
     instBusLimiter.reset();
     lastInstWantCap = false;
+    lastCapFxShare = 0.0f;
   }
 
   return true;
@@ -2149,14 +2227,8 @@ FLASHMEM static bool hasFmiExtension(const char *name) {
   return strcasecmp(name + len - 4, ".fmi") == 0;
 }
 
-static inline bool instDirEntryComesBefore(const InstBrowserEntry &a, const InstBrowserEntry &b) {
-  bool aParent = (a.isDir != 0) && (strcmp(a.name, "..") == 0);
-  bool bParent = (b.isDir != 0) && (strcmp(b.name, "..") == 0);
-  if (aParent != bParent) return aParent;
-  if ((a.isDir != 0) != (b.isDir != 0)) return a.isDir != 0;
-  int cmp = strcasecmp(a.name, b.name);
-  if (cmp != 0) return cmp < 0;
-  return strcmp(a.name, b.name) < 0;
+FLASHMEM static bool acceptFmiBrowserFile(const char *name, uint64_t fSize) {
+  return hasFmiExtension(name) && fSize >= sizeof(SingleInstDisk);
 }
 
 static inline bool instPresetEntryComesBefore(const InstBrowserEntry &a, const InstBrowserEntry &b) {
@@ -2167,49 +2239,10 @@ static inline bool instPresetEntryComesBefore(const InstBrowserEntry &a, const I
   return strcmp(a.name, b.name) < 0;
 }
 
-static inline bool instEntryComesBefore(const InstBrowserEntry &a, const InstBrowserEntry &b, bool presetMode) {
-  return presetMode ? instPresetEntryComesBefore(a, b) : instDirEntryComesBefore(a, b);
-}
-
-FLASHMEM static void insertInstSmallest(InstBrowserEntry *arr, int &count, int cap,
-                                        const InstBrowserEntry &item, bool presetMode) {
-  if (cap <= 0) return;
-  if (count >= cap && !instEntryComesBefore(item, arr[cap - 1], presetMode)) return;
-  int ins = (count < cap) ? count++ : (cap - 1);
-  while (ins > 0 && instEntryComesBefore(item, arr[ins - 1], presetMode)) {
-    arr[ins] = arr[ins - 1];
-    ins--;
-  }
-  arr[ins] = item;
-}
-
-FLASHMEM static void insertInstLargest(InstBrowserEntry *arr, int &count, int cap,
-                                       const InstBrowserEntry &item, bool presetMode) {
-  if (cap <= 0) return;
-  if (count >= cap && !instEntryComesBefore(arr[0], item, presetMode)) return;
-  if (count < cap) {
-    int ins = count++;
-    while (ins > 0 && instEntryComesBefore(item, arr[ins - 1], presetMode)) {
-      arr[ins] = arr[ins - 1];
-      ins--;
-    }
-    arr[ins] = item;
-  } else {
-    int ins = 0;
-    while (ins + 1 < cap && instEntryComesBefore(arr[ins + 1], item, presetMode)) {
-      arr[ins] = arr[ins + 1];
-      ins++;
-    }
-    arr[ins] = item;
-  }
-}
-
 FLASHMEM static void scanInstBrowserDirectoryWindow(const InstBrowserEntry *pivot, int pivotIdx, int wantStart,
                                                     const char *matchFile = nullptr, int *outMatchIdx = nullptr,
                                                     InstBrowserEntry *outMatchEntry = nullptr) {
   instBrowserPresetMode = false;
-  if (outMatchIdx) *outMatchIdx = -1;
-
   if (!SD.sdfs.exists(ROOT_DIR)) {
     SD.sdfs.mkdir(ROOT_DIR);
   }
@@ -2219,102 +2252,11 @@ FLASHMEM static void scanInstBrowserDirectoryWindow(const InstBrowserEntry *pivo
   if (!SD.sdfs.exists(instBrowserDir)) {
     snprintf(instBrowserDir, sizeof(instBrowserDir), "%s", INST_PRESETS_DIR);
   }
-
-  InstBrowserEntry pivotCopy{};
-  const bool usePivot = (pivot != nullptr);
-  int pOff = 0;
-  int leftCap = 0;
-  int rightCap = MAX_INST_BROWSER_ENTRIES;
-  int leftCount = 0;
-  int rightCount = 0;
-  int totalCount = 0;
-
-  if (usePivot) {
-    pivotCopy = *pivot;
-    pOff = constrain(pivotIdx - wantStart, 0, MAX_INST_BROWSER_ENTRIES - 1);
-    leftCap = pOff;
-    rightCap = (MAX_INST_BROWSER_ENTRIES - 1) - pOff;
-  }
-
-  InstBrowserEntry matchTarget{};
-  const bool hasMatchTarget = (matchFile != nullptr && matchFile[0] != '\0' &&
-                               strlen(matchFile) < sizeof(matchTarget.name));
-  int matchRank = 0;
-  bool matchFound = false;
-  if (hasMatchTarget) {
-    snprintf(matchTarget.name, sizeof(matchTarget.name), "%s", matchFile);
-    matchTarget.isDir = 0;
-  }
-
-  auto considerItem = [&](const InstBrowserEntry &item) {
-    totalCount++;
-    if (hasMatchTarget) {
-      if (!item.isDir && strcasecmp(item.name, matchTarget.name) == 0) {
-        matchFound = true;
-        if (outMatchEntry) *outMatchEntry = item;
-      } else if (instDirEntryComesBefore(item, matchTarget)) {
-        matchRank++;
-      }
-    }
-    if (!usePivot) {
-      insertInstSmallest(instBrowserEntries, rightCount, rightCap, item, false);
-    } else if (instDirEntryComesBefore(item, pivotCopy)) {
-      insertInstLargest(instBrowserEntries, leftCount, leftCap, item, false);
-    } else if (instDirEntryComesBefore(pivotCopy, item)) {
-      insertInstSmallest(&instBrowserEntries[pOff + 1], rightCount, rightCap, item, false);
-    }
-  };
-
-  // Add ".." parent folder entry whenever not at SD root "/"
-  if (strcmp(instBrowserDir, "/") != 0) {
-    InstBrowserEntry parentItem{};
-    snprintf(parentItem.name, sizeof(parentItem.name), "..");
-    parentItem.isDir = 1;
-    considerItem(parentItem);
-  }
-
-  FsFile dir = SD.sdfs.open(instBrowserDir, O_RDONLY);
-  if (dir.isOpen() && dir.isDir()) {
-    FsFile entry;
-    while (entry.openNext(&dir, O_RDONLY)) {
-      char nameBuf[64] = {};
-      entry.getName(nameBuf, sizeof(nameBuf));
-      bool isSubDir = entry.isDir();
-      uint64_t fSize = isSubDir ? 0 : entry.fileSize();
-      bool isHidden = entry.isHidden() || (nameBuf[0] == '.') ||
-                      (strcasecmp(nameBuf, "System Volume Information") == 0);
-      entry.close();
-
-      if (isHidden || nameBuf[0] == '\0') continue;
-      if (!isSubDir && (!hasFmiExtension(nameBuf) || fSize < sizeof(SingleInstDisk))) continue;
-      if (strlen(nameBuf) >= sizeof(instBrowserEntries[0].name)) continue;
-
-      InstBrowserEntry item{};
-      snprintf(item.name, sizeof(item.name), "%s", nameBuf);
-      item.isDir = isSubDir ? 1 : 0;
-      considerItem(item);
-      keepStreaming();
-    }
-  }
-  if (dir.isOpen()) dir.close();
-
-  instBrowserCount = totalCount;
-  if (!usePivot) {
-    instBrowserWinStart = 0;
-    instBrowserWinCount = rightCount;
-  } else {
-    instBrowserEntries[leftCount] = pivotCopy;
-    if (leftCount < pOff && rightCount > 0) {
-      memmove(&instBrowserEntries[leftCount + 1], &instBrowserEntries[pOff + 1],
-              (size_t)rightCount * sizeof(InstBrowserEntry));
-    }
-    instBrowserWinStart = max(0, pivotIdx - leftCount);
-    instBrowserWinCount = leftCount + 1 + rightCount;
-  }
-
-  if (matchFound && outMatchIdx) {
-    *outMatchIdx = matchRank;
-  }
+  pagedScanDirWindow<InstBrowserEntry>(
+      instBrowserDir, instBrowserEntries, MAX_INST_BROWSER_ENTRIES,
+      instBrowserCount, instBrowserWinStart, instBrowserWinCount,
+      acceptFmiBrowserFile, pivot, pivotIdx, wantStart,
+      matchFile, outMatchIdx, outMatchEntry);
 }
 
 FLASHMEM static void scanInstBrowserDirectory() {
@@ -2407,79 +2349,39 @@ FLASHMEM static void scanPresetsDirectoryWindow(const char *dirPath, bool create
 
     totalCount++;
     if (!usePivot) {
-      insertInstSmallest(instBrowserEntries, rightCount, rightCap, item, true);
+      pagedInsertSmallest(instBrowserEntries, rightCount, rightCap, item, instPresetEntryComesBefore);
     } else if (instPresetEntryComesBefore(item, pivotCopy)) {
-      insertInstLargest(instBrowserEntries, leftCount, leftCap, item, true);
+      pagedInsertLargest(instBrowserEntries, leftCount, leftCap, item, instPresetEntryComesBefore);
     } else if (instPresetEntryComesBefore(pivotCopy, item)) {
-      insertInstSmallest(&instBrowserEntries[pOff + 1], rightCount, rightCap, item, true);
+      pagedInsertSmallest(&instBrowserEntries[pOff + 1], rightCount, rightCap, item, instPresetEntryComesBefore);
     }
     keepStreaming();
   }
   dir.close();
 
-  instBrowserCount = totalCount;
-  if (!usePivot) {
-    instBrowserWinStart = 0;
-    instBrowserWinCount = rightCount;
-  } else {
-    instBrowserEntries[leftCount] = pivotCopy;
-    if (leftCount < pOff && rightCount > 0) {
-      memmove(&instBrowserEntries[leftCount + 1], &instBrowserEntries[pOff + 1],
-              (size_t)rightCount * sizeof(InstBrowserEntry));
+  pagedFinalizeWindow(instBrowserEntries, usePivot, pivotCopy, pivotIdx, pOff, leftCount, rightCount,
+                      totalCount, instBrowserCount, instBrowserWinStart, instBrowserWinCount);
+}
+
+FLASHMEM static void rescanInstBrowserWindow(const InstBrowserEntry *pivot, int pivotIdx, int wantStart) {
+  if (instBrowserPresetMode) {
+    bool useGlobal = sysPresetsModalOpen ? !sysPresetsSongMode : typePresetIsGlobal;
+    if (useGlobal) {
+      scanPresetsDirectoryWindow(INST_PRESETS_DIR, false, pivot, pivotIdx, wantStart);
+    } else {
+      char songDir[80];
+      getSongInstrumentsDir(songDir, sizeof(songDir));
+      scanPresetsDirectoryWindow(songDir, false, pivot, pivotIdx, wantStart);
     }
-    instBrowserWinStart = max(0, pivotIdx - leftCount);
-    instBrowserWinCount = leftCount + 1 + rightCount;
+  } else {
+    scanInstBrowserDirectoryWindow(pivot, pivotIdx, wantStart);
   }
 }
 
 FLASHMEM static void syncInstBrowserScroll() {
-  if (instBrowserCount <= 0) {
-    instBrowserCur = 0;
-    instBrowserScr = 0;
-    instBrowserWinStart = 0;
-    instBrowserWinCount = 0;
-    return;
-  }
-  instBrowserCur = constrain(instBrowserCur, 0, instBrowserCount - 1);
-  if (instBrowserCur < instBrowserScr) {
-    instBrowserScr = instBrowserCur;
-  } else if (instBrowserCur >= instBrowserScr + INST_BROWSER_VISIBLE_ROWS) {
-    instBrowserScr = instBrowserCur - INST_BROWSER_VISIBLE_ROWS + 1;
-  }
-  int maxScroll = max(0, instBrowserCount - INST_BROWSER_VISIBLE_ROWS);
-  instBrowserScr = constrain(instBrowserScr, 0, maxScroll);
-
-  int visEnd = min(instBrowserCount - 1, instBrowserScr + INST_BROWSER_VISIBLE_ROWS - 1);
-  if (instBrowserScr < instBrowserWinStart || visEnd >= instBrowserWinStart + instBrowserWinCount) {
-    int maxWinStart = max(0, instBrowserCount - MAX_INST_BROWSER_ENTRIES);
-    int wantStart = constrain(instBrowserScr - 12, 0, maxWinStart);
-    const InstBrowserEntry *pivotPtr = nullptr;
-    InstBrowserEntry pivot{};
-    int pivotIdx = 0;
-    if (wantStart > 0) {
-      int overlapLo = max(instBrowserWinStart, wantStart);
-      int overlapHi = min(instBrowserWinStart + instBrowserWinCount - 1, wantStart + MAX_INST_BROWSER_ENTRIES - 1);
-      if (instBrowserWinCount > 0 && overlapLo <= overlapHi) {
-        pivotIdx = (wantStart < instBrowserWinStart) ? overlapHi : overlapLo;
-        pivot = instBrowserEntries[pivotIdx - instBrowserWinStart];
-        pivotPtr = &pivot;
-      } else {
-        wantStart = 0;
-      }
-    }
-    if (instBrowserPresetMode) {
-      bool useGlobal = sysPresetsModalOpen ? !sysPresetsSongMode : typePresetIsGlobal;
-      if (useGlobal) {
-        scanPresetsDirectoryWindow(INST_PRESETS_DIR, false, pivotPtr, pivotIdx, wantStart);
-      } else {
-        char songDir[80];
-        getSongInstrumentsDir(songDir, sizeof(songDir));
-        scanPresetsDirectoryWindow(songDir, false, pivotPtr, pivotIdx, wantStart);
-      }
-    } else {
-      scanInstBrowserDirectoryWindow(pivotPtr, pivotIdx, wantStart);
-    }
-  }
+  pagedSyncWindowScroll(instBrowserCount, INST_BROWSER_VISIBLE_ROWS, MAX_INST_BROWSER_ENTRIES,
+                        instBrowserCur, instBrowserScr, instBrowserWinStart, instBrowserWinCount,
+                        instBrowserEntries, rescanInstBrowserWindow);
 }
 
 FLASHMEM bool isInstBrowserOpen() {
@@ -2601,22 +2503,7 @@ FLASHMEM bool instBrowserConfirm() {
   entName[sizeof(entName) - 1] = '\0';
 
   if (isDir) {
-    if (strcmp(entName, "..") == 0) {
-      char *lastSlash = strrchr(instBrowserDir, '/');
-      if (!lastSlash || lastSlash == instBrowserDir) {
-        snprintf(instBrowserDir, sizeof(instBrowserDir), "/");
-      } else {
-        *lastSlash = '\0';
-      }
-    } else {
-      char nextDir[INST_BROWSER_DIR_MAX];
-      if (strcmp(instBrowserDir, "/") == 0) {
-        snprintf(nextDir, sizeof(nextDir), "/%.42s", entName);
-      } else {
-        snprintf(nextDir, sizeof(nextDir), "%.51s/%.42s", instBrowserDir, entName);
-      }
-      snprintf(instBrowserDir, sizeof(instBrowserDir), "%s", nextDir);
-    }
+    if (!pagedStepBrowserDir(instBrowserDir, sizeof(instBrowserDir), entName)) return false;
     scanInstBrowserDirectory();
     if (instBrowserCount > 1 && instBrowserWinCount > 0 && strcmp(instBrowserEntries[0].name, "..") == 0) {
       instBrowserCur = 1;

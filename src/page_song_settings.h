@@ -6,5 +6,6 @@ const PageOps &pageSongSettingsOps();
 
 bool isSongTunerOpen();
 void closeSongTuner();
+void resetSongTunerUiState();
 bool isSongInputFxOpen();
 void closeSongInputFx();

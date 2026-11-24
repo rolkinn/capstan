@@ -1,8 +1,10 @@
 // midi_seq.cpp — 8-Track Linear MIDI Recorder & Sequencer
 #include "midi_seq.h"
+#include "midi_in.h"
 #include "midi_map.h"
 #include "instruments.h"
 #include "storage.h"
+#include "paged_dir_scanner.h"
 #include "tuner.h"
 #include "ui.h"
 #include <Arduino.h>
@@ -85,6 +87,7 @@ static inline void clearAllTrackActiveNotes() {
 }
 
 // Track notes currently opened in eventPool[t] by the active live recording pass
+static constexpr uint8_t REC_OPEN_TAG = 0xA5u;
 static uint32_t recNoteOpenMask[NUM_MIDI_TRACKS][4] = {};
 
 static inline bool isRecNoteOpen(int t, uint8_t note) {
@@ -105,8 +108,25 @@ static inline bool hasAnyRecNoteOpen(int t) {
           recNoteOpenMask[t][2] | recNoteOpenMask[t][3]) != 0;
 }
 
-static inline void clearRecNoteOpenMask(int t) {
+static inline uint32_t countRecOpenNotes(int t) {
+  if (t < 0 || t >= NUM_MIDI_TRACKS) return 0;
+  return (uint32_t)(__builtin_popcount(recNoteOpenMask[t][0]) +
+                    __builtin_popcount(recNoteOpenMask[t][1]) +
+                    __builtin_popcount(recNoteOpenMask[t][2]) +
+                    __builtin_popcount(recNoteOpenMask[t][3]));
+}
+
+FLASHMEM static void clearRecNoteOpenMask(int t) {
   if (t < 0 || t >= NUM_MIDI_TRACKS) return;
+  if (hasAnyRecNoteOpen(t)) {
+    MidiEvent *ev = eventPool[t];
+    const uint32_t n = midiTracks[t].eventCount;
+    for (uint32_t i = 0; i < n; i++) {
+      if (ev[i].reserved == REC_OPEN_TAG) {
+        ev[i].reserved = 0;
+      }
+    }
+  }
   memset(recNoteOpenMask[t], 0, sizeof(recNoteOpenMask[t]));
 }
 
@@ -156,7 +176,7 @@ int midiSeqAudioRecTargetTrack() {
 
 // Send a channel voice message to either External MIDI (1..16) or Internal Synth (17..24 = I01..I08)
 // Returns false only when allowSdIo == false (ISR context) and an uncached Sampler key requires SD I/O.
-FLASHMEM static bool sendMidiOut(uint8_t typeHi, uint8_t outDest, uint8_t d1, uint8_t d2,
+static bool sendMidiOut(uint8_t typeHi, uint8_t outDest, uint8_t d1, uint8_t d2,
                         uint8_t portMask = MIDI_PORT_BOTH, uint8_t sampleOffset = 0,
                         bool allowSdIo = true, uint8_t midiTrack = 0xFF) {
   if (outDest == 0) return true;
@@ -196,11 +216,16 @@ FLASHMEM void midiSeqAllNotesOff() {
   clearAllTrackActiveNotes();
   fmSynthAllNotesOff();
   for (uint8_t ch = 0; ch < 16; ch++) {
+    uint8_t rowSnap[16];
+    uint32_t irq = saveIrq();
+    memcpy(rowSnap, activeNotes[ch], sizeof(rowSnap));
+    memset(activeNotes[ch], 0, sizeof(activeNotes[ch]));
+    restoreIrq(irq);
+
     bool anyOn = false;
     for (uint8_t n = 0; n < 128; n++) {
-      if (isNoteActive(ch, n)) {
+      if ((rowSnap[n >> 3] & (1 << (n & 7))) != 0) {
         midiSendMsg(0x80 | ch, n, 0, 3);
-        markNoteActive(ch, n, false);
         anyOn = true;
       }
     }
@@ -219,11 +244,16 @@ FLASHMEM static void midiSeqSilenceDest(uint8_t outDest) {
   }
   if (outDest >= 1 && outDest <= 16) {
     uint8_t ch = outDest - 1;
+    uint8_t rowSnap[16];
+    uint32_t irq = saveIrq();
+    memcpy(rowSnap, activeNotes[ch], sizeof(rowSnap));
+    memset(activeNotes[ch], 0, sizeof(activeNotes[ch]));
+    restoreIrq(irq);
+
     bool anyOn = false;
     for (uint8_t n = 0; n < 128; n++) {
-      if (isNoteActive(ch, n)) {
+      if ((rowSnap[n >> 3] & (1 << (n & 7))) != 0) {
         midiSendMsg(0x80 | ch, n, 0, 3);
-        markNoteActive(ch, n, false);
         anyOn = true;
       }
     }
@@ -264,7 +294,10 @@ FLASHMEM void midiSeqStepInChannel(int t, int delta) {
   MidiTrack &mt = midiTracks[t];
   int idx = (mt.inChannel == MIDI_IN_OFF) ? 0 : ((int)mt.inChannel + 1);
   idx = constrain(idx + delta, 0, 17);
-  mt.inChannel = (idx == 0) ? MIDI_IN_OFF : (uint8_t)(idx - 1);
+  uint8_t nextCh = (idx == 0) ? MIDI_IN_OFF : (uint8_t)(idx - 1);
+  uint32_t irq = saveIrq();
+  mt.inChannel = nextCh;
+  restoreIrq(irq);
 }
 
 FLASHMEM void midiSeqCycleInChannel(int t) {
@@ -272,7 +305,10 @@ FLASHMEM void midiSeqCycleInChannel(int t) {
   MidiTrack &mt = midiTracks[t];
   int idx = (mt.inChannel == MIDI_IN_OFF) ? 0 : ((int)mt.inChannel + 1);
   idx = (idx + 1) % 18;
-  mt.inChannel = (idx == 0) ? MIDI_IN_OFF : (uint8_t)(idx - 1);
+  uint8_t nextCh = (idx == 0) ? MIDI_IN_OFF : (uint8_t)(idx - 1);
+  uint32_t irq = saveIrq();
+  mt.inChannel = nextCh;
+  restoreIrq(irq);
 }
 
 // UI order for MIDI OUT: 0 = OFF, 1..16 = C01..C16, 17..24 = I01..I08
@@ -280,9 +316,12 @@ FLASHMEM void midiSeqSetOutChannel(int t, uint8_t dest) {
   if (t < 0 || t >= NUM_MIDI_TRACKS) return;
   MidiTrack &mt = midiTracks[t];
   uint8_t prevOut = mt.outChannel;
-  mt.outChannel = constrain(dest, (uint8_t)0, (uint8_t)MAX_MIDI_OUT_CHAN);
-  if (prevOut != mt.outChannel) {
-    if (mt.outChannel == 0) {
+  uint8_t nextOut = constrain(dest, (uint8_t)0, (uint8_t)MAX_MIDI_OUT_CHAN);
+  uint32_t irq = saveIrq();
+  mt.outChannel = nextOut;
+  restoreIrq(irq);
+  if (prevOut != nextOut) {
+    if (nextOut == 0) {
       clearTrackActiveNotes(t);
     }
     midiSeqSilenceDestIfUnused(prevOut);
@@ -403,7 +442,8 @@ FLASHMEM void midiSeqClearAll() {
   midiSeqAllNotesOff();
 }
 
-FLASHMEM void midiSeqInputEvent(uint8_t status, uint8_t d1, uint8_t d2, uint8_t fromSource) {
+void midiSeqInputEvent(uint8_t status, uint8_t d1, uint8_t d2, uint8_t fromSource) {
+  if (midiInIsSuspended()) return;
   uint8_t type = status & 0xF0;
   if (type >= 0x80 && type <= 0xE0) {
     midiActivityPending = true;
@@ -421,7 +461,14 @@ FLASHMEM void midiSeqInputEvent(uint8_t status, uint8_t d1, uint8_t d2, uint8_t 
   uint32_t irq = saveIrq();
   TransportMode tm = transport.mode;
   uint32_t tf = transport.tapeFrame;
-  uint8_t sampleOffset = (uint8_t)(transport.now & (AUDIO_BLOCK_SAMPLES - 1));
+  uint32_t blkUs = transport.lastBlockMicros;
+  uint32_t sub = 0;
+  if (blkUs != 0u) {
+    uint32_t elapsedUs = micros() - blkUs;
+    sub = (elapsedUs * 441u) / 10000u;
+    if (sub >= AUDIO_BLOCK_SAMPLES) sub = AUDIO_BLOCK_SAMPLES - 1u;
+  }
+  uint8_t sampleOffset = (uint8_t)sub;
 
   // Check if transport is waiting for MIDI Input Threshold trigger
   bool triggeredStart = false;
@@ -436,14 +483,38 @@ FLASHMEM void midiSeqInputEvent(uint8_t status, uint8_t d1, uint8_t d2, uint8_t 
         const MidiTrack &mt = midiTracks[t];
         if (mt.armMode != ArmMode::Off && mt.trigMode == TrigMode::Threshold) {
           if (mt.inChannel != MIDI_IN_OFF && (mt.inChannel == 0 || mt.inChannel == inCh1To16)) {
+            uint32_t safeSpb = max(1u, (uint32_t)transport.spb);
             transport.mode = TransportMode::Running;
             transport.running = true;
-            transport.sampleInBeat = 0;
+            transport.beat = (int32_t)(tf / safeSpb);
+            transport.sampleInBeat = tf % safeSpb;
+            transport.clockGridDirty = true;
             tm = TransportMode::Running;
             triggeredStart = true;
             break;
           }
         }
+      }
+    }
+  }
+  if (tm == TransportMode::Running && !triggeredStart) {
+    int8_t sq = transport.speedQuarter;
+    bool rev = (sq < 0);
+    uint32_t absQ = (uint32_t)(rev ? -sq : sq);
+    uint32_t stepSub = (sub * absQ) >> 2;
+    if (stepSub > 0u) {
+      bool loopOn = transport.loopEnabled && (transport.punchOutFrame > transport.punchInFrame);
+      if (!rev) {
+        uint32_t maxF = (loopOn && tf < transport.punchOutFrame)
+                            ? (transport.punchOutFrame - 1u)
+                            : (uint32_t)MAX_REC_FRAMES;
+        uint32_t nextTf = tf + stepSub;
+        tf = (nextTf <= maxF) ? nextTf : maxF;
+      } else {
+        uint32_t minF = (loopOn && tf >= transport.punchInFrame)
+                            ? transport.punchInFrame
+                            : 0u;
+        tf = (tf > minF + stepSub) ? (tf - stepSub) : minF;
       }
     }
   }
@@ -527,30 +598,126 @@ FLASHMEM void midiSeqInputEvent(uint8_t status, uint8_t d1, uint8_t d2, uint8_t 
   restoreIrq(irq);
 }
 
-// Erase events on track t in the tick interval [fromTick, toTick]
-FLASHMEM static void eraseEventsInRange(int t, uint32_t fromTick, uint32_t toTick) {
-  if (fromTick > toTick) return;
+static inline bool isNoteOnEv(const MidiEvent &e) {
+  return (e.status & 0xF0) == 0x90 && e.data2 > 0;
+}
+
+static inline bool isNoteOffEv(const MidiEvent &e) {
+  uint8_t hi = e.status & 0xF0;
+  return hi == 0x80 || (hi == 0x90 && e.data2 == 0);
+}
+
+// Erase events on track t in the tick interval [fromTick, toTick], preserving live open tags
+// and truncating/cleaning any notes straddling the erased interval. Returns true if modified.
+FLASHMEM static bool eraseEventsInRange(int t, uint32_t fromTick, uint32_t toTick) {
+  if (fromTick > toTick) return false;
   SeqEditGuard guard;
   MidiTrack &mt = midiTracks[t];
   MidiEvent *ev = eventPool[t];
   uint32_t n = mt.eventCount;
-  if (n == 0) return;
+  if (n == 0) return false;
 
   uint32_t writeIdx = 0;
+  uint32_t openBefore[4] = {};
+  uint32_t openInside[4] = {};
+  bool needSort = false;
+  bool modified = false;
+
+  auto silenceIfPlaying = [&](uint8_t note) __attribute__((always_inline)) {
+    uint32_t bit = 1u << (note & 31);
+    if (!isRecNoteOpen(t, note) && (mt.activeNoteMask[note >> 5] & bit)) {
+      sendMidiOut(0x80, mt.outChannel, note, 0, MIDI_PORT_BOTH, 0, true, (uint8_t)t);
+      setTrackNoteActive(t, note, false);
+    }
+  };
+
   for (uint32_t i = 0; i < n; i++) {
-    if (ev[i].tick < fromTick || ev[i].tick > toTick) {
-      if (writeIdx != i) ev[writeIdx] = ev[i];
+    MidiEvent e = ev[i];
+    if (e.reserved == REC_OPEN_TAG) {
+      if (writeIdx != i) ev[writeIdx] = e;
       writeIdx++;
-    } else if ((ev[i].status & 0xF0) == 0x80) {
-      uint8_t note = ev[i].data1 & 0x7F;
-      if (!isRecNoteOpen(t, note) && (mt.activeNoteMask[note >> 5] & (1u << (note & 31)))) {
-        sendMidiOut(0x80, mt.outChannel, note, 0, MIDI_PORT_BOTH, 0, true, (uint8_t)t);
-        setTrackNoteActive(t, note, false);
+      continue;
+    }
+
+    uint8_t note = e.data1 & 0x7F;
+    uint32_t bit = 1u << (note & 31);
+    bool isOn = isNoteOnEv(e);
+    bool isOff = isNoteOffEv(e);
+
+    if (e.tick < fromTick) {
+      if (isOn) openBefore[note >> 5] |= bit;
+      else if (isOff) openBefore[note >> 5] &= ~bit;
+      if (writeIdx != i) ev[writeIdx] = e;
+      writeIdx++;
+    } else if (e.tick <= toTick) {
+      modified = true;
+      if (isOn) {
+        if (openBefore[note >> 5] & bit) {
+          openBefore[note >> 5] &= ~bit;
+          silenceIfPlaying(note);
+          MidiEvent offEv = {fromTick, 0x80, note, 0, 0};
+          ev[writeIdx++] = offEv;
+          needSort = true;
+        }
+        openInside[note >> 5] |= bit;
+      } else if (isOff) {
+        silenceIfPlaying(note);
+        if (openBefore[note >> 5] & bit) {
+          openBefore[note >> 5] &= ~bit;
+          MidiEvent offEv = {fromTick, 0x80, note, 0, 0};
+          ev[writeIdx++] = offEv;
+          needSort = true;
+        } else {
+          openInside[note >> 5] &= ~bit;
+        }
       }
+    } else {
+      if (isOff) {
+        if (openBefore[note >> 5] & bit) {
+          openBefore[note >> 5] &= ~bit;
+          silenceIfPlaying(note);
+          e.tick = fromTick;
+          e.status = 0x80;
+          e.data2 = 0;
+          e.reserved = 0;
+          ev[writeIdx++] = e;
+          needSort = true;
+          modified = true;
+          continue;
+        }
+        if (openInside[note >> 5] & bit) {
+          openInside[note >> 5] &= ~bit;
+          modified = true;
+          continue; // drop orphaned Note-Off belonging to an erased Note-On
+        }
+      } else if (isOn) {
+        if (openBefore[note >> 5] & bit) {
+          openBefore[note >> 5] &= ~bit;
+          silenceIfPlaying(note);
+        }
+        openInside[note >> 5] &= ~bit;
+      }
+      if (writeIdx != i) ev[writeIdx] = e;
+      writeIdx++;
     }
   }
-  if (writeIdx != n) {
-    mt.eventCount = writeIdx;
+
+  mt.eventCount = writeIdx;
+  if (needSort && writeIdx > 1) {
+    for (uint32_t i = 1; i < writeIdx; i++) {
+      MidiEvent key = ev[i];
+      bool keyIsOff = isNoteOffEv(key);
+      uint32_t j = i;
+      while (j > 0 && (ev[j - 1].tick > key.tick ||
+                       (ev[j - 1].tick == key.tick && keyIsOff && !isNoteOffEv(ev[j - 1])))) {
+        ev[j] = ev[j - 1];
+        j--;
+      }
+      ev[j] = key;
+    }
+  }
+
+  if (modified || writeIdx != n) {
     uint32_t p = 0;
     if (transport.speedQuarter < 0) {
       while (p < mt.eventCount && ev[p].tick < fromTick) p++;
@@ -560,18 +727,16 @@ FLASHMEM static void eraseEventsInRange(int t, uint32_t fromTick, uint32_t toTic
     }
     mt.playIndex = p;
     mt.overviewVersion++;
+    return true;
   }
-}
-
-static inline bool isNoteOffEv(const MidiEvent &e) {
-  return (e.status & 0xF0) == 0x80;
+  return false;
 }
 
 // Insert an event in sorted tick order into track t (at identical ticks, Note-Offs precede Note-Ons)
-FLASHMEM static void insertEventSorted(int t, const MidiEvent &e, bool fromRecording = false) {
+FLASHMEM static bool insertEventSorted(int t, const MidiEvent &e, bool fromRecording = false) {
   SeqEditGuard guard;
   MidiTrack &mt = midiTracks[t];
-  if (mt.eventCount >= MAX_MIDI_EVENTS_PER_TRACK) return;
+  if (mt.eventCount >= MAX_MIDI_EVENTS_PER_TRACK) return false;
   MidiEvent *ev = eventPool[t];
   const bool eIsOff = isNoteOffEv(e);
 
@@ -603,6 +768,44 @@ FLASHMEM static void insertEventSorted(int t, const MidiEvent &e, bool fromRecor
     if (fromRecording && mt.playIndex <= pos) mt.playIndex = pos + 1;
   }
   mt.overviewVersion++;
+  return true;
+}
+
+FLASHMEM static bool evictLatestContinuousEvent(int t) {
+  if (t < 0 || t >= NUM_MIDI_TRACKS) return false;
+  SeqEditGuard guard;
+  MidiTrack &mt = midiTracks[t];
+  MidiEvent *ev = eventPool[t];
+  for (uint32_t k = mt.eventCount; k > 0; k--) {
+    uint32_t idx = k - 1u;
+    uint8_t hi = ev[idx].status & 0xF0;
+    if ((hi == 0xB0 || hi == 0xE0) && ev[idx].reserved != REC_OPEN_TAG) {
+      for (uint32_t j = idx + 1u; j < mt.eventCount; j++) {
+        ev[j - 1u] = ev[j];
+      }
+      mt.eventCount--;
+      if (mt.playIndex > idx) {
+        mt.playIndex--;
+      }
+      mt.overviewVersion++;
+      return true;
+    }
+  }
+  return false;
+}
+
+FLASHMEM static bool ensureNotePairCapacity(int t) {
+  MidiTrack &mt = midiTracks[t];
+  uint32_t need = countRecOpenNotes(t) + 2u;
+  while (mt.eventCount + need > MAX_MIDI_EVENTS_PER_TRACK) {
+    if (!evictLatestContinuousEvent(t)) return false;
+  }
+  return true;
+}
+
+FLASHMEM static bool ensureCloseNoteCapacity(int t) {
+  if (midiTracks[t].eventCount < MAX_MIDI_EVENTS_PER_TRACK) return true;
+  return evictLatestContinuousEvent(t);
 }
 
 // In Record (Replace) mode, erase existing events up to targetTick and advance recEraseCursorTick past targetTick
@@ -611,18 +814,14 @@ FLASHMEM static void advanceRecordReplaceErase(int t, uint32_t targetTick, bool 
   if (!mt.recWindowActive || mt.armMode != ArmMode::Record) return;
   if (rev) {
     if (targetTick <= mt.recEraseCursorTick) {
-      uint32_t beforeCount = mt.eventCount;
-      eraseEventsInRange(t, targetTick, mt.recEraseCursorTick);
-      if (mt.eventCount != beforeCount) {
+      if (eraseEventsInRange(t, targetTick, mt.recEraseCursorTick)) {
         markSongDirty();
       }
       mt.recEraseCursorTick = (targetTick > 0) ? (targetTick - 1u) : 0u;
     }
   } else {
     if (targetTick >= mt.recEraseCursorTick) {
-      uint32_t beforeCount = mt.eventCount;
-      eraseEventsInRange(t, mt.recEraseCursorTick, targetTick);
-      if (mt.eventCount != beforeCount) {
+      if (eraseEventsInRange(t, mt.recEraseCursorTick, targetTick)) {
         markSongDirty();
       }
       mt.recEraseCursorTick = targetTick + 1u;
@@ -630,59 +829,94 @@ FLASHMEM static void advanceRecordReplaceErase(int t, uint32_t targetTick, bool 
   }
 }
 
-// Synthesize closing Note-Off (or Note-On in reverse) events for any notes still held when recording ends
-FLASHMEM static void closeOpenRecordedNotes(int t, uint32_t endTick, bool rev, float curBpm) {
-  if (t < 0 || t >= NUM_MIDI_TRACKS || !hasAnyRecNoteOpen(t)) return;
+// Synthesize closing Note-Off (or Note-On in reverse) for a single open live-recorded pitch
+FLASHMEM static bool closeSingleOpenRecordedNote(int t, uint8_t n, uint32_t endTick, bool rev, float curBpm) {
+  if (t < 0 || t >= NUM_MIDI_TRACKS || !isRecNoteOpen(t, n)) return false;
+  setRecNoteOpen(t, n, false);
   MidiTrack &mt = midiTracks[t];
   MidiEvent *ev = eventPool[t];
   const uint32_t maxAllowedTick = framesToMidiTicks(MAX_REC_FRAMES, curBpm);
 
-  for (uint8_t n = 0; n < 128; n++) {
-    if (!isRecNoteOpen(t, n)) continue;
-    setRecNoteOpen(t, n, false);
-
-    if (rev) {
-      uint32_t offTick = endTick;
-      uint8_t vel = 100;
-      int32_t foundIdx = -1;
-      for (uint32_t k = 0; k < mt.eventCount; k++) {
-        if (ev[k].data1 == n && (ev[k].status & 0xF0) == 0x80) {
-          offTick = ev[k].tick;
-          if (ev[k].data2 > 0) vel = ev[k].data2;
-          foundIdx = (int32_t)k;
-          break;
-        }
+  if (rev) {
+    int32_t foundIdx = -1;
+    for (uint32_t k = mt.eventCount; k > 0; k--) {
+      if (ev[k - 1u].data1 == n && (ev[k - 1u].status & 0xF0) == 0x80 &&
+          ev[k - 1u].reserved == REC_OPEN_TAG) {
+        foundIdx = (int32_t)(k - 1u);
+        break;
       }
-      if (foundIdx < 0) continue;
-      uint32_t onTick = endTick;
-      if (offTick == 0) {
-        ev[foundIdx].tick = 1u;
-        onTick = 0u;
-      } else if (onTick >= offTick) {
-        onTick = offTick - 1u;
+    }
+    if (foundIdx < 0) return false;
+    uint32_t offTick = ev[foundIdx].tick;
+    uint8_t vel = (ev[foundIdx].data2 > 0) ? ev[foundIdx].data2 : 100u;
+    uint32_t onTick = endTick;
+    if (offTick == 0u) {
+      ev[foundIdx].tick = 1u;
+      onTick = 0u;
+    } else if (onTick >= offTick) {
+      onTick = offTick - 1u;
+    }
+    advanceRecordReplaceErase(t, onTick, true);
+    for (uint32_t k = mt.eventCount; k > 0; k--) {
+      if (ev[k - 1u].data1 == n && (ev[k - 1u].status & 0xF0) == 0x80 &&
+          ev[k - 1u].reserved == REC_OPEN_TAG) {
+        ev[k - 1u].reserved = 0;
+        break;
       }
-      advanceRecordReplaceErase(t, onTick, true);
-      MidiEvent onEv = {onTick, 0x90, n, vel, 0};
-      insertEventSorted(t, onEv, true);
+    }
+    if (!ensureCloseNoteCapacity(t)) return false;
+    MidiEvent onEv = {onTick, 0x90, n, vel, 0};
+    if (insertEventSorted(t, onEv, true)) {
       markSongDirty();
-    } else {
-      uint32_t onTick = endTick;
-      int32_t foundIdx = -1;
+      return true;
+    }
+    return false;
+  } else {
+    int32_t foundIdx = -1;
+    for (uint32_t k = mt.eventCount; k > 0; k--) {
+      const MidiEvent &prev = ev[k - 1u];
+      if (prev.data1 == n && (prev.status & 0xF0) == 0x90 && prev.reserved == REC_OPEN_TAG) {
+        foundIdx = (int32_t)(k - 1u);
+        break;
+      }
+    }
+    if (foundIdx < 0) {
       for (uint32_t k = mt.eventCount; k > 0; k--) {
-        const MidiEvent &prev = ev[k - 1];
+        const MidiEvent &prev = ev[k - 1u];
         if (prev.data1 == n && (prev.status & 0xF0) == 0x90) {
-          onTick = prev.tick;
-          foundIdx = (int32_t)(k - 1);
+          foundIdx = (int32_t)(k - 1u);
           break;
         }
       }
-      if (foundIdx < 0) continue;
-      uint32_t offTick = max(endTick, onTick + 1u);
-      if (offTick > maxAllowedTick) offTick = maxAllowedTick;
-      advanceRecordReplaceErase(t, offTick, false);
-      MidiEvent offEv = {offTick, 0x80, n, 0, 0};
-      insertEventSorted(t, offEv, true);
+    }
+    if (foundIdx < 0) return false;
+    uint32_t onTick = ev[foundIdx].tick;
+    uint32_t offTick = max(endTick, onTick + 1u);
+    if (offTick > maxAllowedTick) offTick = maxAllowedTick;
+    advanceRecordReplaceErase(t, offTick, false);
+    for (uint32_t k = mt.eventCount; k > 0; k--) {
+      if (ev[k - 1u].data1 == n && (ev[k - 1u].status & 0xF0) == 0x90 &&
+          ev[k - 1u].reserved == REC_OPEN_TAG) {
+        ev[k - 1u].reserved = 0;
+        break;
+      }
+    }
+    if (!ensureCloseNoteCapacity(t)) return false;
+    MidiEvent offEv = {offTick, 0x80, n, 0, 0};
+    if (insertEventSorted(t, offEv, true)) {
       markSongDirty();
+      return true;
+    }
+    return false;
+  }
+}
+
+// Synthesize closing Note-Off (or Note-On in reverse) events for any notes still held when recording ends
+FLASHMEM static void closeOpenRecordedNotes(int t, uint32_t endTick, bool rev, float curBpm) {
+  if (t < 0 || t >= NUM_MIDI_TRACKS || !hasAnyRecNoteOpen(t)) return;
+  for (uint8_t n = 0; n < 128; n++) {
+    if (isRecNoteOpen(t, n)) {
+      closeSingleOpenRecordedNote(t, n, endTick, rev, curBpm);
     }
   }
 }
@@ -711,7 +945,7 @@ FLASHMEM static void syncPlayIndexToTick(int t, uint32_t tick) {
 static uint32_t lastSeenLoopWrapCount = 0;
 static bool wasRunning = false;
 
-FLASHMEM static void drainMidiInputRing(float curBpm, int selectedMidiTrack, bool midiThruEnabled, bool allowMappedCc);
+FLASHMEM static void drainMidiInputRing(float curBpm, int selectedMidiTrack, bool midiThruEnabled);
 
 FLASHMEM void midiSeqOnTransportStart(uint32_t tapeFrame, float bpm) {
   lastSeenLoopWrapCount = transport.loopWrapCount;
@@ -726,7 +960,7 @@ FLASHMEM void midiSeqOnTransportStart(uint32_t tapeFrame, float bpm) {
 
 FLASHMEM void midiSeqOnTransportStop() {
   // Drain any MIDI input messages that arrived before transport stopped
-  drainMidiInputRing(bpm, midiSeqFocusedTrack(), songSettings().midiThru, true);
+  drainMidiInputRing(bpm, midiSeqFocusedTrack(), songSettings().midiThru);
 
   const bool rev = (transport.speedQuarter < 0);
   const uint32_t stopTick = framesToMidiTicks(transport.tapeFrame, bpm);
@@ -765,17 +999,9 @@ FLASHMEM void midiSeqOnSeek(uint32_t tapeFrame, float bpm) {
   midiSeqAllNotesOff();
 }
 
-static inline uint8_t computePlaybackSampleOffset(uint32_t evTick, uint32_t blockStartFrame, float curBpm, bool rev) {
-  if (rev) return 0;
-  uint32_t evFrame = midiTicksToFrames(evTick, curBpm);
-  if (evFrame <= blockStartFrame) return 0;
-  uint32_t diff = evFrame - blockStartFrame;
-  return (diff < AUDIO_BLOCK_SAMPLES) ? (uint8_t)diff : (uint8_t)(AUDIO_BLOCK_SAMPLES - 1);
-}
-
-// Dispatch due playback events across all unmuted MIDI tracks up to curTick.
+// Dispatch due playback events across all unmuted MIDI tracks up to curTick (with forward 128-sample lookahead).
 // Safe to call from both 1 kHz usbTimer ISR (fromIsr == true) and loop() / keepStreaming() (fromIsr == false).
-FLASHMEM static void midiSeqDispatchPlayback(float curBpm, bool fromIsr) {
+static void midiSeqDispatchPlayback(float curBpm, bool fromIsr) {
   if (fromIsr && seqEditDepth != 0) return;
 
   uint32_t irq = saveIrq();
@@ -785,6 +1011,9 @@ FLASHMEM static void midiSeqDispatchPlayback(float curBpm, bool fromIsr) {
   uint32_t tf = transport.tapeFrame;
   TransportMode tm = transport.mode;
   int8_t speedQ = transport.speedQuarter;
+  uint8_t subF = transport.subFrame;
+  bool loopOn = transport.loopEnabled && (transport.punchOutFrame > transport.punchInFrame);
+  uint32_t punchOutF = transport.punchOutFrame;
   uint32_t wrapNow = transport.loopWrapCount;
   restoreIrq(irq);
 
@@ -799,7 +1028,17 @@ FLASHMEM static void midiSeqDispatchPlayback(float curBpm, bool fromIsr) {
 
   const bool rev = (speedQ < 0);
   const uint32_t curTick = framesToMidiTicks(tf, curBpm);
-  const uint32_t blockStartFrame = tf & ~(uint32_t)(AUDIO_BLOCK_SAMPLES - 1);
+  uint32_t lookaheadTick = curTick;
+  if (!rev && speedQ > 0) {
+    uint32_t spanFrames = (((uint32_t)AUDIO_BLOCK_SAMPLES * (uint32_t)speedQ + (uint32_t)subF) >> 2);
+    uint32_t lookaheadEndFrame = (spanFrames > 0u)
+                                     ? min((uint32_t)MAX_REC_FRAMES, tf + spanFrames - 1u)
+                                     : tf;
+    if (loopOn && tf < punchOutF && lookaheadEndFrame >= punchOutF) {
+      lookaheadEndFrame = (punchOutF > 0u) ? (punchOutF - 1u) : 0u;
+    }
+    lookaheadTick = framesToMidiTicks(lookaheadEndFrame, curBpm);
+  }
   const bool anyMidiSolo = anyTrackSolo();
   const uint32_t nowMs = millis();
   const bool allowSdIo = !fromIsr;
@@ -862,7 +1101,8 @@ FLASHMEM static void midiSeqDispatchPlayback(float curBpm, bool fromIsr) {
         }
       }
     } else {
-      while (mt.playIndex < mt.eventCount && ev[mt.playIndex].tick <= curTick) {
+      const uint32_t limitTick = (mt.recWindowActive && mt.armMode == ArmMode::Record) ? curTick : lookaheadTick;
+      while (mt.playIndex < mt.eventCount && ev[mt.playIndex].tick <= limitTick) {
         const MidiEvent &e = ev[mt.playIndex];
         if (audible) {
           uint8_t hi = e.status & 0xF0;
@@ -870,7 +1110,14 @@ FLASHMEM static void midiSeqDispatchPlayback(float curBpm, bool fromIsr) {
             mt.playIndex++;
             continue;
           }
-          uint8_t sampleOff = computePlaybackSampleOffset(e.tick, blockStartFrame, curBpm, false);
+          uint8_t sampleOff = 0;
+          if (limitTick != curTick) {
+            uint32_t evFrame = midiTicksToFrames(e.tick, curBpm);
+            if (evFrame > tf) {
+              uint32_t off = ((evFrame - tf) * 4u) / (uint32_t)speedQ;
+              sampleOff = (off < AUDIO_BLOCK_SAMPLES) ? (uint8_t)off : (uint8_t)(AUDIO_BLOCK_SAMPLES - 1u);
+            }
+          }
           if (!sendMidiOut(e.status, mt.outChannel, e.data1, e.data2, MIDI_PORT_BOTH, sampleOff, allowSdIo, (uint8_t)t)) {
             // Uncached Sampler note in ISR: leave playIndex intact for keepStreaming() / loop()
             break;
@@ -898,7 +1145,7 @@ FLASHMEM static void midiSeqDispatchPlayback(float curBpm, bool fromIsr) {
   }
 }
 
-FLASHMEM static void drainMidiInputRing(float curBpm, int selectedMidiTrack, bool midiThruEnabled, bool allowMappedCc) {
+FLASHMEM static void drainMidiInputRing(float curBpm, int selectedMidiTrack, bool midiThruEnabled) {
   if (midiActivityPending || inTail != inHead) {
     midiActivityPending = false;
     noteUserActivity();
@@ -926,14 +1173,10 @@ FLASHMEM static void drainMidiInputRing(float curBpm, int selectedMidiTrack, boo
     m.tMode = slot.tMode;
     uint8_t typeHi = m.status & 0xF0;
     uint8_t inCh1To16 = (m.status & 0x0F) + 1;
-    if (!allowMappedCc && typeHi == 0xB0 && midiMapIsCcIntercepted(inCh1To16, m.d1)) {
-      restoreIrq(irq);
-      break;
-    }
     inTail++;
     restoreIrq(irq);
 
-    if (typeHi == 0xB0 && allowMappedCc && midiMapHandleCc(inCh1To16, m.d1, m.d2)) {
+    if (typeHi == 0xB0 && midiMapHandleCc(inCh1To16, m.d1, m.d2)) {
       continue;
     }
     uint32_t msgTick = framesToMidiTicks(m.tapeFrame, curBpm);
@@ -1013,124 +1256,88 @@ FLASHMEM static void drainMidiInputRing(float curBpm, int selectedMidiTrack, boo
               clearRecNoteOpenMask(t);
             }
 
-            MidiEvent *evPool = eventPool[t];
             if (rev) {
               if (typeHi == 0x90 && m.d2 > 0) {
                 // Reverse Note-On: marks the higher-tick end (0x80) of the note in tape coordinates
                 advanceRecordReplaceErase(t, msgTick, true);
                 if (isRecNoteOpen(t, m.d1)) {
-                  closeOpenRecordedNotes(t, msgTick, true, curBpm);
+                  closeSingleOpenRecordedNote(t, m.d1, msgTick, true, curBpm);
                 }
-                MidiEvent ev = {msgTick, 0x80, m.d1, m.d2, 0};
-                insertEventSorted(t, ev, true);
-                setRecNoteOpen(t, m.d1, true);
-                markSongDirty();
+                if (ensureNotePairCapacity(t)) {
+                  MidiEvent ev = {msgTick, 0x80, m.d1, m.d2, REC_OPEN_TAG};
+                  if (insertEventSorted(t, ev, true)) {
+                    setRecNoteOpen(t, m.d1, true);
+                    markSongDirty();
+                  }
+                }
               } else if (typeHi == 0x80 || (typeHi == 0x90 && m.d2 == 0)) {
                 // Reverse Note-Off: marks the lower-tick start (0x90) of the note in tape coordinates
                 if (isRecNoteOpen(t, m.d1)) {
-                  setRecNoteOpen(t, m.d1, false);
-                  uint32_t offTick = msgTick;
-                  uint8_t vel = 100;
-                  int32_t foundIdx = -1;
-                  for (uint32_t k = 0; k < mt.eventCount; k++) {
-                    if (evPool[k].data1 == m.d1 && (evPool[k].status & 0xF0) == 0x80) {
-                      offTick = evPool[k].tick;
-                      if (evPool[k].data2 > 0) vel = evPool[k].data2;
-                      foundIdx = (int32_t)k;
-                      break;
-                    }
-                  }
-                  uint32_t onTick = msgTick;
-                  if (foundIdx >= 0) {
-                    if (offTick == 0) {
-                      evPool[foundIdx].tick = 1u;
-                      onTick = 0u;
-                    } else if (onTick >= offTick) {
-                      onTick = offTick - 1u;
-                    }
-                  }
-                  advanceRecordReplaceErase(t, onTick, true);
-                  MidiEvent ev = {onTick, 0x90, m.d1, vel, 0};
-                  insertEventSorted(t, ev, true);
-                  markSongDirty();
+                  closeSingleOpenRecordedNote(t, m.d1, msgTick, true, curBpm);
                 } else {
                   advanceRecordReplaceErase(t, msgTick, true);
                 }
               } else {
                 advanceRecordReplaceErase(t, msgTick, true);
-                MidiEvent ev = {msgTick, typeHi, m.d1, m.d2, 0};
-                insertEventSorted(t, ev, true);
-                markSongDirty();
+                if (mt.eventCount + countRecOpenNotes(t) + 16u <= MAX_MIDI_EVENTS_PER_TRACK) {
+                  MidiEvent ev = {msgTick, typeHi, m.d1, m.d2, 0};
+                  if (insertEventSorted(t, ev, true)) {
+                    markSongDirty();
+                  }
+                }
               }
             } else {
               // Forward recording
               if (typeHi == 0x90 && m.d2 > 0) {
                 advanceRecordReplaceErase(t, msgTick, false);
                 if (isRecNoteOpen(t, m.d1)) {
-                  uint32_t prevOnTick = msgTick;
-                  for (uint32_t k = mt.eventCount; k > 0; k--) {
-                    const MidiEvent &prev = evPool[k - 1];
-                    if (prev.data1 == m.d1 && (prev.status & 0xF0) == 0x90) {
-                      prevOnTick = prev.tick;
-                      break;
-                    }
-                  }
-                  uint32_t closeTick = min(maxAllowedTick, max(msgTick, prevOnTick + 1u));
-                  advanceRecordReplaceErase(t, closeTick, false);
-                  MidiEvent closeEv = {closeTick, 0x80, m.d1, 0, 0};
-                  insertEventSorted(t, closeEv, true);
+                  closeSingleOpenRecordedNote(t, m.d1, msgTick, false, curBpm);
                 }
-                MidiEvent ev = {msgTick, 0x90, m.d1, m.d2, 0};
-                insertEventSorted(t, ev, true);
-                setRecNoteOpen(t, m.d1, true);
-                markSongDirty();
+                if (ensureNotePairCapacity(t)) {
+                  MidiEvent ev = {msgTick, 0x90, m.d1, m.d2, REC_OPEN_TAG};
+                  if (insertEventSorted(t, ev, true)) {
+                    setRecNoteOpen(t, m.d1, true);
+                    markSongDirty();
+                  }
+                }
               } else if (typeHi == 0x80 || (typeHi == 0x90 && m.d2 == 0)) {
                 if (isRecNoteOpen(t, m.d1)) {
-                  setRecNoteOpen(t, m.d1, false);
-                  uint32_t onTick = msgTick;
-                  for (uint32_t k = mt.eventCount; k > 0; k--) {
-                    const MidiEvent &prev = evPool[k - 1];
-                    if (prev.data1 == m.d1 && (prev.status & 0xF0) == 0x90) {
-                      onTick = prev.tick;
-                      break;
-                    }
-                  }
-                  uint32_t offTick = min(maxAllowedTick, max(msgTick, onTick + 1u));
-                  advanceRecordReplaceErase(t, offTick, false);
-                  MidiEvent ev = {offTick, 0x80, m.d1, 0, 0};
-                  insertEventSorted(t, ev, true);
-                  markSongDirty();
+                  closeSingleOpenRecordedNote(t, m.d1, msgTick, false, curBpm);
                 } else if (mt.armMode == ArmMode::Overdub) {
                   bool hasOpenOnTrack = false;
                   uint32_t onTick = msgTick;
+                  MidiEvent *evPool = eventPool[t];
                   for (uint32_t k = mt.eventCount; k > 0; k--) {
                     const MidiEvent &prev = evPool[k - 1];
                     if (prev.tick > msgTick) continue;
                     if (prev.data1 == m.d1) {
-                      uint8_t phi = prev.status & 0xF0;
-                      if (phi == 0x90) {
+                      if (isNoteOnEv(prev)) {
                         hasOpenOnTrack = true;
                         onTick = prev.tick;
                         break;
-                      } else if (phi == 0x80) {
+                      } else if (isNoteOffEv(prev)) {
                         break;
                       }
                     }
                   }
-                  if (hasOpenOnTrack) {
+                  if (hasOpenOnTrack && ensureCloseNoteCapacity(t)) {
                     uint32_t offTick = min(maxAllowedTick, max(msgTick, onTick + 1u));
                     MidiEvent ev = {offTick, 0x80, m.d1, 0, 0};
-                    insertEventSorted(t, ev, true);
-                    markSongDirty();
+                    if (insertEventSorted(t, ev, true)) {
+                      markSongDirty();
+                    }
                   }
                 } else {
                   advanceRecordReplaceErase(t, msgTick, false);
                 }
               } else {
                 advanceRecordReplaceErase(t, msgTick, false);
-                MidiEvent ev = {msgTick, typeHi, m.d1, m.d2, 0};
-                insertEventSorted(t, ev, true);
-                markSongDirty();
+                if (mt.eventCount + countRecOpenNotes(t) + 16u <= MAX_MIDI_EVENTS_PER_TRACK) {
+                  MidiEvent ev = {msgTick, typeHi, m.d1, m.d2, 0};
+                  if (insertEventSorted(t, ev, true)) {
+                    markSongDirty();
+                  }
+                }
               }
             }
           }
@@ -1159,6 +1366,7 @@ FLASHMEM void midiSeqFastService() {
 }
 
 void midiSeqIsrTick() {
+  if (transport.mode != TransportMode::Running || seqEditDepth != 0) return;
   midiSeqDispatchPlayback(bpm, true);
 }
 
@@ -1228,7 +1436,7 @@ FLASHMEM void midiSeqService(float curBpm, int selectedMidiTrack, bool midiThruE
   }
 
   // 2. Process incoming MIDI events from the input ring (Fallback Thru + Recording + Mapped CCs)
-  drainMidiInputRing(curBpm, selectedMidiTrack, midiThruEnabled, true);
+  drainMidiInputRing(curBpm, selectedMidiTrack, midiThruEnabled);
   midiMapService();
 
   // 2b. Finalize any tracks exiting their recording window (Punch-Out, Manual Disarm, or Loop Wrap)
@@ -1336,6 +1544,9 @@ FLASHMEM bool midiSeqSave(FsFile &f) {
     while (offset < n) {
       uint32_t chunkCount = min(MIDI_IO_BATCH, n - offset);
       memcpy(batch, &eventPool[t][offset], chunkCount * sizeof(MidiEvent));
+      for (uint32_t i = 0; i < chunkCount; i++) {
+        batch[i].reserved = 0;
+      }
       size_t bytes = chunkCount * sizeof(MidiEvent);
       if (f.write(batch, bytes) != bytes) return false;
       offset += chunkCount;
@@ -1394,21 +1605,11 @@ FLASHMEM bool midiSeqLoad(FsFile &f, float bpm, uint32_t displayMaxFrames) {
       offset += chunkCount;
     }
     mt.eventCount = n;
-    uint32_t openMask[4] = {};
     for (uint32_t i = 0; i < n; i++) {
       MidiEvent &e = eventPool[t][i];
-      uint8_t hi = e.status & 0xF0;
-      uint8_t note = e.data1 & 0x7F;
-      uint32_t bit = 1u << (note & 31);
-      if (hi == 0x90) {
-        if (e.data2 == 0 && (openMask[note >> 5] & bit)) {
-          e.status = 0x80;
-          openMask[note >> 5] &= ~bit;
-        } else {
-          openMask[note >> 5] |= bit;
-        }
-      } else if (hi == 0x80) {
-        openMask[note >> 5] &= ~bit;
+      e.reserved = 0;
+      if ((e.status & 0xF0) == 0x90 && e.data2 == 0) {
+        e.status = 0x80;
       }
     }
   }
@@ -1451,10 +1652,9 @@ FLASHMEM bool midiSeqCopyRegionToClip(int srcTrack, uint32_t startFrame, uint32_
     if (e.tick < startTick) continue;
     if (e.tick > endTick) break;
 
-    uint8_t hi = e.status & 0xF0;
     uint8_t note = e.data1 & 0x7F;
-    bool isNoteOn = (hi == 0x90);
-    bool isNoteOff = (hi == 0x80);
+    bool isNoteOn = isNoteOnEv(e);
+    bool isNoteOff = isNoteOffEv(e);
 
     if (e.tick == endTick) {
       // At exact endTick boundary, only include NoteOffs for notes opened inside the region
@@ -1470,6 +1670,8 @@ FLASHMEM bool midiSeqCopyRegionToClip(int srcTrack, uint32_t startFrame, uint32_
     }
 
     MidiEvent rel = e;
+    if (isNoteOff) rel.status = 0x80;
+    rel.reserved = 0;
     rel.tick = min(e.tick - startTick, regionTicks - 1u);
     batch[batchCount++] = rel;
     if (batchCount == MIDI_IO_BATCH && !flushBatch()) {
@@ -1525,6 +1727,7 @@ FLASHMEM bool midiSeqPasteClipToTrack(int dstTrack, uint32_t destStartFrame, uin
   MidiEvent batch[MIDI_IO_BATCH];
   uint32_t totalEvents = (uint32_t)(clipFile.fileSize() / sizeof(MidiEvent));
   uint32_t offset = 0;
+  uint32_t pasteOpen[4] = {};
 
   while (offset < totalEvents) {
     uint32_t chunkCount = min(MIDI_IO_BATCH, totalEvents - offset);
@@ -1534,12 +1737,46 @@ FLASHMEM bool midiSeqPasteClipToTrack(int dstTrack, uint32_t destStartFrame, uin
     uint32_t got = (uint32_t)rd / sizeof(MidiEvent);
     for (uint32_t i = 0; i < got; i++) {
       MidiEvent ev = batch[i];
+      ev.reserved = 0;
+      uint8_t hi = ev.status & 0xF0;
+      if (hi == 0x90 && ev.data2 == 0) {
+        ev.status = 0x80;
+        hi = 0x80;
+      }
       uint64_t absTick = (uint64_t)destStartTick + (uint64_t)ev.tick;
       if (absTick > maxAllowedTick) absTick = maxAllowedTick;
       ev.tick = (uint32_t)absTick;
-      insertEventSorted(dstTrack, ev);
+
+      uint8_t note = ev.data1 & 0x7F;
+      uint32_t bit = 1u << (note & 31);
+      uint32_t openCnt = (uint32_t)(__builtin_popcount(pasteOpen[0]) +
+                                    __builtin_popcount(pasteOpen[1]) +
+                                    __builtin_popcount(pasteOpen[2]) +
+                                    __builtin_popcount(pasteOpen[3]));
+      if (hi == 0x90) {
+        if (midiTracks[dstTrack].eventCount + openCnt + 2u <= MAX_MIDI_EVENTS_PER_TRACK) {
+          if (insertEventSorted(dstTrack, ev)) {
+            pasteOpen[note >> 5] |= bit;
+          }
+        }
+      } else if (hi == 0x80) {
+        if (insertEventSorted(dstTrack, ev)) {
+          pasteOpen[note >> 5] &= ~bit;
+        }
+      } else {
+        if (midiTracks[dstTrack].eventCount + openCnt + 16u <= MAX_MIDI_EVENTS_PER_TRACK) {
+          insertEventSorted(dstTrack, ev);
+        }
+      }
     }
     offset += got;
+  }
+
+  for (uint8_t n = 0; n < 128; n++) {
+    if (pasteOpen[n >> 5] & (1u << (n & 31))) {
+      MidiEvent offEv = {min(maxAllowedTick, destEndTick - 1u), 0x80, n, 0, 0};
+      insertEventSorted(dstTrack, offEv);
+    }
   }
 
   clipFile.close();
@@ -1979,7 +2216,7 @@ FLASHMEM bool midiSeqInsertNote(int track, uint8_t note, uint32_t startTick, uin
   if (endTick > maxAllowedTick) endTick = maxAllowedTick;
 
   note &= 0x7F;
-  uint8_t vel = (uint8_t)constrain((int)velocity, 0, 127);
+  uint8_t vel = (uint8_t)constrain((int)velocity, 1, 127);
 
   removeOverlappingPitchNotes(track, note, startTick, endTick, false);
 
@@ -2508,15 +2745,28 @@ FLASHMEM bool midiSeqLoadMidFileToTrack(int dstTrack, uint32_t destStartFrame,
           if (hi == 0x90u && d2 == 0) {
             evStatus = 0x80u;
           }
-          if (evStatus == 0x90u) {
-            openNotes[evD1 >> 5] |= (1u << (evD1 & 31));
-          } else if (evStatus == 0x80u) {
-            openNotes[evD1 >> 5] &= ~(1u << (evD1 & 31));
-          }
-
           uint64_t absTick = min((uint64_t)maxAllowedTick, (uint64_t)destStartTick + (uint64_t)relTick);
           MidiEvent ev = {(uint32_t)absTick, evStatus, evD1, evD2, 0};
-          insertEventSorted(dstTrack, ev);
+          uint32_t bit = 1u << (evD1 & 31);
+          uint32_t openCnt = (uint32_t)(__builtin_popcount(openNotes[0]) +
+                                        __builtin_popcount(openNotes[1]) +
+                                        __builtin_popcount(openNotes[2]) +
+                                        __builtin_popcount(openNotes[3]));
+          if (evStatus == 0x90u) {
+            if (midiTracks[dstTrack].eventCount + openCnt + 2u <= MAX_MIDI_EVENTS_PER_TRACK) {
+              if (insertEventSorted(dstTrack, ev)) {
+                openNotes[evD1 >> 5] |= bit;
+              }
+            }
+          } else if (evStatus == 0x80u) {
+            if (insertEventSorted(dstTrack, ev)) {
+              openNotes[evD1 >> 5] &= ~bit;
+            }
+          } else {
+            if (midiTracks[dstTrack].eventCount + openCnt + 16u <= MAX_MIDI_EVENTS_PER_TRACK) {
+              insertEventSorted(dstTrack, ev);
+            }
+          }
         }
       }
 
@@ -2543,7 +2793,7 @@ FLASHMEM bool midiSeqLoadMidFileToTrack(int dstTrack, uint32_t destStartFrame,
 
 static constexpr int MAX_MIDI_BROWSER_ENTRIES = 32;
 static constexpr int MIDI_BROWSER_DIR_MAX = 96;
-static MidiBrowserEntry *const midiBrowserEntries = reinterpret_cast<MidiBrowserEntry *>(sharedBrowserPoolBuf());
+static MidiBrowserEntry *const midiBrowserEntries = reinterpret_cast<MidiBrowserEntry *>(sharedBrowserPool);
 static int midiBrowserCount = 0;
 static int midiBrowserWinStart = 0;
 static int midiBrowserWinCount = 0;
@@ -2553,7 +2803,7 @@ static int midiBrowserTrack = 0;
 static uint32_t midiBrowserStart = 0;
 static bool midiBrowserOpen = false;
 static bool midiBrowserAudioMode = false;
-static char *const midiBrowserDir = sharedBrowserDirBuf();
+static char midiBrowserDir[MIDI_BROWSER_DIR_MAX] = "";
 
 FLASHMEM static bool hasMidExtension(const char *name) {
   if (!name) return false;
@@ -2569,121 +2819,15 @@ FLASHMEM static bool hasWavClipExtension(const char *name) {
   return (len >= 5 && strcasecmp(name + len - 4, ".wav") == 0);
 }
 
-static inline bool midiBrowserEntryComesBefore(const MidiBrowserEntry &a, const MidiBrowserEntry &b) {
-  bool aParent = (a.isDir != 0) && (strcmp(a.name, "..") == 0);
-  bool bParent = (b.isDir != 0) && (strcmp(b.name, "..") == 0);
-  if (aParent != bParent) return aParent;
-  if ((a.isDir != 0) != (b.isDir != 0)) return a.isDir != 0;
-  int cmp = strcasecmp(a.name, b.name);
-  if (cmp != 0) return cmp < 0;
-  return strcmp(a.name, b.name) < 0;
-}
-
-FLASHMEM static void insertMidiSmallest(MidiBrowserEntry *arr, int &count, int cap,
-                                        const MidiBrowserEntry &item) {
-  if (cap <= 0) return;
-  if (count >= cap && !midiBrowserEntryComesBefore(item, arr[cap - 1])) return;
-  int ins = (count < cap) ? count++ : (cap - 1);
-  while (ins > 0 && midiBrowserEntryComesBefore(item, arr[ins - 1])) {
-    arr[ins] = arr[ins - 1];
-    ins--;
-  }
-  arr[ins] = item;
-}
-
-FLASHMEM static void insertMidiLargest(MidiBrowserEntry *arr, int &count, int cap,
-                                       const MidiBrowserEntry &item) {
-  if (cap <= 0) return;
-  if (count >= cap && !midiBrowserEntryComesBefore(arr[0], item)) return;
-  if (count < cap) {
-    int ins = count++;
-    while (ins > 0 && midiBrowserEntryComesBefore(item, arr[ins - 1])) {
-      arr[ins] = arr[ins - 1];
-      ins--;
-    }
-    arr[ins] = item;
-  } else {
-    int ins = 0;
-    while (ins + 1 < cap && midiBrowserEntryComesBefore(arr[ins + 1], item)) {
-      arr[ins] = arr[ins + 1];
-      ins++;
-    }
-    arr[ins] = item;
-  }
+FLASHMEM static bool acceptMidiOrWavBrowserFile(const char *name, uint64_t) {
+  return midiBrowserAudioMode ? hasWavClipExtension(name) : hasMidExtension(name);
 }
 
 FLASHMEM static void scanMidiBrowserDirectoryWindow(const MidiBrowserEntry *pivot, int pivotIdx, int wantStart) {
-  MidiBrowserEntry pivotCopy{};
-  const bool usePivot = (pivot != nullptr);
-  int pOff = 0;
-  int leftCap = 0;
-  int rightCap = MAX_MIDI_BROWSER_ENTRIES;
-  int leftCount = 0;
-  int rightCount = 0;
-  int totalCount = 0;
-
-  if (usePivot) {
-    pivotCopy = *pivot;
-    pOff = constrain(pivotIdx - wantStart, 0, MAX_MIDI_BROWSER_ENTRIES - 1);
-    leftCap = pOff;
-    rightCap = (MAX_MIDI_BROWSER_ENTRIES - 1) - pOff;
-  }
-
-  auto considerItem = [&](const MidiBrowserEntry &item) {
-    totalCount++;
-    if (!usePivot) {
-      insertMidiSmallest(midiBrowserEntries, rightCount, rightCap, item);
-    } else if (midiBrowserEntryComesBefore(item, pivotCopy)) {
-      insertMidiLargest(midiBrowserEntries, leftCount, leftCap, item);
-    } else if (midiBrowserEntryComesBefore(pivotCopy, item)) {
-      insertMidiSmallest(&midiBrowserEntries[pOff + 1], rightCount, rightCap, item);
-    }
-  };
-
-  if (strcmp(midiBrowserDir, "/") != 0) {
-    MidiBrowserEntry parentItem{};
-    snprintf(parentItem.name, sizeof(parentItem.name), "..");
-    parentItem.isDir = 1;
-    considerItem(parentItem);
-  }
-
-  FsFile dir = SD.sdfs.open(midiBrowserDir, O_RDONLY);
-  if (dir.isOpen() && dir.isDir()) {
-    FsFile entry;
-    while (entry.openNext(&dir, O_RDONLY)) {
-      char nameBuf[64] = {};
-      entry.getName(nameBuf, sizeof(nameBuf));
-      bool isSubDir = entry.isDir();
-      bool isHidden = entry.isHidden() || (nameBuf[0] == '.') ||
-                      (strcasecmp(nameBuf, "System Volume Information") == 0);
-      entry.close();
-
-      if (isHidden || nameBuf[0] == '\0') continue;
-      if (!isSubDir && !(midiBrowserAudioMode ? hasWavClipExtension(nameBuf) : hasMidExtension(nameBuf))) continue;
-      if (strlen(nameBuf) >= sizeof(midiBrowserEntries[0].name)) continue;
-
-      MidiBrowserEntry item{};
-      snprintf(item.name, sizeof(item.name), "%s", nameBuf);
-      item.isDir = isSubDir ? 1 : 0;
-      considerItem(item);
-      keepStreaming();
-    }
-  }
-  if (dir.isOpen()) dir.close();
-
-  midiBrowserCount = totalCount;
-  if (!usePivot) {
-    midiBrowserWinStart = 0;
-    midiBrowserWinCount = rightCount;
-  } else {
-    midiBrowserEntries[leftCount] = pivotCopy;
-    if (leftCount < pOff && rightCount > 0) {
-      memmove(&midiBrowserEntries[leftCount + 1], &midiBrowserEntries[pOff + 1],
-              (size_t)rightCount * sizeof(MidiBrowserEntry));
-    }
-    midiBrowserWinStart = max(0, pivotIdx - leftCount);
-    midiBrowserWinCount = leftCount + 1 + rightCount;
-  }
+  pagedScanDirWindow<MidiBrowserEntry>(
+      midiBrowserDir, midiBrowserEntries, MAX_MIDI_BROWSER_ENTRIES,
+      midiBrowserCount, midiBrowserWinStart, midiBrowserWinCount,
+      acceptMidiOrWavBrowserFile, pivot, pivotIdx, wantStart);
 }
 
 FLASHMEM static void scanMidiBrowserDirectory() {
@@ -2693,40 +2837,9 @@ FLASHMEM static void scanMidiBrowserDirectory() {
 }
 
 FLASHMEM static void syncMidiBrowserScroll() {
-  if (midiBrowserCount <= 0) {
-    midiBrowserCur = 0;
-    midiBrowserScr = 0;
-    midiBrowserWinStart = 0;
-    midiBrowserWinCount = 0;
-    return;
-  }
-  midiBrowserCur = constrain(midiBrowserCur, 0, midiBrowserCount - 1);
-  if (midiBrowserCur < midiBrowserScr) {
-    midiBrowserScr = midiBrowserCur;
-  } else if (midiBrowserCur >= midiBrowserScr + MIDI_BROWSER_VISIBLE_ROWS) {
-    midiBrowserScr = midiBrowserCur - MIDI_BROWSER_VISIBLE_ROWS + 1;
-  }
-  int maxScr = max(0, midiBrowserCount - MIDI_BROWSER_VISIBLE_ROWS);
-  midiBrowserScr = constrain(midiBrowserScr, 0, maxScr);
-
-  int visEnd = min(midiBrowserCount - 1, midiBrowserScr + MIDI_BROWSER_VISIBLE_ROWS - 1);
-  if (midiBrowserScr < midiBrowserWinStart || visEnd >= midiBrowserWinStart + midiBrowserWinCount) {
-    int maxWinStart = max(0, midiBrowserCount - MAX_MIDI_BROWSER_ENTRIES);
-    int wantStart = constrain(midiBrowserScr - 12, 0, maxWinStart);
-    if (wantStart == 0) {
-      scanMidiBrowserDirectoryWindow(nullptr, 0, 0);
-    } else {
-      int overlapLo = max(midiBrowserWinStart, wantStart);
-      int overlapHi = min(midiBrowserWinStart + midiBrowserWinCount - 1, wantStart + MAX_MIDI_BROWSER_ENTRIES - 1);
-      if (midiBrowserWinCount > 0 && overlapLo <= overlapHi) {
-        int pivotIdx = (wantStart < midiBrowserWinStart) ? overlapHi : overlapLo;
-        MidiBrowserEntry pivot = midiBrowserEntries[pivotIdx - midiBrowserWinStart];
-        scanMidiBrowserDirectoryWindow(&pivot, pivotIdx, wantStart);
-      } else {
-        scanMidiBrowserDirectoryWindow(nullptr, 0, 0);
-      }
-    }
-  }
+  pagedSyncWindowScroll(midiBrowserCount, MIDI_BROWSER_VISIBLE_ROWS, MAX_MIDI_BROWSER_ENTRIES,
+                        midiBrowserCur, midiBrowserScr, midiBrowserWinStart, midiBrowserWinCount,
+                        midiBrowserEntries, scanMidiBrowserDirectoryWindow);
 }
 
 FLASHMEM bool isMidiClipBrowserOpen() {
@@ -2835,22 +2948,7 @@ FLASHMEM bool midiClipBrowserConfirm(float curBpm) {
   entName[sizeof(entName) - 1] = '\0';
 
   if (isDir) {
-    if (strcmp(entName, "..") == 0) {
-      char *lastSlash = strrchr(midiBrowserDir, '/');
-      if (!lastSlash || lastSlash == midiBrowserDir) {
-        snprintf(midiBrowserDir, MIDI_BROWSER_DIR_MAX, "/");
-      } else {
-        *lastSlash = '\0';
-      }
-    } else {
-      char nextDir[MIDI_BROWSER_DIR_MAX];
-      if (strcmp(midiBrowserDir, "/") == 0) {
-        snprintf(nextDir, sizeof(nextDir), "/%.62s", entName);
-      } else {
-        snprintf(nextDir, sizeof(nextDir), "%.31s/%.62s", midiBrowserDir, entName);
-      }
-      snprintf(midiBrowserDir, MIDI_BROWSER_DIR_MAX, "%s", nextDir);
-    }
+    if (!pagedStepBrowserDir(midiBrowserDir, MIDI_BROWSER_DIR_MAX, entName)) return false;
     scanMidiBrowserDirectory();
     if (midiBrowserCount > 1 && midiBrowserWinCount > 0 && strcmp(midiBrowserEntries[0].name, "..") == 0) {
       midiBrowserCur = 1;

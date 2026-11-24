@@ -158,6 +158,7 @@ void midiMapService();
 // ============================================================================
 // Per-Instrument MIDI CC Parameter Mapping (Persisted in INST.DAT & .FMI)
 // ============================================================================
+void instMidiMapRebuildMask();
 void instMidiMapResetAll();
 void instMidiMapClearInst(int instIdx);
 void instMidiMapCopyInst(int srcInstIdx);
@@ -180,7 +181,9 @@ int instMidiMapLearningInst();
 int instMidiMapLearningSlot();
 
 // Called from fmSynthCC() when a MIDI track routed to I01..I08 sends a CC
+bool instMidiMapHasRoutedCc(int instIdx, uint8_t cc);
 void instMidiMapApplyRoutedCc(int instIdx, uint8_t cc, uint8_t val);
+void instMidiMapFlushRoutedCc();
 
 // SD Card Persistence (RAM1-staged chunks appended to INST.DAT and .FMI)
 bool instMidiMapSaveSongData(FsFile &f);

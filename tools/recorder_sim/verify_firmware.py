@@ -7,6 +7,7 @@ Run after compiling the firmware:
     python tools/recorder_sim/verify_firmware.py
 """
 
+import argparse
 import re
 import struct
 import sys
@@ -15,6 +16,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent.parent
 SRC_DIR = ROOT / "src"
 SKETCH_NAME = "Capstan.ino"
+TARGET_ELFS = {
+    "model01": ("Model:01", ROOT / "build" / "model01" / f"{SKETCH_NAME}.elf"),
+    "model02": ("Model:02", ROOT / "build" / "model02" / f"{SKETCH_NAME}.elf"),
+}
 
 
 class VerificationFailure(Exception):
@@ -496,11 +501,11 @@ def verify_dma_and_storage_source_invariants():
     m02_chars = [b[0] for b in m02_blocks]
     m01_chars = [b[0] for b in m01_blocks]
     check(
-        len(m02_blocks) == 84
-        and len(m01_blocks) == 84
-        and len(set(m02_chars)) == 84
+        len(m02_blocks) == 85
+        and len(m01_blocks) == 85
+        and len(set(m02_chars)) == 85
         and m02_chars == m01_chars,
-        "ui_font.cpp defines all 84 unique glyphs for both Model:02 (9x13) and Model:01 (3x5) with no duplicate char keys",
+        "ui_font.cpp defines all 85 unique glyphs for both Model:02 (9x13) and Model:01 (3x5) with no duplicate char keys",
     )
     for b02, b01 in zip(m02_blocks, m01_blocks):
         r02 = row_str_re.findall(b02)
@@ -510,7 +515,7 @@ def verify_dma_and_storage_source_invariants():
             raise VerificationFailure(
                 f"Glyph '{ch}' in Model:02 invalid: rows={len(r02)}, widths={set(len(r) for r in r02)}, expected_w={len(r01[0]) * 3}"
             )
-    check(True, "All 84 Model:02 glyphs are 13px tall with uniform row widths and exact 1.5x width proportionality")
+    check(True, "All 85 Model:02 glyphs are 13px tall with uniform row widths and exact 1.5x width proportionality")
 
     # 1k. Timeline zoom, millisecond/subdivision locators, header/punch editing, and transport bar invariants
     app_h = (SRC_DIR / "app.h").read_text(encoding="utf-8")
@@ -1036,6 +1041,19 @@ def verify_dma_and_storage_source_invariants():
         "Audio Input FX chain (Drive -> Chorus -> Delay -> Reverb -> Tape -> Comp -> Out Vol [80 unity], pre-monitor & pre-record, post-Tuner), Song Settings top rows (LINE IN GAIN, AUDIO INPUT FX, REC TRIG THRESH), SONG.DAT persistence, and MIDI CC mappings are configured",
     )
 
+    # 1ab. SONG.DAT v3 compact schema & legacy v2 read compatibility
+    check(
+        "struct DiskAudioTrackV3" in storage_cpp
+        and "struct DiskSongV3" in storage_cpp
+        and "DISK_SONG_VERSION = 3" in storage_cpp
+        and "sizeof(DiskAudioTrackV3) == 20" in storage_cpp
+        and "sizeof(DiskSongV3) == 232" in storage_cpp
+        and "ver == 2 || ver == DISK_SONG_VERSION" in storage_cpp
+        and "DiskSongV3 *sp = readDiskSongFromFolder(" in storage_cpp
+        and "DiskSongV3 *spPtr = readDiskSongFromFolder(" in storage_cpp,
+        "storage.cpp implements SONG.DAT v3 (232-byte single-sector schema with typed track/input FX and recSrc) while preserving full v2 read compatibility",
+    )
+
 
 def verify_wav_and_binary_headers():
     print("\n=== 2. Binary Format & WAV Sector-Alignment Checks ===")
@@ -1061,6 +1079,30 @@ def verify_wav_and_binary_headers():
     check(
         len(hdr) == 512 and hdr[0:4] == b"RIFF" and hdr[504:508] == b"data",
         "512-byte sector-aligned RIFF WAVE header layout is valid",
+    )
+
+    # Verify SONG.DAT v3 single-sector binary layout (72 B header + 8 x 20 B track descriptors = 232 B)
+    song_v3_hdr = struct.pack(
+        "<4sHH40sIBBH7sB8s",
+        b"M8PR",
+        3,
+        232,
+        b"\x00" * 40,
+        0,
+        0,
+        0,
+        0,
+        b"\x00" * 7,
+        80,
+        b"\x00" * 8,
+    )
+    song_v3_trk = struct.pack("<bbBBbBBBB7sI", 80, 0, 0, 0, -60, 0, 0, 0, 0, b"\x00" * 7, 44100)
+    check(
+        len(song_v3_hdr) == 72
+        and len(song_v3_trk) == 20
+        and (len(song_v3_hdr) + 8 * len(song_v3_trk)) == 232
+        and song_v3_hdr[:4] == b"M8PR",
+        "SONG.DAT v3 packed binary layout (72B header + 8x20B track descriptors = 232B single-sector record) is valid",
     )
 
     # Verify SoundFont 2.x RIFF 'sfbk' / 'pdta' Hydra packed struct sizes match SF2.01 specification
@@ -1114,17 +1156,30 @@ def parse_elf32_symbols(elf_bytes: bytes) -> tuple[dict, dict]:
     return symbols, sizes
 
 
-def verify_elf_symbols():
+def verify_elf_symbols(selected_targets: list[str], explicit_targets: bool):
     print("\n=== 3. Teensy 4.0 / MicroMod ELF Symbol & Memory Region Verification ===")
-    candidate_elfs = [
-        ("Model:01", ROOT / "build" / "model01" / f"{SKETCH_NAME}.elf"),
-        ("Model:02", ROOT / "build" / "model02" / f"{SKETCH_NAME}.elf"),
-    ]
+    src_inputs = [ROOT / SKETCH_NAME]
+    src_inputs.extend(SRC_DIR.glob("*.h"))
+    src_inputs.extend(SRC_DIR.glob("*.cpp"))
+    src_inputs.extend(SRC_DIR.glob("*.c"))
+    teensy_msc_dir = ROOT / "tools" / "teensy_msc"
+    if teensy_msc_dir.exists():
+        src_inputs.extend(teensy_msc_dir.glob("*.c*"))
+    latest_src_mtime = max(p.stat().st_mtime for p in src_inputs if p.exists())
+
     found_any = False
-    for label, elf_path in candidate_elfs:
+    for key in selected_targets:
+        label, elf_path = TARGET_ELFS[key]
         if not elf_path.exists():
+            if explicit_targets:
+                check(False, f"[{label}] Built ELF exists at {elf_path}")
             continue
         found_any = True
+        elf_mtime = elf_path.stat().st_mtime
+        check(
+            elf_mtime >= latest_src_mtime - 1.0,
+            f"[{label}] ELF binary is up-to-date with current source files",
+        )
         syms, sizes = parse_elf32_symbols(elf_path.read_bytes())
         ram1_chunk_addr = None
         ram2_event_pool_addr = None
@@ -1201,6 +1256,10 @@ def verify_elf_symbols():
         ep0_setup_addr = syms.get("endpoint0_setup")
         ep0_complete_addr = syms.get("endpoint0_complete")
         etext_addr = syms.get("_etext")
+        ebss_addr = syms.get("_ebss")
+        estack_addr = syms.get("_estack")
+        heap_start_addr = syms.get("_heap_start")
+        heap_end_addr = syms.get("_heap_end")
         check(
             ep0_setup_addr is not None
             and ep0_setup_addr >= 0x60000000
@@ -1209,8 +1268,18 @@ def verify_elf_symbols():
             f"[{label}] Cold USB EP0 handlers (endpoint0_setup=0x{ep0_setup_addr or 0:08X}, endpoint0_complete=0x{ep0_complete_addr or 0:08X}) reside in FLASHMEM (not inlined into ITCM usb_isr)",
         )
         check(
-            etext_addr is not None and etext_addr <= (163840 - 2048),
-            f"[{label}] ITCM code end (_etext=0x{etext_addr or 0:08X}, {etext_addr or 0} B) stays within 5 banks (<= 163,840 B) with >= 2 KB headroom ({163840 - (etext_addr or 0)} B free in bank 5)",
+            etext_addr is not None and etext_addr <= 131072,
+            f"[{label}] ITCM code end (_etext=0x{etext_addr or 0:08X}, {etext_addr or 0} B) stays within 4 banks (<= 131,072 B, {131072 - (etext_addr or 0)} B free in bank 4)",
+        )
+        dtcm_free = (estack_addr - ebss_addr) if (estack_addr is not None and ebss_addr is not None) else -1
+        check(
+            ebss_addr is not None and estack_addr is not None and dtcm_free >= 64000,
+            f"[{label}] DTCM free stack margin is >= 64,000 B ({dtcm_free} B free: _ebss=0x{ebss_addr or 0:08X}, _estack=0x{estack_addr or 0:08X})",
+        )
+        ram2_free = (heap_end_addr - heap_start_addr) if (heap_end_addr is not None and heap_start_addr is not None) else -1
+        check(
+            heap_start_addr is not None and heap_end_addr is not None and ram2_free >= 32000,
+            f"[{label}] RAM2 (DMAMEM) free margin is >= 32,000 B ({ram2_free} B free)",
         )
 
     if not found_any:
@@ -1259,11 +1328,40 @@ def verify_public_release_cleanliness():
     )
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Automated architectural, memory, DMA-safety, and storage invariant verifier for Capstan."
+    )
+    parser.add_argument(
+        "targets",
+        nargs="*",
+        help="Optional target(s) to verify: model01, model02 (default: both)",
+    )
+    return parser.parse_args()
+
+
 def main():
+    ns = parse_args()
+    explicit_targets = len(ns.targets) > 0
+    if explicit_targets:
+        selected_targets = []
+        for t in ns.targets:
+            k = t.lower()
+            if k not in TARGET_ELFS:
+                print(
+                    f"[FAIL] Unknown target '{t}'. Choose from: {', '.join(TARGET_ELFS.keys())}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            if k not in selected_targets:
+                selected_targets.append(k)
+    else:
+        selected_targets = ["model01", "model02"]
+
     try:
         verify_dma_and_storage_source_invariants()
         verify_wav_and_binary_headers()
-        verify_elf_symbols()
+        verify_elf_symbols(selected_targets, explicit_targets)
         verify_public_release_cleanliness()
         print("\nAll Capstan firmware verification checks PASSED.")
     except VerificationFailure as e:

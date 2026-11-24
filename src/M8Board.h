@@ -16,7 +16,7 @@
 #if M8_MODEL == 2
 #include "ili9488_spi.h"                   // Model:02 480x320 ILI9488 SPI display driver
 #else
-#include <ILI9341_t3n.h>
+#include "ili9341_spi.h"                   // Model:01 320x240 ILI9341 SPI display driver
 #endif
 
 namespace m8 {
@@ -27,7 +27,7 @@ enum Variant : uint8_t { VARIANT_A = 0, VARIANT_B = 1 };
 #if M8_MODEL == 2
 using Tft = ILI9488Spi;
 #else
-using Tft = ILI9341_t3n;
+using Tft = ILI9341Spi;
 #endif
 
 // Key bitmask (active-high: bit N corresponds to I2C GPIO expander pin GPn inverted).
@@ -101,7 +101,11 @@ public:
   int batteryPercent();
   // True when positive charge current is flowing into the battery (or charger CHRG_STAT indicates charging).
   bool batteryCharging() const { return _batCharging; }
+#if defined(CAPSTAN_DEBUG) && CAPSTAN_DEBUG
   void batteryLog();                 // Logs raw gauge/charger telemetry when CAPSTAN_DEBUG is enabled
+#else
+  void batteryLog() {}
+#endif
 
   // Periodic BQ2589x safety monitor (called from loop() every 5 s on Variant B / Model:02).
   // Checks fault registers, thermal regulation status, battery voltage (< 4.25 V), and charge
@@ -128,7 +132,9 @@ public:
   [[noreturn]] void powerOff();
 
 private:
+#if M8_MODEL != 2
   bool initMCP23008();
+#endif
   bool initSX1508();
   int readExpander();                     // (-1 on I2C bus error)
   bool writeReg(uint8_t reg, uint8_t val);
@@ -141,8 +147,9 @@ private:
   Tft *_tft = nullptr;
   uint8_t _keys = 0, _lastReported = 0;
   bool _first = true;
-  // Minimum interval between I2C key polls: 1 ms during normal operation,
-  // backing off to 50 ms after a bus error so loop() and audio streaming never stall.
+  bool _keyRetryPending = false;
+  // Minimum interval between I2C key polls: 1 ms while INT is asserted (and on error retry),
+  // widening to 50 ms for steady held-key fallback polls so loop() and audio streaming never stall.
   uint32_t _keyReadAt = 0, _keyGap = 0, _keyErrors = 0, _keyErrorLogAt = 0;
   int8_t _hpState = -1;              // -1: not reported yet
   uint8_t _hpCount = 0;
@@ -154,8 +161,9 @@ private:
   int16_t _batCurrent = 0, _batGaugeMv = -1;
   bool _batPolled = false;
   uint32_t _batPolledMs = 0;
-  uint32_t _cgCheckedMs = 0, _cgPausedMs = 0;   // charge guard timers
+  uint32_t _cgCheckedMs = 0;                   // charge guard timer
   uint8_t _cgStrikes = 0;
+  uint8_t _cgHealthyChecks = 0;
   bool _cgPaused = false, _cgLatched = false;
   uint8_t _bqDefaultReg00 = 0x48;
   bool _usbChargeWhileOn = true;
