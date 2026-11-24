@@ -381,7 +381,7 @@ FLASHMEM void setPage(Page p) {
   closeSamplerKeyModal();
   closeInstBrowser();
   closeSysPresetsModal();
-  closeSysProjectsModal();
+  closeSysPlaylistsModal();
   closeSysMidiMapModal();
   closeUsbSavePromptModal();
   closeTypePresetModal();
@@ -424,7 +424,7 @@ FLASHMEM static void openKeyboardModal(KeyboardTarget target, const char *initia
   closeSamplerKeyModal();
   closeInstBrowser();
   closeSysPresetsModal();
-  closeSysProjectsModal();
+  closeSysPlaylistsModal();
   closeSysMidiMapModal();
   closeUsbSavePromptModal();
   closeTypePresetModal();
@@ -445,7 +445,7 @@ FLASHMEM void openInstrumentKeyboard(int instIdx, bool startInGrid) {
   openKeyboardModal(KeyboardTarget::Instrument, fmSynthPatch(instListCursor).name, startInGrid);
 }
 
-FLASHMEM void openProjectKeyboard(bool isRename, const char *initialText, bool startInGrid) {
+FLASHMEM void openPlaylistKeyboard(bool isRename, const char *initialText, bool startInGrid) {
   deleteConfirmPending = false;
   instSaveToModalActive = false;
   closeSamplerBrowser();
@@ -455,7 +455,7 @@ FLASHMEM void openProjectKeyboard(bool isRename, const char *initialText, bool s
   closeSysPresetsModal();
   closeUsbSavePromptModal();
   closeTypePresetModal();
-  kbTarget = isRename ? KeyboardTarget::ProjectRename : KeyboardTarget::ProjectNew;
+  kbTarget = isRename ? KeyboardTarget::PlaylistRename : KeyboardTarget::PlaylistNew;
   snprintf(saveKeyboardBuf, sizeof(saveKeyboardBuf), "%s", initialText ? initialText : "");
   saveKeyboardRow = startInGrid ? 0 : KB_BTN_ROW;
   saveKeyboardCol = 0;
@@ -921,7 +921,7 @@ FLASHMEM void appServiceCodecHardware(bool phonesConnected) {
     songCfg.masterVolume = targetVol;
     setHeadphonesConnectedState(phonesConnected);
     setMasterVolume(targetVol);
-    sysProjectPlayOnOutputSwitched(phonesConnected);
+    sysPlaylistPlayOnOutputSwitched(phonesConnected);
     if (wasInit) {
       uiForceRedraw();
     }

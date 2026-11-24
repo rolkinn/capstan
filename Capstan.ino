@@ -11,7 +11,7 @@
 //                      4-Octave SD WAV Sampler, Noise Texture Drone) with 32-voice global polyphony
 //   * master_fx.cpp: 5-slot Master Effects Bus (Chorus -> Delay -> Reverb -> Tape -> Comp)
 //   * storage.cpp: SD streaming and in-place record/overdub for 8 WAV tracks (up to 666s)
-//                  plus song, project, MIDI, instrument, & MIDI map persistence in /Capstan
+//                  plus song, playlist, MIDI, instrument, & MIDI map persistence in /Capstan
 //   * ui.cpp: 9-page UI (Audio, Midi, SongSettings, Main, SystemSettings,
 //             Instruments, InstrumentType, InstrumentEdit, Master)
 //   * input.cpp: SHIFT + Arrows page navigation, tape transport, OPT + Arrows adjustments
@@ -66,7 +66,7 @@ FLASHMEM static void freezeCheck() {
 static bool powerBtnHeldState = false;
 static uint32_t powerBtnPressMs = 0;
 
-FLASHMEM static void handlePowerButton(bool allowProjectPlayLock = false) {
+FLASHMEM static void handlePowerButton(bool allowPlaylistPlayLock = false) {
   if (!powerBtnHeldState) {
     if (!board.powerButtonPressed()) return;
     powerBtnHeldState = true;
@@ -95,8 +95,8 @@ FLASHMEM static void handlePowerButton(bool allowProjectPlayLock = false) {
   board.powerButtonPressed();
   bool wasBlanked = isScreenBlanked();
   noteUserActivity();
-  if (allowProjectPlayLock && !wasBlanked) {
-    toggleSysProjectPlayLock();
+  if (allowPlaylistPlayLock && !wasBlanked) {
+    toggleSysPlaylistPlayLock();
   }
 }
 
@@ -140,7 +140,7 @@ FLASHMEM static void reloadFromCard() {
   for (;;) {
     storageForget();
     if (storageBegin(onReloadProgress)) break;
-    if (cardResponds()) fatal("SD error: check /Capstan space.");
+    if (cardResponds()) fatal("SD card error. Reboot.");
     waitForCard();
   }
   beginSession();
@@ -225,7 +225,7 @@ FLASHMEM void setup() {
   showSplash();
   splashIntro();
   while (!storageBegin(onSetupProgress)) {
-    if (cardResponds()) fatal("SD error: check /Capstan space.");
+    if (cardResponds()) fatal("SD card error. Reboot.");
     storageForget();
     waitForCard();
     showSplash();

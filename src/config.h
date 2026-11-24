@@ -26,14 +26,14 @@ namespace looper {
 
 constexpr const char *ROOT_DIR = "/Capstan";
 constexpr const char *SONGS_DIR = "/Capstan/SONGS";
-constexpr const char *PROJECTS_DIR = "/Capstan/PROJECTS";
+constexpr const char *PLAYLISTS_DIR = "/Capstan/PLAYLISTS";
 constexpr const char *INST_PRESETS_DIR = "/Capstan/INSTRUMENT_PRESETS";
 constexpr const char *SOUNDFONTS_DIR = "/Capstan/SOUNDFONTS";
 constexpr int MAX_SONGS = 64;                      // Max named song folders listed from SD card
 constexpr int MAX_SONG_NAME_LEN = 12;              // Max characters in a song folder name
-constexpr int MAX_PROJECTS = 64;                   // Max .proj files listed from /Capstan/PROJECTS
-constexpr int MAX_PROJECT_NAME_LEN = 12;           // Max characters in a project name
-constexpr int MAX_SONGS_PER_PROJECT = 64;          // Max ordered song entries in a .proj file
+constexpr int MAX_PLAYLISTS = 64;                  // Max .plst files listed from /Capstan/PLAYLISTS
+constexpr int MAX_PLAYLIST_NAME_LEN = 12;          // Max characters in a playlist name
+constexpr int MAX_SONGS_PER_PLAYLIST = 64;         // Max ordered song entries in a .plst file
 
 // Track counts & Internal Instruments
 constexpr int NUM_STEREO_AUDIO_TRACKS = 4;         // Tracks 1..4: 16-bit Stereo PCM (4 bytes/frame)

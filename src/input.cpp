@@ -75,8 +75,8 @@ FLASHMEM static void keyboardBackspace() {
 
 FLASHMEM static void commitSaveKeyboard() {
   const KeyboardTarget tgt = saveKeyboardTarget();
-  if (tgt == KeyboardTarget::ProjectNew || tgt == KeyboardTarget::ProjectRename) {
-    commitProjectKeyboard(saveKeyboardBuf, tgt == KeyboardTarget::ProjectRename);
+  if (tgt == KeyboardTarget::PlaylistNew || tgt == KeyboardTarget::PlaylistRename) {
+    commitPlaylistKeyboard(saveKeyboardBuf, tgt == KeyboardTarget::PlaylistRename);
     swallowModalKeys = true;
     return;
   }
@@ -521,7 +521,7 @@ static uint32_t scrubLastTickMs = 0;
 static float scrubFracFrames = 0.0f;
 
 FLASHMEM static bool canOptScrubTimeline() {
-  if (isSysProjectPlayLocked() ||
+  if (isSysPlaylistPlayLocked() ||
       isSaveKeyboardOpen() ||
       isSamplerKeyModalOpen() ||
       isSamplerBrowserOpen() ||
@@ -529,7 +529,7 @@ FLASHMEM static bool canOptScrubTimeline() {
       isInstBrowserOpen() ||
       isInstSaveToModalOpen() ||
       isSysPresetsModalOpen() ||
-      isSysProjectsModalOpen() ||
+      isSysPlaylistsModalOpen() ||
       isSysMidiMapModalOpen() ||
       isUsbSavePromptModalOpen() ||
       isTypePresetModalOpen() ||
@@ -852,9 +852,9 @@ FLASHMEM void pollKeys() {
     noteUserActivity();
   }
 
-  // When Project Play button lock is active, ignore all 8 front-panel buttons
+  // When Playlist Play button lock is active, ignore all 8 front-panel buttons
   // (UP/DOWN/LEFT/RIGHT/SHIFT/PLAY/OPT/EDIT); only a quick press of the power button unlocks.
-  if (isSysProjectPlayLocked()) {
+  if (isSysPlaylistPlayLocked()) {
     releaseSamplerEditHold();
     repeatDir = 0;
     scrubHoldDir = 0;
@@ -1107,13 +1107,13 @@ FLASHMEM void pollKeys() {
     return;
   }
 
-  // Modal System Settings Projects Management (/Capstan/PROJECTS/*.proj) input handling
-  if (isSysProjectsModalOpen()) {
+  // Modal System Settings Playlists Management (/Capstan/PLAYLISTS/*.plst) input handling
+  if (isSysPlaylistsModalOpen()) {
     uint8_t activeDir = pollDirectionalRepeat(pressed, now, ms, 65);
     uint8_t effPressed = (pressed & ~DIR_MASK) | activeDir;
     uint8_t effNow = now | (midiEditHeld ? BTN_EDIT : 0);
     if ((activeDir || (pressed & BTN_OPT)) && midiEditHeld) midiEditUsedAsModifier = true;
-    handleSysProjectsModalInput(effPressed, effNow, ms);
+    handleSysPlaylistsModalInput(effPressed, effNow, ms);
     if (pressed & BTN_EDIT) editUsedAsModifier = true;
     if (pressed & BTN_OPT) {
       optUsedAsModifier = true;
@@ -1697,7 +1697,7 @@ FLASHMEM uint32_t inputCurrentRepeatIntervalMs() {
     return 85u;
   }
   if (isSaveKeyboardOpen() || isSamplerBrowserOpen() || isSf2BrowserOpen() || isInstBrowserOpen() ||
-      isSysPresetsModalOpen() || isSysProjectsModalOpen() || isSysMidiMapModalOpen() ||
+      isSysPresetsModalOpen() || isSysPlaylistsModalOpen() || isSysMidiMapModalOpen() ||
       isTypePresetModalOpen() || isMidiClipBrowserOpen() || trackEditIsModalOpen()) {
     return 65u;
   }
@@ -1789,7 +1789,7 @@ FLASHMEM void inputTriggerNav(uint8_t dirBit, bool withShift) {
     return;
   }
   noteUserActivity();
-  if (isSysProjectPlayLocked()) {
+  if (isSysPlaylistPlayLocked()) {
     return;
   }
 
@@ -1886,8 +1886,8 @@ FLASHMEM void inputTriggerNav(uint8_t dirBit, bool withShift) {
     return;
   }
 
-  if (isSysProjectsModalOpen()) {
-    handleSysProjectsModalInput(pressed, now, ms);
+  if (isSysPlaylistsModalOpen()) {
+    handleSysPlaylistsModalInput(pressed, now, ms);
     if ((pressed & BTN_LEFT) && (now & BTN_SHIFT)) shiftUsedAsModifier = true;
     return;
   }
@@ -2079,14 +2079,14 @@ FLASHMEM bool inputFinishMidiEditHold() {
 }
 
 FLASHMEM bool inputStartMidiEditHoldAction() {
-  if (isScreenBlanked() || isSysProjectPlayLocked()) return false;
+  if (isScreenBlanked() || isSysPlaylistPlayLocked()) return false;
   uint32_t ms = millis();
   uint8_t hwNow = effectiveKeys();
   if (hwNow & (BTN_SHIFT | BTN_OPT)) return false;
 
   if (!isSaveKeyboardOpen() && !isSamplerKeyModalOpen() && !isSamplerBrowserOpen() &&
       !isSf2BrowserOpen() && !isInstBrowserOpen() && !isInstSaveToModalOpen() && !isSysPresetsModalOpen() &&
-      !isSysProjectsModalOpen() && !isSysMidiMapModalOpen() && !isUsbSavePromptModalOpen() &&
+      !isSysPlaylistsModalOpen() && !isSysMidiMapModalOpen() && !isUsbSavePromptModalOpen() &&
       !isTypePresetModalOpen() && !isClearTrackModalOpen() &&
       !isMidiClipBrowserOpen() && !trackEditIsModalOpen() &&
       trackEditPhase() != TrackEditPhase::DuplReveal && !isMidiNoteEditorOpen()) {
@@ -2121,7 +2121,7 @@ FLASHMEM void inputTriggerMidiOptEdit() {
     return;
   }
   noteUserActivity();
-  if (isSysProjectPlayLocked()) {
+  if (isSysPlaylistPlayLocked()) {
     return;
   }
 
@@ -2133,8 +2133,8 @@ FLASHMEM void inputTriggerMidiOptEdit() {
     return;
   }
 
-  if (isSysProjectsModalOpen()) {
-    handleSysProjectsModalInput(BTN_EDIT | BTN_OPT, BTN_EDIT | BTN_OPT, ms);
+  if (isSysPlaylistsModalOpen()) {
+    handleSysPlaylistsModalInput(BTN_EDIT | BTN_OPT, BTN_EDIT | BTN_OPT, ms);
     return;
   }
 
@@ -2161,7 +2161,7 @@ FLASHMEM void inputTriggerMidiEditTap() {
     return;
   }
   noteUserActivity();
-  if (isSysProjectPlayLocked()) {
+  if (isSysPlaylistPlayLocked()) {
     return;
   }
 
@@ -2222,10 +2222,10 @@ FLASHMEM void inputTriggerMidiEditTap() {
     return;
   }
 
-  if (isSysProjectsModalOpen()) {
-    handleSysProjectsModalInput(BTN_EDIT, (hwNow & ~BTN_EDIT) | BTN_EDIT, ms);
-    if (isSysProjectsModalOpen()) {
-      handleSysProjectsModalInput(0, hwNow & ~BTN_EDIT, ms);
+  if (isSysPlaylistsModalOpen()) {
+    handleSysPlaylistsModalInput(BTN_EDIT, (hwNow & ~BTN_EDIT) | BTN_EDIT, ms);
+    if (isSysPlaylistsModalOpen()) {
+      handleSysPlaylistsModalInput(0, hwNow & ~BTN_EDIT, ms);
     }
     return;
   }

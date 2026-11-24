@@ -115,6 +115,7 @@ void samplerResetAll();
 void samplerClearSlot(int instIdx);
 void samplerCopySlot(int instIdx);
 void samplerPasteSlot(int instIdx);
+void samplerRemoveClipboardFile();
 void samplerSilenceInst(int instIdx);
 void samplerStopAllStreams();
 void samplerRemapSongFolder(const char *oldSongName, const char *newSongName);

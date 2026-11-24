@@ -291,16 +291,16 @@ def verify_dma_and_storage_source_invariants():
         and '"METRONOME VOLUME"' in page_sys_cpp
         and '"HEADPHONE GAIN"' not in page_sys_cpp
         and '"INSTRUMENT PRESETS"' in page_sys_cpp
-        and '"PROJECTS"' in page_sys_cpp
+        and '"PLAYLISTS"' in page_sys_cpp
         and '"MIDI MAPPINGS"' in page_sys_cpp
         and '"MANAGE"' in page_sys_cpp
         and '"USB CHARGE WHILE ON"' in page_sys_cpp
         and '"USB STORAGE DRIVE"' in page_sys_cpp
         and page_sys_cpp.index('"USB CHARGE WHILE ON"') < page_sys_cpp.index('"USB STORAGE DRIVE"')
         and '"Delete preset?"' in page_sys_cpp
-        and '"Delete project?"' in page_sys_cpp
+        and '"Delete playlist?"' in page_sys_cpp
         and '"Remove song?"' in page_sys_cpp
-        and 'PROJECTS_DIR = "/Capstan/PROJECTS"' in config_h
+        and 'PLAYLISTS_DIR = "/Capstan/PLAYLISTS"' in config_h
         and 'return "SYS | v" CAPSTAN_VERSION;' in page_sys_cpp
         and 'SPLASH_VER_TEXT[] = "v" CAPSTAN_VERSION;' in ui_splash_cpp
         and "'87" not in ui_splash_cpp
@@ -309,7 +309,7 @@ def verify_dma_and_storage_source_invariants():
         and "SSET_BRIGHTNESS    = 0" in (SRC_DIR / "app.h").read_text(encoding="utf-8")
         and "SSET_METRO_VOL     = 1" in (SRC_DIR / "app.h").read_text(encoding="utf-8")
         and "SSET_INST_PRESETS  = 2" in (SRC_DIR / "app.h").read_text(encoding="utf-8")
-        and "SSET_PROJECTS      = 3" in (SRC_DIR / "app.h").read_text(encoding="utf-8")
+        and "SSET_PLAYLISTS     = 3" in (SRC_DIR / "app.h").read_text(encoding="utf-8")
         and "SSET_MIDI_MAP      = 4" in (SRC_DIR / "app.h").read_text(encoding="utf-8")
         and "SSET_USB_CHARGE_ON = 5" in (SRC_DIR / "app.h").read_text(encoding="utf-8")
         and "SSET_USB_DRIVE     = 6" in (SRC_DIR / "app.h").read_text(encoding="utf-8")
@@ -342,7 +342,7 @@ def verify_dma_and_storage_source_invariants():
         and "usbMonitor = MonitorMode::On" in storage_h
         and "usbInputMonitor = true" in storage_h
         and "midiClockOut = MidiClockOut::Off" in storage_h,
-        "System Settings displays 'SYS | vX.Y' header with Brightness (5..100, default 50), Metronome Volume (0..100, default 80), Instrument Presets, Projects, MIDI Mappings, and USB Storage Drive (no Headphone Gain row)",
+        "System Settings displays 'SYS | vX.Y' header with Brightness (5..100, default 50), Metronome Volume (0..100, default 80), Instrument Presets, Playlists, MIDI Mappings, and USB Storage Drive (no Headphone Gain row)",
     )
 
     # 1i. USB Audio (2-ch Stereo Out / 2-ch Stereo In UAC2), Dynamic USB Mass Storage, & USB MIDI invariants

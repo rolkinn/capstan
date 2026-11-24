@@ -300,7 +300,7 @@ FLASHMEM void midiInService() {
     restoreIrq(irq);
 
     noteUserActivity();
-    if (!transportEnabled || isSysProjectPlayLocked()) continue;
+    if (!transportEnabled || isSysPlaylistPlayLocked()) continue;
 
     switch (e.type) {
       case 0xFA: // MIDI Start

@@ -72,16 +72,16 @@ bool deleteSongByName(const char *name);
 bool deleteSongAt(int index);
 uint32_t songMaxFrames();                // max recordedFrames across tracks (or at least 16 bars for ruler)
 
-// Project files (/Capstan/PROJECTS/<NAME>.proj — ordered list of song names)
-int projectCount();
-const char *projectNameAt(int index);
-int findProjectIndex(const char *name);
-void scanProjectFiles();
-bool createEmptyProjectFile(const char *name, char *outCleanName = nullptr, size_t outSz = 0);
-bool renameProjectFile(const char *oldName, const char *newName, char *outCleanName = nullptr, size_t outSz = 0);
-bool deleteProjectFile(const char *name);
-int loadProjectSongs(const char *projName, char outSongs[][MAX_SONG_NAME_LEN + 1], int maxSongs);
-bool saveProjectSongs(const char *projName, const char songs[][MAX_SONG_NAME_LEN + 1], int count);
+// Playlist files (/Capstan/PLAYLISTS/<NAME>.plst — ordered list of song names)
+int playlistCount();
+const char *playlistNameAt(int index);
+int findPlaylistIndex(const char *name);
+void scanPlaylistFiles();
+bool createEmptyPlaylistFile(const char *name, char *outCleanName = nullptr, size_t outSz = 0);
+bool renamePlaylistFile(const char *oldName, const char *newName, char *outCleanName = nullptr, size_t outSz = 0);
+bool deletePlaylistFile(const char *name);
+int loadPlaylistSongs(const char *playlistName, char outSongs[][MAX_SONG_NAME_LEN + 1], int maxSongs);
+bool savePlaylistSongs(const char *playlistName, const char songs[][MAX_SONG_NAME_LEN + 1], int count);
 
 // Tape transport & recording control from app / UI
 void prefillTrackStreams(uint32_t fromTapeFrame);

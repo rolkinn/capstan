@@ -1315,6 +1315,15 @@ FLASHMEM void samplerClearKey(int instIdx, int keyIdx) {
   samplerPopulatedMask[instIdx] &= ~(1ULL << keyIdx);
 }
 
+FLASHMEM void samplerRemoveClipboardFile() {
+  if (clipboardSamplerSrcSlot == -2) {
+    clipboardSamplerSrcSlot = -1;
+  }
+  if (SD.sdfs.card() && SD.sdfs.exists(CLIP_SAMPLER_PATH)) {
+    SD.sdfs.remove(CLIP_SAMPLER_PATH);
+  }
+}
+
 FLASHMEM void samplerResetAll() {
   browserOpen = false;
   invalidateCachedStreamsForKey(-1, -1);
@@ -1323,6 +1332,7 @@ FLASHMEM void samplerResetAll() {
   memset(samplerKeyFile, 0, sizeof(samplerKeyFile));
   memset(samplerPopulatedMask, 0, sizeof(samplerPopulatedMask));
   clipboardSamplerSrcSlot = -1;
+  samplerRemoveClipboardFile();
 }
 
 FLASHMEM void samplerClearSlot(int instIdx) {
@@ -1336,7 +1346,10 @@ FLASHMEM void samplerClearSlot(int instIdx) {
 
 FLASHMEM void samplerCopySlot(int instIdx) {
   if (instIdx < 0 || instIdx >= NUM_INSTRUMENTS) return;
-  clipboardSamplerSrcSlot = (int8_t)instIdx;
+  samplerRemoveClipboardFile();
+  clipboardSamplerSrcSlot = ((InstType)fmSynthPatch(instIdx).type == InstType::Sampler)
+      ? (int8_t)instIdx
+      : (int8_t)-1;
 }
 
 FLASHMEM void samplerPasteSlot(int instIdx) {
@@ -1364,8 +1377,13 @@ FLASHMEM void samplerPasteSlot(int instIdx) {
       SD.sdfs.remove(CLIP_SAMPLER_PATH);
     }
     rebuildSamplerSlotMask(instIdx);
+  } else {
+    memset(samplerKeyDirIdx[instIdx], 0xFF, sizeof(samplerKeyDirIdx[instIdx]));
+    memset(samplerKeyFile[instIdx], 0, sizeof(samplerKeyFile[instIdx]));
+    samplerPopulatedMask[instIdx] = 0;
   }
   clipboardSamplerSrcSlot = -1;
+  samplerRemoveClipboardFile();
 }
 
 FLASHMEM void samplerRemapSongFolder(const char *oldSongName, const char *newSongName) {

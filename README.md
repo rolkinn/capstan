@@ -83,13 +83,13 @@ Notes:
 
 ## 4. SD Card Directory Structure (`/Capstan`)
 
-Capstan stores all system settings, songs, projects, and presets inside `/Capstan`:
+Capstan stores all system settings, songs, playlists, and presets inside `/Capstan`:
 
 ```text
 /Capstan/
 ├── SYSTEM.DAT                        # Brightness, Metronome Vol, Last Song, Global MIDI CC Map
-├── PROJECTS/
-│   └── <PROJECT>.proj                # Ordered song setlists for album-style playback
+├── PLAYLISTS/
+│   └── <PLAYLIST>.plst               # Ordered song setlists for album-style playback
 ├── INSTRUMENT_PRESETS/
 │   └── <PRESET>.FMI                  # Global instrument patches
 └── SONGS/

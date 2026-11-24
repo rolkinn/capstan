@@ -533,7 +533,7 @@ bool midiMapIsCcIntercepted(uint8_t inCh1To16, uint8_t cc) {
 }
 
 FLASHMEM static void executeTargetAction(int targetId, uint8_t val) {
-  if (isSysProjectPlayLocked()) return;
+  if (isSysPlaylistPlayLocked()) return;
   SongSettings &ps = songSettings();
 
   if (targetId >= MIDI_TGT_IN_FX_BASE) {
@@ -673,7 +673,7 @@ FLASHMEM static void executeTargetAction(int targetId, uint8_t val) {
         }
         int prevSq = (int)transport.speedQuarter;
         appSetPlaybackSpeedQuarter(nextSq);
-        sysProjectPlayOnSpeedChanged((int8_t)transport.speedQuarter);
+        sysPlaylistPlayOnSpeedChanged((int8_t)transport.speedQuarter);
         if ((int)transport.speedQuarter != prevSq) {
           requestContinuousCcUiRedraw();
         }
@@ -774,7 +774,7 @@ FLASHMEM static void executeTargetAction(int targetId, uint8_t val) {
       uint8_t v = (uint8_t)(((int)val * MASTER_VOLUME_MAX + 63) / 127);
       if (ps.masterVolume != v) {
         appSetMasterVolume(v);
-        sysProjectPlayOnMasterVolChanged(v);
+        sysPlaylistPlayOnMasterVolChanged(v);
         saveSessionWhenIdle();
         changed = true;
       }
@@ -905,7 +905,7 @@ FLASHMEM bool midiMapHandleCc(uint8_t inCh1To16, uint8_t cc, uint8_t val) {
 
   const uint16_t chBit = (uint16_t)(1u << (inCh1To16 - 1));
   bool instMatched = false;
-  if (!isSysProjectPlayLocked() && (instMappedCcChMask[cc] & chBit) != 0) {
+  if (!isSysPlaylistPlayLocked() && (instMappedCcChMask[cc] & chBit) != 0) {
     instMatched = instMidiMapHandleExternalCc(inCh1To16, cc, val);
   }
 
@@ -929,7 +929,7 @@ FLASHMEM bool midiMapHandleCc(uint8_t inCh1To16, uint8_t cc, uint8_t val) {
     if (inLearnCooldown) continue;
 
     if (i == MIDI_TGT_REW || i == MIDI_TGT_FF) {
-      if (isSysProjectPlayLocked()) {
+      if (isSysPlaylistPlayLocked()) {
         midiScrubDir = 0;
         midiScrubFracFrames = 0.0f;
         lastRewFfTapDir = 0;
@@ -1142,7 +1142,7 @@ FLASHMEM void midiMapService() {
   }
 
   if (midiScrubDir == 0) return;
-  if (isSysProjectPlayLocked()) {
+  if (isSysPlaylistPlayLocked()) {
     midiScrubDir = 0;
     midiScrubFracFrames = 0.0f;
     return;

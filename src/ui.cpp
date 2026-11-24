@@ -1071,7 +1071,7 @@ PROGMEM static const char *const KB_LABELS[KB_GRID_ROWS][KB_GRID_COLS] = {
 FLASHMEM void drawSaveKeyboardModal(bool full) {
   const KeyboardTarget tgt = saveKeyboardTarget();
   const bool isInst = (tgt == KeyboardTarget::Instrument);
-  const bool isProj = (tgt == KeyboardTarget::ProjectNew || tgt == KeyboardTarget::ProjectRename);
+  const bool isPlaylist = (tgt == KeyboardTarget::PlaylistNew || tgt == KeyboardTarget::PlaylistRename);
 
   // 1. Name Input Box
   {
@@ -1081,9 +1081,9 @@ FLASHMEM void drawSaveKeyboardModal(bool full) {
     char countStr[12];
     snprintf(countStr, sizeof(countStr), "%d/%d", len, MAX_SONG_NAME_LEN);
     const char *prompt = isInst ? "INST NAME:"
-                       : (tgt == KeyboardTarget::ProjectNew) ? "NEW PROJ:"
-                       : (tgt == KeyboardTarget::ProjectRename) ? "RENAME:"
-                                                                : "SAVE AS:";
+                       : (tgt == KeyboardTarget::PlaylistNew) ? "PLAYLIST:"
+                       : (tgt == KeyboardTarget::PlaylistRename) ? "RENAME:"
+                                                                 : "SAVE AS:";
 
     uint64_t bk = hashStr(hashInit(), disp);
     bk = hashStr(bk, prompt);
@@ -1131,7 +1131,7 @@ FLASHMEM void drawSaveKeyboardModal(bool full) {
   }
 
   // 3. Bottom Action Row: [ SAVE SONG / SAVE NAME / SAVE ] and [ CANCEL ]
-  const char *btn0 = isInst ? "SAVE NAME" : (isProj ? "SAVE" : "SAVE SONG");
+  const char *btn0 = isInst ? "SAVE NAME" : (isPlaylist ? "SAVE" : "SAVE SONG");
   for (int b = 0; b < 2; b++) {
     const char *btnTitle = (b == 0) ? btn0 : "CANCEL";
     int x = (b == 0) ? SX(6) : SX(164);
@@ -1468,7 +1468,7 @@ FLASHMEM static void clearPageBodyGutters(Page pg) {
 
 FLASHMEM void uiRefresh() {
   static uint32_t lastRefreshMs = 0;
-  sysProjectPlayService();
+  sysPlaylistPlayService();
   uint32_t now = millis();
   if (lastActivityMs == 0) {
     lastActivityMs = now;
@@ -1500,7 +1500,7 @@ FLASHMEM void uiRefresh() {
   static bool lastSysPresetsOpen = false;
   static bool lastSysPresetDelOpen = false;
   static bool lastUsbSavePromptOpen = false;
-  static uint8_t lastSysProjState = 0;
+  static uint8_t lastSysPlaylistState = 0;
   static bool lastSysMidiMapOpen = false;
   static bool lastTypePresetOpen = false;
   static bool lastMidiBrowserOpen = false;
@@ -1523,8 +1523,8 @@ FLASHMEM void uiRefresh() {
   bool sysPresetDelOpen = isSysPresetDeleteConfirmOpen() &&
                           (pg == Page::SystemSettings || pg == Page::SongSettings);
   bool usbSavePromptOpen = isUsbSavePromptModalOpen() && (pg == Page::SystemSettings);
-  uint8_t sysProjState = (pg == Page::SystemSettings) ? sysProjectsModalState() : 0;
-  bool sysProjConfirmOpen = isSysProjectsConfirmOpen() && (pg == Page::SystemSettings);
+  uint8_t sysPlaylistState = (pg == Page::SystemSettings) ? sysPlaylistsModalState() : 0;
+  bool sysPlaylistConfirmOpen = isSysPlaylistsConfirmOpen() && (pg == Page::SystemSettings);
   bool sysMidiMapOpen = isSysMidiMapModalOpen() && (pg == Page::SystemSettings);
   bool typePresetOpen = isTypePresetModalOpen() && (pg == Page::InstrumentType);
   bool midiBrowserOpen = isMidiClipBrowserOpen() && (pg == Page::Midi || pg == Page::Audio);
@@ -1541,7 +1541,7 @@ FLASHMEM void uiRefresh() {
                        (instBrowserOpen != lastInstBrowserOpen) || (instSaveToOpen != lastInstSaveToOpen) ||
                        (instMidiMapOpen != lastInstMidiMapOpen) ||
                        (sysPresetsOpen != lastSysPresetsOpen) || (sysPresetDelOpen != lastSysPresetDelOpen) ||
-                       (usbSavePromptOpen != lastUsbSavePromptOpen) || (sysProjState != lastSysProjState) ||
+                       (usbSavePromptOpen != lastUsbSavePromptOpen) || (sysPlaylistState != lastSysPlaylistState) ||
                        (sysMidiMapOpen != lastSysMidiMapOpen) ||
                        (typePresetOpen != lastTypePresetOpen) || (midiBrowserOpen != lastMidiBrowserOpen) ||
                        (songSubSt != lastSongSubState));
@@ -1554,7 +1554,7 @@ FLASHMEM void uiRefresh() {
     uiFramePhase++;
   }
 
-  const bool projPlayChanged = ((sysProjState == 4) != (lastSysProjState == 4));
+  const bool playlistPlayChanged = ((sysPlaylistState == 4) != (lastSysPlaylistState == 4));
   bool headerDrawnFull = false;
   if (pageOrScreenChanged) {
     keepStreaming(true);
@@ -1573,20 +1573,20 @@ FLASHMEM void uiRefresh() {
     lastSysPresetsOpen = sysPresetsOpen;
     lastSysPresetDelOpen = sysPresetDelOpen;
     lastUsbSavePromptOpen = usbSavePromptOpen;
-    lastSysProjState = sysProjState;
+    lastSysPlaylistState = sysPlaylistState;
     lastSysMidiMapOpen = sysMidiMapOpen;
     lastTypePresetOpen = typePresetOpen;
     lastMidiBrowserOpen = midiBrowserOpen;
     lastSongSubState = songSubSt;
     invalidateUiCache();
-    if (sysProjState != 4) {
+    if (sysPlaylistState != 4) {
       drawHeaderBar(true);
       headerDrawnFull = true;
       const bool hasModalOrSubview =
           kbOpen || teModalOpen || clearModalOpen || noteEdOpen || smpBrowserOpen ||
           (sf2BrowserSt != 0) || (smpKeyModalSt != 0) || instBrowserOpen || instSaveToOpen ||
           instMidiMapOpen || sysPresetsOpen || sysPresetDelOpen || usbSavePromptOpen ||
-          (sysProjState != 0) || sysProjConfirmOpen || sysMidiMapOpen || typePresetOpen ||
+          (sysPlaylistState != 0) || sysPlaylistConfirmOpen || sysMidiMapOpen || typePresetOpen ||
           midiBrowserOpen || (songSubSt != 0);
       if (hasModalOrSubview) {
         uiClearRegionStreaming(SY(24), SCREEN_H - SY(24), BG);
@@ -1611,14 +1611,14 @@ FLASHMEM void uiRefresh() {
     lastSysPresetsOpen = sysPresetsOpen;
     lastSysPresetDelOpen = sysPresetDelOpen;
     lastUsbSavePromptOpen = usbSavePromptOpen;
-    lastSysProjState = sysProjState;
+    lastSysPlaylistState = sysPlaylistState;
     lastSysMidiMapOpen = sysMidiMapOpen;
     lastTypePresetOpen = typePresetOpen;
     lastMidiBrowserOpen = midiBrowserOpen;
     lastSongSubState = songSubSt;
     invalidateUiCache();
-    if (projPlayChanged) {
-      if (sysProjState != 4) {
+    if (playlistPlayChanged) {
+      if (sysPlaylistState != 4) {
         drawHeaderBar(true);
         headerDrawnFull = true;
         uiClearRegionStreaming(SY(24), SCREEN_H - SY(24), BG);
@@ -1630,7 +1630,7 @@ FLASHMEM void uiRefresh() {
     }
   }
 
-  if (sysProjState != 4 && !headerDrawnFull) {
+  if (sysPlaylistState != 4 && !headerDrawnFull) {
     drawHeaderBar(false);
   }
   keepStreaming();
@@ -1651,11 +1651,11 @@ FLASHMEM void uiRefresh() {
       ops.drawPage(true);
     }
     drawSysPresetDeleteConfirmModal(pageOrScreenChanged || modalChanged);
-  } else if (sysProjConfirmOpen) {
+  } else if (sysPlaylistConfirmOpen) {
     if ((pageOrScreenChanged || modalChanged) && ops.drawPage) {
       ops.drawPage(true);
     }
-    drawSysProjectsConfirmModal(pageOrScreenChanged || modalChanged);
+    drawSysPlaylistsConfirmModal(pageOrScreenChanged || modalChanged);
   } else if (usbSavePromptOpen) {
     if ((pageOrScreenChanged || modalChanged) && ops.drawPage) {
       ops.drawPage(true);

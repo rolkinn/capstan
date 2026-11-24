@@ -106,7 +106,7 @@ FLASHMEM static void sanitizeSongName(const char *in, char *out, size_t outSz) {
 FLASHMEM static void ensureSongsRootDir() {
   if (!SD.sdfs.exists(ROOT_DIR)) SD.sdfs.mkdir(ROOT_DIR);
   if (!SD.sdfs.exists(SONGS_DIR)) SD.sdfs.mkdir(SONGS_DIR);
-  if (!SD.sdfs.exists(PROJECTS_DIR)) SD.sdfs.mkdir(PROJECTS_DIR);
+  if (!SD.sdfs.exists(PLAYLISTS_DIR)) SD.sdfs.mkdir(PLAYLISTS_DIR);
 }
 
 FLASHMEM static void songDirByName(const char *name, char *out, size_t sz) {
@@ -722,53 +722,53 @@ FLASHMEM void scanSongFolders() {
 }
 
 // ============================================================================
-// Project Files (/Capstan/PROJECTS/<NAME>.proj — Ordered List of Song Names)
+// Playlist Files (/Capstan/PLAYLISTS/<NAME>.plst — Ordered List of Song Names)
 // ============================================================================
-DMAMEM static char projectList[MAX_PROJECTS][MAX_PROJECT_NAME_LEN + 1];
-static int numSavedProjects = 0;
+DMAMEM static char playlistList[MAX_PLAYLISTS][MAX_PLAYLIST_NAME_LEN + 1];
+static int numSavedPlaylists = 0;
 
-FLASHMEM static void projectFileByName(const char *name, char *out, size_t sz) {
-  snprintf(out, sz, "%s/%s.proj", PROJECTS_DIR, name);
+FLASHMEM static void playlistFileByName(const char *name, char *out, size_t sz) {
+  snprintf(out, sz, "%s/%s.plst", PLAYLISTS_DIR, name);
 }
 
-FLASHMEM int projectCount() {
-  return numSavedProjects;
+FLASHMEM int playlistCount() {
+  return numSavedPlaylists;
 }
 
-FLASHMEM const char *projectNameAt(int index) {
-  if (index < 0 || index >= numSavedProjects) return "";
-  return projectList[index];
+FLASHMEM const char *playlistNameAt(int index) {
+  if (index < 0 || index >= numSavedPlaylists) return "";
+  return playlistList[index];
 }
 
-FLASHMEM int findProjectIndex(const char *name) {
+FLASHMEM int findPlaylistIndex(const char *name) {
   if (!name || !name[0]) return -1;
-  for (int i = 0; i < numSavedProjects; i++) {
-    if (strcasecmp(projectList[i], name) == 0) return i;
+  for (int i = 0; i < numSavedPlaylists; i++) {
+    if (strcasecmp(playlistList[i], name) == 0) return i;
   }
   return -1;
 }
 
-FLASHMEM static void nextDefaultProjectName(char *out, size_t sz) {
+FLASHMEM static void nextDefaultPlaylistName(char *out, size_t sz) {
   for (int n = 1; n <= 999; n++) {
-    char cand[MAX_PROJECT_NAME_LEN + 1];
-    snprintf(cand, sizeof(cand), "PROJ_%03u", (unsigned)(n % 1000));
-    if (findProjectIndex(cand) < 0) {
+    char cand[MAX_PLAYLIST_NAME_LEN + 1];
+    snprintf(cand, sizeof(cand), "LIST_%03u", (unsigned)(n % 1000));
+    if (findPlaylistIndex(cand) < 0) {
       char pPath[64];
-      projectFileByName(cand, pPath, sizeof(pPath));
+      playlistFileByName(cand, pPath, sizeof(pPath));
       if (!SD.sdfs.exists(pPath)) {
         snprintf(out, sz, "%s", cand);
         return;
       }
     }
   }
-  snprintf(out, sz, "PROJ_001");
+  snprintf(out, sz, "LIST_001");
 }
 
-FLASHMEM void scanProjectFiles() {
-  numSavedProjects = 0;
+FLASHMEM void scanPlaylistFiles() {
+  numSavedPlaylists = 0;
   ensureSongsRootDir();
 
-  FsFile dir = SD.sdfs.open(PROJECTS_DIR, O_RDONLY);
+  FsFile dir = SD.sdfs.open(PLAYLISTS_DIR, O_RDONLY);
   if (!dir.isOpen()) return;
 
   FsFile entry;
@@ -780,45 +780,45 @@ FLASHMEM void scanProjectFiles() {
 
     if (isSubDir || nameBuf[0] == '\0' || nameBuf[0] == '.') continue;
     size_t len = strlen(nameBuf);
-    if (len < 6 || strcasecmp(nameBuf + len - 5, ".proj") != 0) continue;
+    if (len < 6 || strcasecmp(nameBuf + len - 5, ".plst") != 0) continue;
 
     size_t baseLen = len - 5;
-    if (baseLen > MAX_PROJECT_NAME_LEN) continue;
-    char base[MAX_PROJECT_NAME_LEN + 1] = {};
+    if (baseLen > MAX_PLAYLIST_NAME_LEN) continue;
+    char base[MAX_PLAYLIST_NAME_LEN + 1] = {};
     memcpy(base, nameBuf, baseLen);
     base[baseLen] = '\0';
 
-    char clean[MAX_PROJECT_NAME_LEN + 1] = {};
+    char clean[MAX_PLAYLIST_NAME_LEN + 1] = {};
     sanitizeSongName(base, clean, sizeof(clean));
     if (clean[0] == '\0' || strcasecmp(clean, base) != 0) continue;
 
-    if (numSavedProjects < MAX_PROJECTS) {
-      snprintf(projectList[numSavedProjects], MAX_PROJECT_NAME_LEN + 1, "%s", clean);
-      numSavedProjects++;
+    if (numSavedPlaylists < MAX_PLAYLISTS) {
+      snprintf(playlistList[numSavedPlaylists], MAX_PLAYLIST_NAME_LEN + 1, "%s", clean);
+      numSavedPlaylists++;
     }
   }
   dir.close();
 
-  for (int i = 1; i < numSavedProjects; i++) {
-    char key[MAX_PROJECT_NAME_LEN + 1];
-    memcpy(key, projectList[i], sizeof(key));
+  for (int i = 1; i < numSavedPlaylists; i++) {
+    char key[MAX_PLAYLIST_NAME_LEN + 1];
+    memcpy(key, playlistList[i], sizeof(key));
     int j = i - 1;
-    while (j >= 0 && strcasecmp(projectList[j], key) > 0) {
-      memcpy(projectList[j + 1], projectList[j], sizeof(key));
+    while (j >= 0 && strcasecmp(playlistList[j], key) > 0) {
+      memcpy(playlistList[j + 1], playlistList[j], sizeof(key));
       j--;
     }
-    memcpy(projectList[j + 1], key, sizeof(key));
+    memcpy(playlistList[j + 1], key, sizeof(key));
   }
 }
 
-FLASHMEM bool saveProjectSongs(const char *projName, const char songs[][MAX_SONG_NAME_LEN + 1], int count) {
-  char clean[MAX_PROJECT_NAME_LEN + 1] = {};
-  sanitizeSongName(projName, clean, sizeof(clean));
+FLASHMEM bool savePlaylistSongs(const char *playlistName, const char songs[][MAX_SONG_NAME_LEN + 1], int count) {
+  char clean[MAX_PLAYLIST_NAME_LEN + 1] = {};
+  sanitizeSongName(playlistName, clean, sizeof(clean));
   if (clean[0] == '\0') return false;
 
   ensureSongsRootDir();
   char pPath[64];
-  projectFileByName(clean, pPath, sizeof(pPath));
+  playlistFileByName(clean, pPath, sizeof(pPath));
 
   // Stage text content through RAM1 chunk for DMA_SDIO safety
   char *buf = reinterpret_cast<char *>(chunk);
@@ -826,7 +826,7 @@ FLASHMEM bool saveProjectSongs(const char *projName, const char songs[][MAX_SONG
   size_t pos = 0;
 
   if (songs != nullptr && count > 0) {
-    int limit = min(count, MAX_SONGS_PER_PROJECT);
+    int limit = min(count, MAX_SONGS_PER_PLAYLIST);
     for (int i = 0; i < limit; i++) {
       char sClean[MAX_SONG_NAME_LEN + 1] = {};
       sanitizeSongName(songs[i], sClean, sizeof(sClean));
@@ -852,14 +852,14 @@ FLASHMEM bool saveProjectSongs(const char *projName, const char songs[][MAX_SONG
   return ok;
 }
 
-FLASHMEM int loadProjectSongs(const char *projName, char outSongs[][MAX_SONG_NAME_LEN + 1], int maxSongs) {
+FLASHMEM int loadPlaylistSongs(const char *playlistName, char outSongs[][MAX_SONG_NAME_LEN + 1], int maxSongs) {
   if (!outSongs || maxSongs <= 0) return 0;
-  char clean[MAX_PROJECT_NAME_LEN + 1] = {};
-  sanitizeSongName(projName, clean, sizeof(clean));
+  char clean[MAX_PLAYLIST_NAME_LEN + 1] = {};
+  sanitizeSongName(playlistName, clean, sizeof(clean));
   if (clean[0] == '\0') return 0;
 
   char pPath[64];
-  projectFileByName(clean, pPath, sizeof(pPath));
+  playlistFileByName(clean, pPath, sizeof(pPath));
   FsFile f = SD.sdfs.open(pPath, O_RDONLY);
   if (!f.isOpen()) return 0;
 
@@ -892,26 +892,26 @@ FLASHMEM int loadProjectSongs(const char *projName, char outSongs[][MAX_SONG_NAM
   return count;
 }
 
-FLASHMEM bool createEmptyProjectFile(const char *name, char *outCleanName, size_t outSz) {
+FLASHMEM bool createEmptyPlaylistFile(const char *name, char *outCleanName, size_t outSz) {
   ensureSongsRootDir();
-  scanProjectFiles();
+  scanPlaylistFiles();
 
-  char clean[MAX_PROJECT_NAME_LEN + 1] = {};
+  char clean[MAX_PLAYLIST_NAME_LEN + 1] = {};
   sanitizeSongName(name, clean, sizeof(clean));
   if (clean[0] == '\0') {
-    nextDefaultProjectName(clean, sizeof(clean));
+    nextDefaultPlaylistName(clean, sizeof(clean));
   }
-  if (!saveProjectSongs(clean, nullptr, 0)) return false;
-  scanProjectFiles();
+  if (!savePlaylistSongs(clean, nullptr, 0)) return false;
+  scanPlaylistFiles();
   if (outCleanName && outSz > 0) {
     snprintf(outCleanName, outSz, "%s", clean);
   }
   return true;
 }
 
-FLASHMEM bool renameProjectFile(const char *oldName, const char *newName, char *outCleanName, size_t outSz) {
-  char oldClean[MAX_PROJECT_NAME_LEN + 1] = {};
-  char newClean[MAX_PROJECT_NAME_LEN + 1] = {};
+FLASHMEM bool renamePlaylistFile(const char *oldName, const char *newName, char *outCleanName, size_t outSz) {
+  char oldClean[MAX_PLAYLIST_NAME_LEN + 1] = {};
+  char newClean[MAX_PLAYLIST_NAME_LEN + 1] = {};
   sanitizeSongName(oldName, oldClean, sizeof(oldClean));
   sanitizeSongName(newName, newClean, sizeof(newClean));
   if (oldClean[0] == '\0' || newClean[0] == '\0') return false;
@@ -922,32 +922,32 @@ FLASHMEM bool renameProjectFile(const char *oldName, const char *newName, char *
   }
 
   char oldPath[64], newPath[64];
-  projectFileByName(oldClean, oldPath, sizeof(oldPath));
-  projectFileByName(newClean, newPath, sizeof(newPath));
+  playlistFileByName(oldClean, oldPath, sizeof(oldPath));
+  playlistFileByName(newClean, newPath, sizeof(newPath));
   if (!SD.sdfs.exists(oldPath)) return false;
   if (SD.sdfs.exists(newPath)) {
     SD.sdfs.remove(newPath);
   }
   if (!SD.sdfs.rename(oldPath, newPath)) return false;
   syncSdCard();
-  scanProjectFiles();
+  scanPlaylistFiles();
   if (outCleanName && outSz > 0) {
     snprintf(outCleanName, outSz, "%s", newClean);
   }
   return true;
 }
 
-FLASHMEM bool deleteProjectFile(const char *name) {
-  char clean[MAX_PROJECT_NAME_LEN + 1] = {};
+FLASHMEM bool deletePlaylistFile(const char *name) {
+  char clean[MAX_PLAYLIST_NAME_LEN + 1] = {};
   sanitizeSongName(name, clean, sizeof(clean));
   if (clean[0] == '\0') return false;
 
   char pPath[64];
-  projectFileByName(clean, pPath, sizeof(pPath));
+  playlistFileByName(clean, pPath, sizeof(pPath));
   if (!SD.sdfs.exists(pPath)) return false;
   bool ok = SD.sdfs.remove(pPath);
   syncSdCard();
-  scanProjectFiles();
+  scanPlaylistFiles();
   return ok;
 }
 
@@ -3751,6 +3751,7 @@ FLASHMEM void flushHeaders() {
   storageStopTransport();
   trackEditReset();
   samplerStopAllStreams();
+  samplerRemoveClipboardFile();
   sf2StopAllStreams();
   lastSessionWasSaved = songSaved;
   discardUnsavedSessionChanges(nullptr);
@@ -3774,10 +3775,11 @@ FLASHMEM bool storageBegin(void (*progress)(const char *)) {
   midiSeqInit();
   midiMapInit();
   fmSynthInit();
+  storageRemoveClipboardFiles();
   songSaved = true; // allow boot scan to clean up any orphaned unsaved folders
   loadSystemSettingsFromDisk();
   scanSongFolders();
-  scanProjectFiles();
+  scanPlaylistFiles();
 
   if (progress) progress("Loading song...");
   if (lastSessionWasSaved && activeSongName[0] != '\0' && findSongIndex(activeSongName) >= 0) {

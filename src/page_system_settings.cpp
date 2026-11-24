@@ -16,105 +16,105 @@ static uint64_t prevUsbSavePromptKey = 0;
 static bool usbSavePromptOpen = false;
 static int usbSavePromptCursor = 0; // 0 = YES, 1 = NO
 
-// Projects Modal State (/Capstan/PROJECTS/*.proj)
-enum class ProjModalView : uint8_t {
-  Closed      = 0,
-  ManageList  = 1,
-  EditProject = 2,
-  AddSong     = 3,
-  PlayProject = 4
+// Playlists Modal State (/Capstan/PLAYLISTS/*.plst)
+enum class PlaylistModalView : uint8_t {
+  Closed       = 0,
+  ManageList   = 1,
+  EditPlaylist = 2,
+  AddSong      = 3,
+  PlayPlaylist = 4
 };
 
-enum ProjManageAction : int {
-  PROJ_ACT_PLAY   = 0,
-  PROJ_ACT_EDIT   = 1,
-  PROJ_ACT_RENAME = 2,
-  PROJ_ACT_DELETE = 3,
-  PROJ_ACT_COUNT  = 4
+enum PlaylistManageAction : int {
+  PLAYLIST_ACT_PLAY   = 0,
+  PLAYLIST_ACT_EDIT   = 1,
+  PLAYLIST_ACT_RENAME = 2,
+  PLAYLIST_ACT_DELETE = 3,
+  PLAYLIST_ACT_COUNT  = 4
 };
 
-enum ProjEditRowAction : int {
-  PROJ_EDIT_ACT_ADD    = 0,
-  PROJ_EDIT_ACT_REMOVE = 1,
-  PROJ_EDIT_ACT_COUNT  = 2
+enum PlaylistEditRowAction : int {
+  PLAYLIST_EDIT_ACT_ADD    = 0,
+  PLAYLIST_EDIT_ACT_REMOVE = 1,
+  PLAYLIST_EDIT_ACT_COUNT  = 2
 };
 
-enum ProjPlayZone : uint8_t {
-  PROJ_PLAY_ZONE_CONTROLS = 0,
-  PROJ_PLAY_ZONE_LIST     = 1,
-  PROJ_PLAY_ZONE_EXIT     = 2
+enum PlaylistPlayZone : uint8_t {
+  PLAYLIST_PLAY_ZONE_CONTROLS = 0,
+  PLAYLIST_PLAY_ZONE_LIST     = 1,
+  PLAYLIST_PLAY_ZONE_EXIT     = 2
 };
 
-enum ProjPlayCtrlCol : uint8_t {
-  PROJ_PLAY_CTRL_PREV  = 0,
-  PROJ_PLAY_CTRL_PLAY  = 1,
-  PROJ_PLAY_CTRL_NEXT  = 2,
-  PROJ_PLAY_CTRL_VOL   = 3,
-  PROJ_PLAY_CTRL_COUNT = 4
+enum PlaylistPlayCtrlCol : uint8_t {
+  PLAYLIST_PLAY_CTRL_PREV  = 0,
+  PLAYLIST_PLAY_CTRL_PLAY  = 1,
+  PLAYLIST_PLAY_CTRL_NEXT  = 2,
+  PLAYLIST_PLAY_CTRL_VOL   = 3,
+  PLAYLIST_PLAY_CTRL_COUNT = 4
 };
 
-static constexpr int PROJ_MANAGE_VISIBLE_ROWS = 7;
-static constexpr int PROJ_EDIT_VISIBLE_ROWS   = 6;
-static constexpr int PROJ_ADD_VISIBLE_ROWS    = 7;
-static constexpr int PROJ_PLAY_VISIBLE_ROWS   = 5;
+static constexpr int PLAYLIST_MANAGE_VISIBLE_ROWS = 7;
+static constexpr int PLAYLIST_EDIT_VISIBLE_ROWS   = 6;
+static constexpr int PLAYLIST_ADD_VISIBLE_ROWS    = 7;
+static constexpr int PLAYLIST_PLAY_VISIBLE_ROWS   = 5;
 
-static ProjModalView projModalView = ProjModalView::Closed;
-static int projManageCursor = 0;
-static int projManageScroll = 0;
-static int projManageCol = PROJ_ACT_PLAY;
+static PlaylistModalView playlistModalView = PlaylistModalView::Closed;
+static int playlistManageCursor = 0;
+static int playlistManageScroll = 0;
+static int playlistManageCol = PLAYLIST_ACT_PLAY;
 
-enum class ProjConfirmKind : uint8_t {
-  DeleteProject  = 0,
+enum class PlaylistConfirmKind : uint8_t {
+  DeletePlaylist = 0,
   RemoveSong     = 1,
   SaveBeforePlay = 2
 };
-static bool projConfirmOpen = false;
-static ProjConfirmKind projConfirmKind = ProjConfirmKind::DeleteProject;
-static int projConfirmCursor = 0; // 0 = YES, 1 = NO
+static bool playlistConfirmOpen = false;
+static PlaylistConfirmKind playlistConfirmKind = PlaylistConfirmKind::DeletePlaylist;
+static int playlistConfirmCursor = 0; // 0 = YES, 1 = NO
 
-static char projEditingName[MAX_PROJECT_NAME_LEN + 1] = "";
-static char (*const projEditSongs)[MAX_SONG_NAME_LEN + 1] =
+static char playlistEditingName[MAX_PLAYLIST_NAME_LEN + 1] = "";
+static char (*const playlistEditSongs)[MAX_SONG_NAME_LEN + 1] =
     reinterpret_cast<char (*)[MAX_SONG_NAME_LEN + 1]>(sharedBrowserPool);
-static_assert(MAX_SONGS_PER_PROJECT * (MAX_SONG_NAME_LEN + 1) <= 2048, "projEditSongs must fit in sharedBrowserPool");
-static int projEditSongCount = 0;
-static int projEditCursor = 0;
-static int projEditScroll = 0;
-static int projEditCol = PROJ_EDIT_ACT_ADD;
-static bool projEditInBottomRow = false;
-static int projEditBottomCol = 0; // 0 = SAVE, 1 = CANCEL
+static_assert(MAX_SONGS_PER_PLAYLIST * (MAX_SONG_NAME_LEN + 1) <= 2048, "playlistEditSongs must fit in sharedBrowserPool");
+static int playlistEditSongCount = 0;
+static int playlistEditCursor = 0;
+static int playlistEditScroll = 0;
+static int playlistEditCol = PLAYLIST_EDIT_ACT_ADD;
+static bool playlistEditInBottomRow = false;
+static int playlistEditBottomCol = 0; // 0 = SAVE, 1 = CANCEL
 
-static int projAddSongCursor = 0;
-static int projAddSongScroll = 0;
+static int playlistAddSongCursor = 0;
+static int playlistAddSongScroll = 0;
 
-// Project Play state
-static int projPlayPlayingIdx = -1;
-static int projPlayListCursor = 0;
-static int projPlayListScroll = 0;
-static uint8_t projPlayZone = PROJ_PLAY_ZONE_CONTROLS;
-static uint8_t projPlayCtrlCol = PROJ_PLAY_CTRL_PLAY;
-static uint8_t projPlayVol = MASTER_VOLUME_SPK_DEFAULT;
-static uint8_t projPlayVolHp = MASTER_VOLUME_HP_DEFAULT;
-static uint8_t projPlayVolSpk = MASTER_VOLUME_SPK_DEFAULT;
-static int8_t projPlaySpeedQuarter = DEFAULT_SPEED_QUARTER;
-static bool projPlayLocked = false;
-static bool projPlayEditHeld = false;
-static bool projPlayEditModUsed = false;
-static bool projPlayActive = false;
-static bool projPlayTailPhase = false;
-static uint32_t projPlayMaxDataFrame = 0;
-static uint32_t projPlaySilentFrames = 0;
-static uint32_t projPlayLastNow = 0;
-static uint32_t projPlayAnimMs = 0;
-static uint32_t projPlayLastTickMs = 0;
+// Playlist Play state
+static int playlistPlayPlayingIdx = -1;
+static int playlistPlayListCursor = 0;
+static int playlistPlayListScroll = 0;
+static uint8_t playlistPlayZone = PLAYLIST_PLAY_ZONE_CONTROLS;
+static uint8_t playlistPlayCtrlCol = PLAYLIST_PLAY_CTRL_PLAY;
+static uint8_t playlistPlayVol = MASTER_VOLUME_SPK_DEFAULT;
+static uint8_t playlistPlayVolHp = MASTER_VOLUME_HP_DEFAULT;
+static uint8_t playlistPlayVolSpk = MASTER_VOLUME_SPK_DEFAULT;
+static int8_t playlistPlaySpeedQuarter = DEFAULT_SPEED_QUARTER;
+static bool playlistPlayLocked = false;
+static bool playlistPlayEditHeld = false;
+static bool playlistPlayEditModUsed = false;
+static bool playlistPlayActive = false;
+static bool playlistPlayTailPhase = false;
+static uint32_t playlistPlayMaxDataFrame = 0;
+static uint32_t playlistPlaySilentFrames = 0;
+static uint32_t playlistPlayLastNow = 0;
+static uint32_t playlistPlayAnimMs = 0;
+static uint32_t playlistPlayLastTickMs = 0;
 
-static uint64_t prevProjBannerKey = 0;
-static uint64_t prevProjTapeKey = 0;
-static uint64_t prevProjTapeStaticKey = 0;
-static uint64_t prevProjLockKey = 0;
-static uint64_t prevProjCtrlKey = 0;
-static uint64_t prevProjRowKey[7] = {};
-static uint64_t prevProjBtnKey[2] = {};
-static uint64_t prevProjConfirmKey = 0;
+static uint64_t prevPlaylistBannerKey = 0;
+static uint64_t prevPlaylistTapeKey = 0;
+static uint64_t prevPlaylistTapeStaticKey = 0;
+static uint64_t prevPlaylistLockKey = 0;
+static uint64_t prevPlaylistCtrlKey = 0;
+static uint64_t prevPlaylistRowKey[7] = {};
+static uint64_t prevPlaylistBtnKey[2] = {};
+static uint64_t prevPlaylistConfirmKey = 0;
 
 // MIDI Mappings Modal State
 enum MidiMapZone : uint8_t {
@@ -145,15 +145,15 @@ FLASHMEM static void invalidateSysMidiMapModalCache() {
   memset(prevMidiMapRowKey, 0, sizeof(prevMidiMapRowKey));
 }
 
-FLASHMEM static void invalidateSysProjectsModalCache() {
-  prevProjBannerKey = 0;
-  prevProjTapeKey = 0;
-  prevProjTapeStaticKey = 0;
-  prevProjLockKey = 0;
-  prevProjCtrlKey = 0;
-  memset(prevProjRowKey, 0, sizeof(prevProjRowKey));
-  memset(prevProjBtnKey, 0, sizeof(prevProjBtnKey));
-  prevProjConfirmKey = 0;
+FLASHMEM static void invalidateSysPlaylistsModalCache() {
+  prevPlaylistBannerKey = 0;
+  prevPlaylistTapeKey = 0;
+  prevPlaylistTapeStaticKey = 0;
+  prevPlaylistLockKey = 0;
+  prevPlaylistCtrlKey = 0;
+  memset(prevPlaylistRowKey, 0, sizeof(prevPlaylistRowKey));
+  memset(prevPlaylistBtnKey, 0, sizeof(prevPlaylistBtnKey));
+  prevPlaylistConfirmKey = 0;
   invalidateSysMidiMapModalCache();
 }
 
@@ -166,7 +166,7 @@ FLASHMEM void invalidateSysPresetsModalCache() {
   memset(prevSysPrstRowKey, 0, sizeof(prevSysPrstRowKey));
   prevSysPrstDelConfirmKey = 0;
   prevUsbSavePromptKey = 0;
-  invalidateSysProjectsModalCache();
+  invalidateSysPlaylistsModalCache();
 }
 
 FLASHMEM static void sysSettingsInvalidateCache() {
@@ -335,89 +335,89 @@ FLASHMEM void drawSysPresetsModal(bool full) {
 }
 
 // ============================================================================
-// Projects Management Modal (/Capstan/PROJECTS/*.proj)
+// Playlists Management Modal (/Capstan/PLAYLISTS/*.plst)
 // ============================================================================
-static inline int projManageRowCount() {
-  return min(projectCount() + 1, MAX_PROJECTS);
+static inline int playlistManageRowCount() {
+  return min(playlistCount() + 1, MAX_PLAYLISTS);
 }
 
-FLASHMEM static void syncProjManageScroll() {
-  int rowCnt = projManageRowCount();
-  projManageCursor = constrain(projManageCursor, 0, rowCnt - 1);
-  if (projManageCursor < projManageScroll) {
-    projManageScroll = projManageCursor;
-  } else if (projManageCursor >= projManageScroll + PROJ_MANAGE_VISIBLE_ROWS) {
-    projManageScroll = projManageCursor - PROJ_MANAGE_VISIBLE_ROWS + 1;
+FLASHMEM static void syncPlaylistManageScroll() {
+  int rowCnt = playlistManageRowCount();
+  playlistManageCursor = constrain(playlistManageCursor, 0, rowCnt - 1);
+  if (playlistManageCursor < playlistManageScroll) {
+    playlistManageScroll = playlistManageCursor;
+  } else if (playlistManageCursor >= playlistManageScroll + PLAYLIST_MANAGE_VISIBLE_ROWS) {
+    playlistManageScroll = playlistManageCursor - PLAYLIST_MANAGE_VISIBLE_ROWS + 1;
   }
-  int maxScr = max(0, rowCnt - PROJ_MANAGE_VISIBLE_ROWS);
-  projManageScroll = constrain(projManageScroll, 0, maxScr);
-  projManageCol = constrain(projManageCol, 0, PROJ_ACT_COUNT - 1);
+  int maxScr = max(0, rowCnt - PLAYLIST_MANAGE_VISIBLE_ROWS);
+  playlistManageScroll = constrain(playlistManageScroll, 0, maxScr);
+  playlistManageCol = constrain(playlistManageCol, 0, PLAYLIST_ACT_COUNT - 1);
 }
 
-static inline int projEditRowCount() {
-  return min(projEditSongCount + 1, MAX_SONGS_PER_PROJECT);
+static inline int playlistEditRowCount() {
+  return min(playlistEditSongCount + 1, MAX_SONGS_PER_PLAYLIST);
 }
 
-FLASHMEM static void syncProjEditScroll() {
-  int rowCnt = projEditRowCount();
-  projEditCursor = constrain(projEditCursor, 0, rowCnt - 1);
-  if (projEditCursor < projEditScroll) {
-    projEditScroll = projEditCursor;
-  } else if (projEditCursor >= projEditScroll + PROJ_EDIT_VISIBLE_ROWS) {
-    projEditScroll = projEditCursor - PROJ_EDIT_VISIBLE_ROWS + 1;
+FLASHMEM static void syncPlaylistEditScroll() {
+  int rowCnt = playlistEditRowCount();
+  playlistEditCursor = constrain(playlistEditCursor, 0, rowCnt - 1);
+  if (playlistEditCursor < playlistEditScroll) {
+    playlistEditScroll = playlistEditCursor;
+  } else if (playlistEditCursor >= playlistEditScroll + PLAYLIST_EDIT_VISIBLE_ROWS) {
+    playlistEditScroll = playlistEditCursor - PLAYLIST_EDIT_VISIBLE_ROWS + 1;
   }
-  int maxScr = max(0, rowCnt - PROJ_EDIT_VISIBLE_ROWS);
-  projEditScroll = constrain(projEditScroll, 0, maxScr);
-  if (projEditCursor >= projEditSongCount) {
-    projEditCol = PROJ_EDIT_ACT_ADD;
+  int maxScr = max(0, rowCnt - PLAYLIST_EDIT_VISIBLE_ROWS);
+  playlistEditScroll = constrain(playlistEditScroll, 0, maxScr);
+  if (playlistEditCursor >= playlistEditSongCount) {
+    playlistEditCol = PLAYLIST_EDIT_ACT_ADD;
   } else {
-    projEditCol = constrain(projEditCol, 0, PROJ_EDIT_ACT_COUNT - 1);
+    playlistEditCol = constrain(playlistEditCol, 0, PLAYLIST_EDIT_ACT_COUNT - 1);
   }
 }
 
-FLASHMEM static void syncProjAddSongScroll() {
+FLASHMEM static void syncPlaylistAddSongScroll() {
   int total = songCount();
   if (total <= 0) {
-    projAddSongCursor = 0;
-    projAddSongScroll = 0;
+    playlistAddSongCursor = 0;
+    playlistAddSongScroll = 0;
     return;
   }
-  projAddSongCursor = constrain(projAddSongCursor, 0, total - 1);
-  if (projAddSongCursor < projAddSongScroll) {
-    projAddSongScroll = projAddSongCursor;
-  } else if (projAddSongCursor >= projAddSongScroll + PROJ_ADD_VISIBLE_ROWS) {
-    projAddSongScroll = projAddSongCursor - PROJ_ADD_VISIBLE_ROWS + 1;
+  playlistAddSongCursor = constrain(playlistAddSongCursor, 0, total - 1);
+  if (playlistAddSongCursor < playlistAddSongScroll) {
+    playlistAddSongScroll = playlistAddSongCursor;
+  } else if (playlistAddSongCursor >= playlistAddSongScroll + PLAYLIST_ADD_VISIBLE_ROWS) {
+    playlistAddSongScroll = playlistAddSongCursor - PLAYLIST_ADD_VISIBLE_ROWS + 1;
   }
-  int maxScr = max(0, total - PROJ_ADD_VISIBLE_ROWS);
-  projAddSongScroll = constrain(projAddSongScroll, 0, maxScr);
+  int maxScr = max(0, total - PLAYLIST_ADD_VISIBLE_ROWS);
+  playlistAddSongScroll = constrain(playlistAddSongScroll, 0, maxScr);
 }
 
-FLASHMEM static void syncProjPlayScroll() {
-  int total = projEditSongCount;
+FLASHMEM static void syncPlaylistPlayScroll() {
+  int total = playlistEditSongCount;
   if (total <= 0) {
-    projPlayListCursor = 0;
-    projPlayListScroll = 0;
+    playlistPlayListCursor = 0;
+    playlistPlayListScroll = 0;
     return;
   }
-  projPlayListCursor = constrain(projPlayListCursor, 0, total - 1);
-  if (projPlayListCursor < projPlayListScroll) {
-    projPlayListScroll = projPlayListCursor;
-  } else if (projPlayListCursor >= projPlayListScroll + PROJ_PLAY_VISIBLE_ROWS) {
-    projPlayListScroll = projPlayListCursor - PROJ_PLAY_VISIBLE_ROWS + 1;
+  playlistPlayListCursor = constrain(playlistPlayListCursor, 0, total - 1);
+  if (playlistPlayListCursor < playlistPlayListScroll) {
+    playlistPlayListScroll = playlistPlayListCursor;
+  } else if (playlistPlayListCursor >= playlistPlayListScroll + PLAYLIST_PLAY_VISIBLE_ROWS) {
+    playlistPlayListScroll = playlistPlayListCursor - PLAYLIST_PLAY_VISIBLE_ROWS + 1;
   }
-  int maxScr = max(0, total - PROJ_PLAY_VISIBLE_ROWS);
-  projPlayListScroll = constrain(projPlayListScroll, 0, maxScr);
+  int maxScr = max(0, total - PLAYLIST_PLAY_VISIBLE_ROWS);
+  playlistPlayListScroll = constrain(playlistPlayListScroll, 0, maxScr);
 }
 
-FLASHMEM static void projPlayStopAndRestoreLoadedSong() {
-  projPlayActive = false;
-  projPlayTailPhase = false;
+FLASHMEM static void playlistPlayStopAndRestoreLoadedSong() {
+  playlistPlayActive = false;
+  playlistPlayTailPhase = false;
   fmSynthSetExportTailPhase(false);
   storageStopTransport();
   fmSynthAllNotesOff();
   resetMasterFxState();
   transport.speedQuarter = DEFAULT_SPEED_QUARTER;
-  projPlaySpeedQuarter = DEFAULT_SPEED_QUARTER;
+  playlistPlaySpeedQuarter = DEFAULT_SPEED_QUARTER;
   storageSeekTape(0);
   transport.loopEnabled = songSettings().loopEnabled;
   transport.punchEnabled = songSettings().punchEnabled;
@@ -425,26 +425,26 @@ FLASHMEM static void projPlayStopAndRestoreLoadedSong() {
   syncSongListCursor(true);
 }
 
-FLASHMEM static bool projPlayStartSong(int startIdx, bool autoPlay) {
-  projPlayActive = false;
-  projPlayTailPhase = false;
-  projPlaySilentFrames = 0;
+FLASHMEM static bool playlistPlayStartSong(int startIdx, bool autoPlay) {
+  playlistPlayActive = false;
+  playlistPlayTailPhase = false;
+  playlistPlaySilentFrames = 0;
   fmSynthSetExportTailPhase(false);
   storageStopTransport();
   fmSynthAllNotesOff();
   resetMasterFxState();
 
-  if (projEditSongCount <= 0 || startIdx < 0 || startIdx >= projEditSongCount) {
-    projPlayPlayingIdx = -1;
+  if (playlistEditSongCount <= 0 || startIdx < 0 || startIdx >= playlistEditSongCount) {
+    playlistPlayPlayingIdx = -1;
     uiForceRedraw();
     return false;
   }
 
   int chosenIdx = -1;
-  int maxTries = autoPlay ? (projEditSongCount - startIdx) : 1;
+  int maxTries = autoPlay ? (playlistEditSongCount - startIdx) : 1;
   for (int attempt = 0; attempt < maxTries; attempt++) {
     int tryIdx = startIdx + attempt;
-    if (loadSongByName(projEditSongs[tryIdx])) {
+    if (loadSongByName(playlistEditSongs[tryIdx])) {
       chosenIdx = tryIdx;
       break;
     }
@@ -456,85 +456,85 @@ FLASHMEM static bool projPlayStartSong(int startIdx, bool autoPlay) {
     return false;
   }
 
-  projPlayPlayingIdx = chosenIdx;
+  playlistPlayPlayingIdx = chosenIdx;
   for (int t = 0; t < NUM_AUDIO_TRACKS; t++) {
     tracks[t].armMode = ArmMode::Off;
   }
   for (int t = 0; t < NUM_MIDI_TRACKS; t++) {
     midiTracks[t].armMode = ArmMode::Off;
   }
-  songSettings().masterVolHpEnc = (uint8_t)(projPlayVolHp + 1);
-  songSettings().masterVolSpkEnc = (uint8_t)(projPlayVolSpk + 1);
-  projPlayVol = appAreHeadphonesConnected() ? projPlayVolHp : projPlayVolSpk;
-  appSetMasterVolume(projPlayVol);
+  songSettings().masterVolHpEnc = (uint8_t)(playlistPlayVolHp + 1);
+  songSettings().masterVolSpkEnc = (uint8_t)(playlistPlayVolSpk + 1);
+  playlistPlayVol = appAreHeadphonesConnected() ? playlistPlayVolHp : playlistPlayVolSpk;
+  appSetMasterVolume(playlistPlayVol);
 
-  transport.speedQuarter = projPlaySpeedQuarter;
+  transport.speedQuarter = playlistPlaySpeedQuarter;
   transport.loopEnabled = false;
   transport.punchEnabled = false;
   metronomeOn = false;
   storageSeekTape(0);
-  projPlayMaxDataFrame = storageSongMaxAudibleFrame();
+  playlistPlayMaxDataFrame = storageSongMaxAudibleFrame();
 
   float pkL = 0.0f, pkR = 0.0f;
   takeOutputPeaks(pkL, pkR);
-  projPlayLastNow = transport.now;
+  playlistPlayLastNow = transport.now;
 
   if (autoPlay) {
-    projPlayActive = true;
+    playlistPlayActive = true;
     storageStartTransport(false, false, false);
     noInterrupts();
     metronomeOn = false;
-    projPlayLastNow = transport.now;
+    playlistPlayLastNow = transport.now;
     interrupts();
   }
 
   noteUserActivity();
-  invalidateSysProjectsModalCache();
+  invalidateSysPlaylistsModalCache();
   uiForceRedraw();
   return true;
 }
 
-FLASHMEM void sysProjectPlayOnOutputSwitched(bool phonesConnected) {
-  if (projModalView != ProjModalView::PlayProject) return;
-  projPlayVol = phonesConnected ? projPlayVolHp : projPlayVolSpk;
-  prevProjCtrlKey = 0;
+FLASHMEM void sysPlaylistPlayOnOutputSwitched(bool phonesConnected) {
+  if (playlistModalView != PlaylistModalView::PlayPlaylist) return;
+  playlistPlayVol = phonesConnected ? playlistPlayVolHp : playlistPlayVolSpk;
+  prevPlaylistCtrlKey = 0;
 }
 
-FLASHMEM void sysProjectPlayOnMasterVolChanged(uint8_t vol) {
-  if (projModalView != ProjModalView::PlayProject) return;
-  projPlayVol = vol;
-  if (appAreHeadphonesConnected()) projPlayVolHp = vol;
-  else projPlayVolSpk = vol;
-  prevProjCtrlKey = 0;
+FLASHMEM void sysPlaylistPlayOnMasterVolChanged(uint8_t vol) {
+  if (playlistModalView != PlaylistModalView::PlayPlaylist) return;
+  playlistPlayVol = vol;
+  if (appAreHeadphonesConnected()) playlistPlayVolHp = vol;
+  else playlistPlayVolSpk = vol;
+  prevPlaylistCtrlKey = 0;
 }
 
-FLASHMEM void sysProjectPlayOnSpeedChanged(int8_t speedQuarter) {
-  if (projModalView != ProjModalView::PlayProject) return;
-  projPlaySpeedQuarter = speedQuarter;
-  prevProjCtrlKey = 0;
+FLASHMEM void sysPlaylistPlayOnSpeedChanged(int8_t speedQuarter) {
+  if (playlistModalView != PlaylistModalView::PlayPlaylist) return;
+  playlistPlaySpeedQuarter = speedQuarter;
+  prevPlaylistCtrlKey = 0;
 }
 
-FLASHMEM void sysProjectPlayService() {
-  if (projModalView != ProjModalView::PlayProject || !projPlayActive) return;
+FLASHMEM void sysPlaylistPlayService() {
+  if (playlistModalView != PlaylistModalView::PlayPlaylist || !playlistPlayActive) return;
 
   if (transport.mode != TransportMode::Running) {
     const bool finishedSong = (transport.speedQuarter < 0)
                                 ? (transport.tapeFrame == 0)
-                                : (transport.tapeFrame >= projPlayMaxDataFrame);
+                                : (transport.tapeFrame >= playlistPlayMaxDataFrame);
     if (finishedSong) {
-      int nextIdx = projPlayPlayingIdx + 1;
-      if (nextIdx < projEditSongCount) {
-        if (projPlayListCursor == projPlayPlayingIdx) {
-          projPlayListCursor = nextIdx;
-          syncProjPlayScroll();
+      int nextIdx = playlistPlayPlayingIdx + 1;
+      if (nextIdx < playlistEditSongCount) {
+        if (playlistPlayListCursor == playlistPlayPlayingIdx) {
+          playlistPlayListCursor = nextIdx;
+          syncPlaylistPlayScroll();
         }
-        projPlayStartSong(nextIdx, true);
+        playlistPlayStartSong(nextIdx, true);
       } else {
-        projPlayStopAndRestoreLoadedSong();
+        playlistPlayStopAndRestoreLoadedSong();
         uiForceRedraw();
       }
     } else {
-      projPlayActive = false;
+      playlistPlayActive = false;
       fmSynthSetExportTailPhase(false);
       uiForceRedraw();
     }
@@ -542,160 +542,160 @@ FLASHMEM void sysProjectPlayService() {
   }
 
   if (transport.speedQuarter <= 0) {
-    projPlayTailPhase = false;
-    projPlaySilentFrames = 0;
+    playlistPlayTailPhase = false;
+    playlistPlaySilentFrames = 0;
     return;
   }
 
   uint32_t curNow = transport.now;
-  uint32_t dtFrames = curNow - projPlayLastNow;
+  uint32_t dtFrames = curNow - playlistPlayLastNow;
   if (dtFrames < 256u) return;
-  projPlayLastNow = curNow;
+  playlistPlayLastNow = curNow;
 
   float pkL = 0.0f, pkR = 0.0f;
   takeOutputPeaks(pkL, pkR);
 
   uint32_t tf = transport.tapeFrame;
-  if (tf < projPlayMaxDataFrame) {
-    projPlayTailPhase = false;
-    projPlaySilentFrames = 0;
+  if (tf < playlistPlayMaxDataFrame) {
+    playlistPlayTailPhase = false;
+    playlistPlaySilentFrames = 0;
     return;
   }
 
-  if (!projPlayTailPhase) {
-    projPlayTailPhase = true;
-    projPlaySilentFrames = 0;
+  if (!playlistPlayTailPhase) {
+    playlistPlayTailPhase = true;
+    playlistPlaySilentFrames = 0;
     fmSynthSetExportTailPhase(true);
   }
 
   const uint32_t reqSilent = storageAnyTailFxActive() ? 16384u : 2048u;
 
   if (pkL <= (4.5f / 32768.0f) && pkR <= (4.5f / 32768.0f)) {
-    projPlaySilentFrames += dtFrames;
+    playlistPlaySilentFrames += dtFrames;
   } else {
-    projPlaySilentFrames = 0;
+    playlistPlaySilentFrames = 0;
   }
 
-  const bool tailTimeout = (tf > projPlayMaxDataFrame) &&
-                           ((tf - projPlayMaxDataFrame) >= 15u * SAMPLE_RATE_HZ);
-  if ((projPlaySilentFrames >= reqSilent && !fmSynthHasActiveOutput()) || tailTimeout) {
-    int nextIdx = projPlayPlayingIdx + 1;
-    if (nextIdx < projEditSongCount) {
-      if (projPlayListCursor == projPlayPlayingIdx) {
-        projPlayListCursor = nextIdx;
-        syncProjPlayScroll();
+  const bool tailTimeout = (tf > playlistPlayMaxDataFrame) &&
+                           ((tf - playlistPlayMaxDataFrame) >= 15u * SAMPLE_RATE_HZ);
+  if ((playlistPlaySilentFrames >= reqSilent && !fmSynthHasActiveOutput()) || tailTimeout) {
+    int nextIdx = playlistPlayPlayingIdx + 1;
+    if (nextIdx < playlistEditSongCount) {
+      if (playlistPlayListCursor == playlistPlayPlayingIdx) {
+        playlistPlayListCursor = nextIdx;
+        syncPlaylistPlayScroll();
       }
-      projPlayStartSong(nextIdx, true);
+      playlistPlayStartSong(nextIdx, true);
     } else {
-      projPlayStopAndRestoreLoadedSong();
+      playlistPlayStopAndRestoreLoadedSong();
       uiForceRedraw();
     }
   }
 }
 
-FLASHMEM bool isSysProjectsModalOpen() {
-  return projModalView != ProjModalView::Closed;
+FLASHMEM bool isSysPlaylistsModalOpen() {
+  return playlistModalView != PlaylistModalView::Closed;
 }
 
-FLASHMEM uint8_t sysProjectsModalState() {
-  if (projModalView == ProjModalView::Closed) return 0;
-  return (uint8_t)projModalView | (projConfirmOpen ? (0x10u | ((uint8_t)projConfirmKind << 5)) : 0x00u);
+FLASHMEM uint8_t sysPlaylistsModalState() {
+  if (playlistModalView == PlaylistModalView::Closed) return 0;
+  return (uint8_t)playlistModalView | (playlistConfirmOpen ? (0x10u | ((uint8_t)playlistConfirmKind << 5)) : 0x00u);
 }
 
-FLASHMEM bool isSysProjectsConfirmOpen() {
-  return (projModalView != ProjModalView::Closed) && projConfirmOpen;
+FLASHMEM bool isSysPlaylistsConfirmOpen() {
+  return (playlistModalView != PlaylistModalView::Closed) && playlistConfirmOpen;
 }
 
-FLASHMEM bool isSysProjectPlayLocked() {
+FLASHMEM bool isSysPlaylistPlayLocked() {
   return currentPage() == Page::SystemSettings &&
-         projModalView == ProjModalView::PlayProject &&
-         projPlayLocked;
+         playlistModalView == PlaylistModalView::PlayPlaylist &&
+         playlistPlayLocked;
 }
 
-FLASHMEM void toggleSysProjectPlayLock() {
-  if (currentPage() != Page::SystemSettings || projModalView != ProjModalView::PlayProject) {
+FLASHMEM void toggleSysPlaylistPlayLock() {
+  if (currentPage() != Page::SystemSettings || playlistModalView != PlaylistModalView::PlayPlaylist) {
     return;
   }
-  projPlayLocked = !projPlayLocked;
-  projPlayEditHeld = false;
-  projPlayEditModUsed = false;
+  playlistPlayLocked = !playlistPlayLocked;
+  playlistPlayEditHeld = false;
+  playlistPlayEditModUsed = false;
   inputSwallowModalKeys();
   inputClearRepeat();
   uiForceRedraw();
 }
 
-FLASHMEM static void openSysProjectsModal() {
-  scanProjectFiles();
-  projModalView = ProjModalView::ManageList;
-  projConfirmOpen = false;
-  projConfirmCursor = 0;
-  projPlayLocked = false;
-  if (projManageCursor >= projectCount()) {
-    projManageCursor = max(0, projectCount() - 1);
+FLASHMEM static void openSysPlaylistsModal() {
+  scanPlaylistFiles();
+  playlistModalView = PlaylistModalView::ManageList;
+  playlistConfirmOpen = false;
+  playlistConfirmCursor = 0;
+  playlistPlayLocked = false;
+  if (playlistManageCursor >= playlistCount()) {
+    playlistManageCursor = max(0, playlistCount() - 1);
   }
-  projManageCol = PROJ_ACT_PLAY;
-  syncProjManageScroll();
-  invalidateSysProjectsModalCache();
+  playlistManageCol = PLAYLIST_ACT_PLAY;
+  syncPlaylistManageScroll();
+  invalidateSysPlaylistsModalCache();
 }
 
-FLASHMEM void closeSysProjectsModal() {
-  if (projModalView == ProjModalView::Closed) return;
-  if (projModalView == ProjModalView::PlayProject) {
-    projPlayStopAndRestoreLoadedSong();
+FLASHMEM void closeSysPlaylistsModal() {
+  if (playlistModalView == PlaylistModalView::Closed) return;
+  if (playlistModalView == PlaylistModalView::PlayPlaylist) {
+    playlistPlayStopAndRestoreLoadedSong();
   }
-  projModalView = ProjModalView::Closed;
-  projConfirmOpen = false;
-  projPlayLocked = false;
-  invalidateSysProjectsModalCache();
+  playlistModalView = PlaylistModalView::Closed;
+  playlistConfirmOpen = false;
+  playlistPlayLocked = false;
+  invalidateSysPlaylistsModalCache();
 }
 
-FLASHMEM void commitProjectKeyboard(const char *enteredName, bool isRename) {
-  char outName[MAX_PROJECT_NAME_LEN + 1] = {};
+FLASHMEM void commitPlaylistKeyboard(const char *enteredName, bool isRename) {
+  char outName[MAX_PLAYLIST_NAME_LEN + 1] = {};
   bool ok = false;
   if (isRename) {
-    const char *oldName = projectNameAt(projManageCursor);
-    ok = renameProjectFile(oldName, enteredName, outName, sizeof(outName));
+    const char *oldName = playlistNameAt(playlistManageCursor);
+    ok = renamePlaylistFile(oldName, enteredName, outName, sizeof(outName));
   } else {
-    ok = createEmptyProjectFile(enteredName, outName, sizeof(outName));
+    ok = createEmptyPlaylistFile(enteredName, outName, sizeof(outName));
   }
   closeSaveKeyboard();
-  projModalView = ProjModalView::ManageList;
-  projConfirmOpen = false;
+  playlistModalView = PlaylistModalView::ManageList;
+  playlistConfirmOpen = false;
   if (ok && outName[0] != '\0') {
-    int idx = findProjectIndex(outName);
-    if (idx >= 0) projManageCursor = idx;
-    projManageCol = PROJ_ACT_EDIT;
-    syncProjManageScroll();
+    int idx = findPlaylistIndex(outName);
+    if (idx >= 0) playlistManageCursor = idx;
+    playlistManageCol = PLAYLIST_ACT_EDIT;
+    syncPlaylistManageScroll();
     char msg[32];
     snprintf(msg, sizeof(msg), "%s: %s", isRename ? "RENAMED" : "CREATED", outName);
     uiShowToast(msg);
   } else {
-    syncProjManageScroll();
+    syncPlaylistManageScroll();
     uiShowToast(isRename ? "RENAME FAILED" : "CREATE FAILED");
   }
-  invalidateSysProjectsModalCache();
+  invalidateSysPlaylistsModalCache();
   uiForceRedraw();
 }
 
-FLASHMEM void drawSysProjectsConfirmModal(bool full) {
-  if (!isSysProjectsConfirmOpen()) return;
+FLASHMEM void drawSysPlaylistsConfirmModal(bool full) {
+  if (!isSysPlaylistsConfirmOpen()) return;
 
-  const int cur = constrain(projConfirmCursor, 0, 1);
+  const int cur = constrain(playlistConfirmCursor, 0, 1);
   const int ovX = SX(12);
   const int ovY = SY(94);
   const int ovW = SX(296);
   const int ovH = SY(24);
-  const uint8_t kindVal = (uint8_t)projConfirmKind;
+  const uint8_t kindVal = (uint8_t)playlistConfirmKind;
 
   uint64_t k = hashMix(hashInit(), (uint64_t)ACCENT | ((uint64_t)cur << 16) |
                                    ((uint64_t)kindVal << 24));
-  if (full || k != prevProjConfirmKey) {
-    prevProjConfirmKey = k;
+  if (full || k != prevPlaylistConfirmKey) {
+    prevPlaylistConfirmKey = k;
     Surface s(ovW, ovH);
     s.drawBox(DARK, ACCENT);
-    const char *promptTxt = (projConfirmKind == ProjConfirmKind::SaveBeforePlay) ? "Save song?"
-                          : (projConfirmKind == ProjConfirmKind::DeleteProject)  ? "Delete project?"
-                                                                                 : "Remove song?";
+    const char *promptTxt = (playlistConfirmKind == PlaylistConfirmKind::SaveBeforePlay) ? "Save song?"
+                          : (playlistConfirmKind == PlaylistConfirmKind::DeletePlaylist) ? "Delete playlist?"
+                                                                                         : "Remove song?";
     s.drawText(SX(10), TY(ovH), promptTxt, INK);
 
     const char *const OPT_LABELS[2] = {"YES", "NO"};
@@ -706,7 +706,7 @@ FLASHMEM void drawSysProjectsConfirmModal(bool full) {
 
     for (int i = 0; i < 2; i++) {
       bool sel = (cur == i);
-      uint16_t pBg = (projConfirmKind == ProjConfirmKind::SaveBeforePlay)
+      uint16_t pBg = (playlistConfirmKind == PlaylistConfirmKind::SaveBeforePlay)
                          ? (sel ? (i == 0 ? COLOR_PLAY : COLOR_WARN) : PANEL)
                          : (sel ? (i == 0 ? COLOR_WARN : ACCENT) : PANEL);
       uint16_t pFg = sel ? BG : INK;
@@ -717,22 +717,22 @@ FLASHMEM void drawSysProjectsConfirmModal(bool full) {
   }
 }
 
-FLASHMEM static void drawProjManageListModal(bool full) {
-  syncProjManageScroll();
-  const int total = projectCount();
-  const int cur = projManageCursor;
-  const int scroll = projManageScroll;
+FLASHMEM static void drawPlaylistManageListModal(bool full) {
+  syncPlaylistManageScroll();
+  const int total = playlistCount();
+  const int cur = playlistManageCursor;
+  const int scroll = playlistManageScroll;
 
-  // 1. Header Banner: [PROJECTS]
+  // 1. Header Banner: [PLAYLISTS]
   {
-    uint64_t bk = hashStr(hashInit(), "PROJECTS");
+    uint64_t bk = hashStr(hashInit(), "PLAYLISTS");
     bk = hashMix(bk, (uint64_t)total);
-    if (full || bk != prevProjBannerKey) {
-      prevProjBannerKey = bk;
+    if (full || bk != prevPlaylistBannerKey) {
+      prevPlaylistBannerKey = bk;
       const int bw = SX(308), bh = SY(22);
       Surface s(bw, bh);
       s.drawBox(DARK, ACCENT);
-      s.drawText(SX(6), TY(bh), "PROJECTS", ACCENT);
+      s.drawText(SX(6), TY(bh), "PLAYLISTS", ACCENT);
       char cntTxt[20];
       snprintf(cntTxt, sizeof(cntTxt), "%d SAVED", total);
       int tw = textWidth(cntTxt);
@@ -741,42 +741,42 @@ FLASHMEM static void drawProjManageListModal(bool full) {
     }
   }
 
-  // 2. Scrollable 7-Row Projects Table (populated projects + next empty row to create a project)
-  const char *const ACT_LABELS[PROJ_ACT_COUNT] = {"PLAY", "EDIT", "RENAME", "DEL"};
-  const int pillW[PROJ_ACT_COUNT] = {SX(36), SX(36), SX(58), SX(32)};
+  // 2. Scrollable 7-Row Playlists Table (populated playlists + next empty row to create a playlist)
+  const char *const ACT_LABELS[PLAYLIST_ACT_COUNT] = {"PLAY", "EDIT", "RENAME", "DEL"};
+  const int pillW[PLAYLIST_ACT_COUNT] = {SX(36), SX(36), SX(58), SX(32)};
 
-  for (int r = 0; r < PROJ_MANAGE_VISIBLE_ROWS; r++) {
+  for (int r = 0; r < PLAYLIST_MANAGE_VISIBLE_ROWS; r++) {
     const int y = SY(50) + r * SY(26);
     const int rw = SX(308), rh = SY(24);
     const int idx = scroll + r;
-    const bool hasProj = (idx < total);
-    const bool isNextEmpty = (idx == total && idx < MAX_PROJECTS);
-    const bool isValidRow = hasProj || isNextEmpty;
+    const bool hasPlaylist = (idx < total);
+    const bool isNextEmpty = (idx == total && idx < MAX_PLAYLISTS);
+    const bool isValidRow = hasPlaylist || isNextEmpty;
     const bool sel = isValidRow && (idx == cur);
-    const int activeCol = sel ? (hasProj ? projManageCol : 0) : -1;
+    const int activeCol = sel ? (hasPlaylist ? playlistManageCol : 0) : -1;
 
     uint16_t bg = sel ? DARK : PANEL;
     uint16_t border = sel ? ACCENT : MID;
-    uint16_t barCol = sel ? ACCENT : (hasProj ? COLOR_PLAY : DIM);
+    uint16_t barCol = sel ? ACCENT : (hasPlaylist ? COLOR_PLAY : DIM);
 
-    const char *nameTxt = hasProj ? projectNameAt(idx)
-                        : isNextEmpty ? ((total == 0) ? "NO SAVED PROJECTS" : "---")
+    const char *nameTxt = hasPlaylist ? playlistNameAt(idx)
+                        : isNextEmpty ? ((total == 0) ? "NO SAVED PLAYLISTS" : "---")
                                       : "";
 
     uint64_t rk = hashStr(hashInit(), nameTxt);
     rk = hashMix(rk, (uint64_t)bg | ((uint64_t)border << 16) | ((uint64_t)barCol << 32) |
-                     ((uint64_t)(activeCol + 2) << 48) | ((uint64_t)hasProj << 54) |
+                     ((uint64_t)(activeCol + 2) << 48) | ((uint64_t)hasPlaylist << 54) |
                      ((uint64_t)isNextEmpty << 55) | ((uint64_t)r << 56));
-    if (full || rk != prevProjRowKey[r]) {
-      prevProjRowKey[r] = rk;
+    if (full || rk != prevPlaylistRowKey[r]) {
+      prevPlaylistRowKey[r] = rk;
       Surface s(rw, rh);
       s.drawBox(bg, border);
       s.fillRect(PX, PX, SX(3), rh - 2 * PX, barCol);
 
-      int pillX[PROJ_ACT_COUNT] = {};
-      if (sel && hasProj) {
+      int pillX[PLAYLIST_ACT_COUNT] = {};
+      if (sel && hasPlaylist) {
         int curRight = rw - SX(5);
-        for (int c = PROJ_ACT_COUNT - 1; c >= 0; c--) {
+        for (int c = PLAYLIST_ACT_COUNT - 1; c >= 0; c--) {
           curRight -= pillW[c];
           pillX[c] = curRight;
           curRight -= SX(3);
@@ -786,28 +786,28 @@ FLASHMEM static void drawProjManageListModal(bool full) {
       if (nameTxt[0] != '\0') {
         char dispName[32];
         snprintf(dispName, sizeof(dispName), "%s", nameTxt);
-        if (sel && hasProj) {
+        if (sel && hasPlaylist) {
           int maxTxtW = max(SX(40), pillX[0] - SX(12));
           while (textWidth(dispName) > maxTxtW && strlen(dispName) > 3) {
             dispName[strlen(dispName) - 1] = '\0';
           }
         }
-        uint16_t fg = !hasProj ? ((sel && total > 0) ? LIGHT : DIM) : (sel ? INK : ACCENT);
+        uint16_t fg = !hasPlaylist ? ((sel && total > 0) ? LIGHT : DIM) : (sel ? INK : ACCENT);
         s.drawText(SX(8), TY(rh), dispName, fg);
       }
 
       if (sel) {
         const int ph = SY(16);
         const int py = (rh - ph) / 2;
-        if (!hasProj) {
+        if (!hasPlaylist) {
           int pw = SX(42);
           int px = rw - SX(6) - pw;
           s.drawPill(px, py, pw, ph, "NEW", BG, ACCENT, INK);
         } else {
-          for (int c = 0; c < PROJ_ACT_COUNT; c++) {
+          for (int c = 0; c < PLAYLIST_ACT_COUNT; c++) {
             bool cSel = (activeCol == c);
-            uint16_t pBg = cSel ? ((c == PROJ_ACT_DELETE) ? COLOR_WARN
-                                 : (c == PROJ_ACT_PLAY)   ? COLOR_PLAY : ACCENT) : PANEL;
+            uint16_t pBg = cSel ? ((c == PLAYLIST_ACT_DELETE) ? COLOR_WARN
+                                 : (c == PLAYLIST_ACT_PLAY)   ? COLOR_PLAY : ACCENT) : PANEL;
             uint16_t pFg = cSel ? BG : LIGHT;
             uint16_t pBd = cSel ? INK : MID;
             s.drawPill(pillX[c], py, pillW[c], ph, ACT_LABELS[c], pFg, pBg, pBd);
@@ -820,20 +820,20 @@ FLASHMEM static void drawProjManageListModal(bool full) {
   }
 }
 
-FLASHMEM static void drawProjEditModal(bool full) {
-  syncProjEditScroll();
-  const int total = projEditSongCount;
-  const int cur = projEditCursor;
-  const int scroll = projEditScroll;
+FLASHMEM static void drawPlaylistEditModal(bool full) {
+  syncPlaylistEditScroll();
+  const int total = playlistEditSongCount;
+  const int cur = playlistEditCursor;
+  const int scroll = playlistEditScroll;
 
-  // 1. Header Banner: [PROJECT: <name>]
+  // 1. Header Banner: [PLAYLIST: <name>]
   {
     char leftTxt[32];
-    snprintf(leftTxt, sizeof(leftTxt), "PROJECT: %s", projEditingName);
+    snprintf(leftTxt, sizeof(leftTxt), "PLAYLIST: %s", playlistEditingName);
     uint64_t bk = hashStr(hashInit(), leftTxt);
     bk = hashMix(bk, (uint64_t)total);
-    if (full || bk != prevProjBannerKey) {
-      prevProjBannerKey = bk;
+    if (full || bk != prevPlaylistBannerKey) {
+      prevPlaylistBannerKey = bk;
       const int bw = SX(308), bh = SY(20);
       Surface s(bw, bh);
       s.drawBox(DARK, ACCENT);
@@ -847,15 +847,15 @@ FLASHMEM static void drawProjEditModal(bool full) {
   }
 
   // 2. Numbered 6-Row Song List (populated songs + next empty row to add a song)
-  for (int r = 0; r < PROJ_EDIT_VISIBLE_ROWS; r++) {
+  for (int r = 0; r < PLAYLIST_EDIT_VISIBLE_ROWS; r++) {
     const int y = SY(48) + r * SY(24);
     const int rw = SX(308), rh = SY(22);
     const int idx = scroll + r;
     const bool hasSong = (idx < total);
-    const bool isNextEmpty = (idx == total && idx < MAX_SONGS_PER_PROJECT);
+    const bool isNextEmpty = (idx == total && idx < MAX_SONGS_PER_PLAYLIST);
     const bool isValidRow = hasSong || isNextEmpty;
-    const bool sel = !projEditInBottomRow && isValidRow && (idx == cur);
-    const int activeCol = sel ? (hasSong ? projEditCol : PROJ_EDIT_ACT_ADD) : -1;
+    const bool sel = !playlistEditInBottomRow && isValidRow && (idx == cur);
+    const int activeCol = sel ? (hasSong ? playlistEditCol : PLAYLIST_EDIT_ACT_ADD) : -1;
 
     uint16_t bg = sel ? DARK : PANEL;
     uint16_t border = sel ? ACCENT : MID;
@@ -863,7 +863,7 @@ FLASHMEM static void drawProjEditModal(bool full) {
 
     char leftTxt[32];
     if (hasSong) {
-      snprintf(leftTxt, sizeof(leftTxt), "%02d  %s", idx + 1, projEditSongs[idx]);
+      snprintf(leftTxt, sizeof(leftTxt), "%02d  %s", idx + 1, playlistEditSongs[idx]);
     } else if (isNextEmpty) {
       snprintf(leftTxt, sizeof(leftTxt), "%02d  ---", idx + 1);
     } else {
@@ -874,8 +874,8 @@ FLASHMEM static void drawProjEditModal(bool full) {
     rk = hashMix(rk, (uint64_t)bg | ((uint64_t)border << 16) | ((uint64_t)barCol << 32) |
                      ((uint64_t)(activeCol + 2) << 48) | ((uint64_t)hasSong << 54) |
                      ((uint64_t)isNextEmpty << 55) | ((uint64_t)r << 56));
-    if (full || rk != prevProjRowKey[r]) {
-      prevProjRowKey[r] = rk;
+    if (full || rk != prevPlaylistRowKey[r]) {
+      prevPlaylistRowKey[r] = rk;
       Surface s(rw, rh);
       s.drawBox(bg, border);
       s.fillRect(PX, PX, SX(3), rh - 2 * PX, barCol);
@@ -898,7 +898,7 @@ FLASHMEM static void drawProjEditModal(bool full) {
           const int eX[2] = {rw - SX(6) - eW[1] - SX(4) - eW[0], rw - SX(6) - eW[1]};
           for (int c = 0; c < 2; c++) {
             bool cSel = (activeCol == c);
-            uint16_t pBg = cSel ? ((c == PROJ_EDIT_ACT_REMOVE) ? COLOR_WARN : ACCENT) : PANEL;
+            uint16_t pBg = cSel ? ((c == PLAYLIST_EDIT_ACT_REMOVE) ? COLOR_WARN : ACCENT) : PANEL;
             uint16_t pFg = cSel ? BG : LIGHT;
             uint16_t pBd = cSel ? INK : MID;
             s.drawPill(eX[c], py, eW[c], ph, ELABELS[c], pFg, pBg, pBd);
@@ -915,15 +915,15 @@ FLASHMEM static void drawProjEditModal(bool full) {
     const char *btnTitle = (b == 0) ? "SAVE" : "CANCEL";
     int x = (b == 0) ? SX(6) : SX(164);
     int w = SX(150), h = SY(28);
-    bool sel = (projEditInBottomRow && projEditBottomCol == b);
+    bool sel = (playlistEditInBottomRow && playlistEditBottomCol == b);
     uint16_t bg = sel ? (b == 0 ? COLOR_PLAY : COLOR_WARN) : PANEL;
     uint16_t fg = sel ? BG : (b == 0 ? COLOR_PLAY : LIGHT);
     uint16_t border = sel ? INK : (b == 0 ? COLOR_PLAY : MID);
 
     uint64_t bk = hashStr(hashInit(), btnTitle);
     bk = hashMix(bk, (uint64_t)bg | ((uint64_t)fg << 16) | ((uint64_t)border << 32));
-    if (full || bk != prevProjBtnKey[b]) {
-      prevProjBtnKey[b] = bk;
+    if (full || bk != prevPlaylistBtnKey[b]) {
+      prevPlaylistBtnKey[b] = bk;
       Surface s(w, h);
       s.drawBox(bg, border);
       int tw = textWidth(btnTitle);
@@ -933,28 +933,28 @@ FLASHMEM static void drawProjEditModal(bool full) {
   }
 }
 
-FLASHMEM static void drawProjAddSongModal(bool full) {
-  syncProjAddSongScroll();
+FLASHMEM static void drawPlaylistAddSongModal(bool full) {
+  syncPlaylistAddSongScroll();
   const int total = songCount();
-  const int cur = projAddSongCursor;
-  const int scroll = projAddSongScroll;
+  const int cur = playlistAddSongCursor;
+  const int scroll = playlistAddSongScroll;
 
-  // 1. Header Banner: [ADD SONG TO PROJECT]
+  // 1. Header Banner: [ADD SONG TO PLAYLIST]
   {
-    uint64_t bk = hashStr(hashInit(), "ADD SONG TO PROJECT");
+    uint64_t bk = hashStr(hashInit(), "ADD SONG TO PLAYLIST");
     bk = hashMix(bk, (uint64_t)total);
-    if (full || bk != prevProjBannerKey) {
-      prevProjBannerKey = bk;
+    if (full || bk != prevPlaylistBannerKey) {
+      prevPlaylistBannerKey = bk;
       const int bw = SX(308), bh = SY(22);
       Surface s(bw, bh);
       s.drawBox(DARK, ACCENT);
-      s.drawText(SX(6), TY(bh), "ADD SONG TO PROJECT", ACCENT);
+      s.drawText(SX(6), TY(bh), "ADD SONG TO PLAYLIST", ACCENT);
       s.blit(SX(6), SY(26));
     }
   }
 
   // 2. Scrollable 7-Row Songs Table (/Capstan/SONGS/)
-  for (int r = 0; r < PROJ_ADD_VISIBLE_ROWS; r++) {
+  for (int r = 0; r < PLAYLIST_ADD_VISIBLE_ROWS; r++) {
     const int y = SY(50) + r * SY(26);
     const int rw = SX(308), rh = SY(24);
     const int idx = scroll + r;
@@ -977,8 +977,8 @@ FLASHMEM static void drawProjAddSongModal(bool full) {
     uint64_t rk = hashStr(hashInit(), leftTxt);
     rk = hashMix(rk, (uint64_t)bg | ((uint64_t)border << 16) | ((uint64_t)barCol << 32) |
                      ((uint64_t)sel << 48) | ((uint64_t)r << 52));
-    if (full || rk != prevProjRowKey[r]) {
-      prevProjRowKey[r] = rk;
+    if (full || rk != prevPlaylistRowKey[r]) {
+      prevPlaylistRowKey[r] = rk;
       Surface s(rw, rh);
       s.drawBox(bg, border);
       s.fillRect(PX, PX, SX(3), rh - 2 * PX, barCol);
@@ -1001,40 +1001,40 @@ FLASHMEM static void drawProjAddSongModal(bool full) {
   }
 }
 
-FLASHMEM static void drawProjPlayModal(bool full) {
-  syncProjPlayScroll();
-  const int total = projEditSongCount;
-  const int cur = projPlayListCursor;
-  const int scroll = projPlayListScroll;
-  const bool isPlaying = projPlayActive && (transport.mode == TransportMode::Running);
+FLASHMEM static void drawPlaylistPlayModal(bool full) {
+  syncPlaylistPlayScroll();
+  const int total = playlistEditSongCount;
+  const int cur = playlistPlayListCursor;
+  const int scroll = playlistPlayListScroll;
+  const bool isPlaying = playlistPlayActive && (transport.mode == TransportMode::Running);
 
-  // 1. Startup Tape Graphic (scaled larger to SY(114) tall, with project name inside)
+  // 1. Startup Tape Graphic (scaled larger to SY(114) tall, with playlist name inside)
   {
     uint32_t nowMs = millis();
     if (isPlaying) {
-      if (nowMs - projPlayLastTickMs >= 100) {
-        int32_t dt = (int32_t)(nowMs - projPlayLastTickMs);
-        projPlayAnimMs = (uint32_t)((int32_t)projPlayAnimMs + (dt * (int32_t)transport.speedQuarter) / 4);
-        projPlayLastTickMs = nowMs;
+      if (nowMs - playlistPlayLastTickMs >= 100) {
+        int32_t dt = (int32_t)(nowMs - playlistPlayLastTickMs);
+        playlistPlayAnimMs = (uint32_t)((int32_t)playlistPlayAnimMs + (dt * (int32_t)transport.speedQuarter) / 4);
+        playlistPlayLastTickMs = nowMs;
       }
     } else {
-      projPlayLastTickMs = nowMs;
+      playlistPlayLastTickMs = nowMs;
     }
     uint16_t tapeCol = isPlaying ? LOGO_COLOR : blend565(LOGO_COLOR, DIM, 170);
-    uint64_t staticKey = hashStr(hashInit(), projEditingName);
+    uint64_t staticKey = hashStr(hashInit(), playlistEditingName);
     staticKey = hashMix(staticKey, (uint64_t)tapeCol | ((uint64_t)isPlaying << 16));
-    uint64_t tk = hashMix(staticKey, (uint64_t)projPlayAnimMs);
-    if (full || tk != prevProjTapeKey) {
-      bool reelsOnly = (!full && staticKey == prevProjTapeStaticKey);
-      prevProjTapeKey = tk;
-      prevProjTapeStaticKey = staticKey;
+    uint64_t tk = hashMix(staticKey, (uint64_t)playlistPlayAnimMs);
+    if (full || tk != prevPlaylistTapeKey) {
+      bool reelsOnly = (!full && staticKey == prevPlaylistTapeStaticKey);
+      prevPlaylistTapeKey = tk;
+      prevPlaylistTapeStaticKey = staticKey;
       const int deckH = SY(114);
       const int deckW = (deckH * 176) / 108;
       const int deckX = (SCREEN_W - deckW) / 2;
       const int deckY = SY(2);
-      drawTapeDeckGraphic(deckX, deckY, deckW, deckH, projPlayAnimMs, tapeCol, 255, projEditingName, false, reelsOnly);
+      drawTapeDeckGraphic(deckX, deckY, deckW, deckH, playlistPlayAnimMs, tapeCol, 255, playlistEditingName, false, reelsOnly);
       if (!reelsOnly) {
-        prevProjLockKey = 0;
+        prevPlaylistLockKey = 0;
       }
       keepStreaming();
     }
@@ -1042,15 +1042,15 @@ FLASHMEM static void drawProjPlayModal(bool full) {
 
   // 2. Top-Right Power-Button Lock Hint ("LOCK ->" when unlocked, "UNLOCK ->" when locked)
   {
-    uint64_t lk = hashMix(hashInit(), projPlayLocked ? 2ULL : 1ULL);
-    if (full || lk != prevProjLockKey) {
-      prevProjLockKey = lk;
+    uint64_t lk = hashMix(hashInit(), playlistPlayLocked ? 2ULL : 1ULL);
+    if (full || lk != prevPlaylistLockKey) {
+      prevPlaylistLockKey = lk;
       const int w = SX(74), h = SY(14);
       Surface s(w, h);
       s.fillRect(0, 0, w, h, BG);
-      const char *lockTxt = projPlayLocked ? "UNLOCK ->" : "LOCK ->";
+      const char *lockTxt = playlistPlayLocked ? "UNLOCK ->" : "LOCK ->";
       int tw = textWidth(lockTxt);
-      s.drawText(max(0, w - SX(4) - tw), TY(h), lockTxt, projPlayLocked ? LOGO_COLOR : LIGHT);
+      s.drawText(max(0, w - SX(4) - tw), TY(h), lockTxt, playlistPlayLocked ? LOGO_COLOR : LIGHT);
       s.blit(SCREEN_W - w, SY(4));
     }
   }
@@ -1058,15 +1058,15 @@ FLASHMEM static void drawProjPlayModal(bool full) {
   // 3. Controls Row: [ |< , Play/Stop + Speed , >| , VOL control ]
   //    Plain text on black; border drawn ONLY around the control where the cursor is.
   {
-    const bool inCtrl = !projPlayLocked && (projPlayZone == PROJ_PLAY_ZONE_CONTROLS);
-    const int selCol = inCtrl ? (int)projPlayCtrlCol : -1;
+    const bool inCtrl = !playlistPlayLocked && (playlistPlayZone == PLAYLIST_PLAY_ZONE_CONTROLS);
+    const int selCol = inCtrl ? (int)playlistPlayCtrlCol : -1;
     const int sqVal = (int)transport.speedQuarter;
     uint64_t ck = hashMix(hashInit(), (uint64_t)(selCol + 2) | ((uint64_t)isPlaying << 8) |
-                                      ((uint64_t)projPlayVol << 16) |
+                                      ((uint64_t)playlistPlayVol << 16) |
                                       ((uint64_t)(uint8_t)sqVal << 24) |
-                                      ((uint64_t)projPlayLocked << 32));
-    if (full || ck != prevProjCtrlKey) {
-      prevProjCtrlKey = ck;
+                                      ((uint64_t)playlistPlayLocked << 32));
+    if (full || ck != prevPlaylistCtrlKey) {
+      prevPlaylistCtrlKey = ck;
       const int rw = SX(200), rh = SY(18);
       Surface s(rw, rh);
       s.fillRect(0, 0, rw, rh, BG);
@@ -1083,20 +1083,20 @@ FLASHMEM static void drawProjPlayModal(bool full) {
         snprintf(playLabel, sizeof(playLabel), "%c %s", (sqVal < 0) ? '<' : '>', speedTxt);
       }
 
-      const int boxX[PROJ_PLAY_CTRL_COUNT] = {0, SX(30), SX(104), SX(134)};
-      const int boxW[PROJ_PLAY_CTRL_COUNT] = {SX(24), SX(68), SX(24), SX(66)};
+      const int boxX[PLAYLIST_PLAY_CTRL_COUNT] = {0, SX(30), SX(104), SX(134)};
+      const int boxW[PLAYLIST_PLAY_CTRL_COUNT] = {SX(24), SX(68), SX(24), SX(66)};
       char volTxt[16];
-      snprintf(volTxt, sizeof(volTxt), "VOL: %d", (int)projPlayVol);
-      const char *const labels[PROJ_PLAY_CTRL_COUNT] = {
+      snprintf(volTxt, sizeof(volTxt), "VOL: %d", (int)playlistPlayVol);
+      const char *const labels[PLAYLIST_PLAY_CTRL_COUNT] = {
         "|<",
         playLabel,
         ">|",
         volTxt
       };
 
-      for (int c = 0; c < PROJ_PLAY_CTRL_COUNT; c++) {
+      for (int c = 0; c < PLAYLIST_PLAY_CTRL_COUNT; c++) {
         bool cSel = (selCol == c);
-        bool isPlayBtn = (c == PROJ_PLAY_CTRL_PLAY);
+        bool isPlayBtn = (c == PLAYLIST_PLAY_CTRL_PLAY);
         int bx = boxX[c], bw = boxW[c];
         if (cSel) {
           s.fillRect(bx, 0, bw, rh, LOGO_COLOR);
@@ -1122,19 +1122,19 @@ FLASHMEM static void drawProjPlayModal(bool full) {
 
   // 4. Scrollable Song List below the cassette (with "-->" to the left of the playing song)
   //    Faint outer border around the table; cursor border drawn ONLY around the active row.
-  for (int r = 0; r < PROJ_PLAY_VISIBLE_ROWS; r++) {
+  for (int r = 0; r < PLAYLIST_PLAY_VISIBLE_ROWS; r++) {
     const int y = SY(142) + r * SY(18);
     const int rw = SX(200), rh = SY(18);
     const int idx = scroll + r;
     const bool hasSong = (total > 0 && idx < total);
-    const bool isCurPlayingSong = hasSong && (idx == projPlayPlayingIdx);
-    const bool sel = !projPlayLocked && (projPlayZone == PROJ_PLAY_ZONE_LIST) && hasSong && (idx == cur);
+    const bool isCurPlayingSong = hasSong && (idx == playlistPlayPlayingIdx);
+    const bool sel = !playlistPlayLocked && (playlistPlayZone == PLAYLIST_PLAY_ZONE_LIST) && hasSong && (idx == cur);
 
     char songTxt[32];
     if (hasSong) {
-      snprintf(songTxt, sizeof(songTxt), "%d.  %s", idx + 1, projEditSongs[idx]);
+      snprintf(songTxt, sizeof(songTxt), "%d.  %s", idx + 1, playlistEditSongs[idx]);
     } else if (total == 0 && r == 0) {
-      snprintf(songTxt, sizeof(songTxt), "NO SONGS IN PROJECT");
+      snprintf(songTxt, sizeof(songTxt), "NO SONGS IN PLAYLIST");
     } else {
       songTxt[0] = '\0';
     }
@@ -1142,8 +1142,8 @@ FLASHMEM static void drawProjPlayModal(bool full) {
     uint64_t rk = hashStr(hashInit(), songTxt);
     rk = hashMix(rk, (uint64_t)sel | ((uint64_t)isCurPlayingSong << 8) |
                      ((uint64_t)isPlaying << 16) | ((uint64_t)r << 24));
-    if (full || rk != prevProjRowKey[r]) {
-      prevProjRowKey[r] = rk;
+    if (full || rk != prevPlaylistRowKey[r]) {
+      prevPlaylistRowKey[r] = rk;
       Surface s(rw, rh);
       s.fillRect(0, 0, rw, rh, BG);
 
@@ -1154,7 +1154,7 @@ FLASHMEM static void drawProjPlayModal(bool full) {
       if (r == 0) {
         s.fillRect(0, 0, rw, PX, tableBd);
       }
-      if (r == PROJ_PLAY_VISIBLE_ROWS - 1) {
+      if (r == PLAYLIST_PLAY_VISIBLE_ROWS - 1) {
         s.fillRect(0, rh - PX, rw, PX, tableBd);
       }
 
@@ -1180,12 +1180,12 @@ FLASHMEM static void drawProjPlayModal(bool full) {
 
   // 5. Bottom-Right EXIT Button (plain text on black; border drawn ONLY when cursor is on EXIT)
   {
-    const bool sel = !projPlayLocked && (projPlayZone == PROJ_PLAY_ZONE_EXIT);
+    const bool sel = !playlistPlayLocked && (playlistPlayZone == PLAYLIST_PLAY_ZONE_EXIT);
     const int w = SX(44), h = SY(18);
 
     uint64_t bk = hashMix(hashInit(), (uint64_t)sel);
-    if (full || bk != prevProjBtnKey[0]) {
-      prevProjBtnKey[0] = bk;
+    if (full || bk != prevPlaylistBtnKey[0]) {
+      prevPlaylistBtnKey[0] = bk;
       Surface s(w, h);
       if (sel) {
         s.drawBox(BG, LOGO_COLOR);
@@ -1200,57 +1200,57 @@ FLASHMEM static void drawProjPlayModal(bool full) {
   }
 }
 
-FLASHMEM static void enterProjPlayView() {
-  snprintf(projEditingName, sizeof(projEditingName), "%s", projectNameAt(projManageCursor));
-  projEditSongCount = loadProjectSongs(projEditingName, projEditSongs, MAX_SONGS_PER_PROJECT);
+FLASHMEM static void enterPlaylistPlayView() {
+  snprintf(playlistEditingName, sizeof(playlistEditingName), "%s", playlistNameAt(playlistManageCursor));
+  playlistEditSongCount = loadPlaylistSongs(playlistEditingName, playlistEditSongs, MAX_SONGS_PER_PLAYLIST);
   {
     const SongSettings &curPs = songSettings();
-    projPlayVolHp = (curPs.masterVolHpEnc >= 1 && curPs.masterVolHpEnc <= MASTER_VOLUME_MAX + 1)
+    playlistPlayVolHp = (curPs.masterVolHpEnc >= 1 && curPs.masterVolHpEnc <= MASTER_VOLUME_MAX + 1)
                         ? (uint8_t)(curPs.masterVolHpEnc - 1)
                         : curPs.masterVolume;
-    projPlayVolSpk = (curPs.masterVolSpkEnc >= 1 && curPs.masterVolSpkEnc <= MASTER_VOLUME_MAX + 1)
+    playlistPlayVolSpk = (curPs.masterVolSpkEnc >= 1 && curPs.masterVolSpkEnc <= MASTER_VOLUME_MAX + 1)
                          ? (uint8_t)(curPs.masterVolSpkEnc - 1)
                          : curPs.masterVolume;
-    projPlayVol = appAreHeadphonesConnected() ? projPlayVolHp : projPlayVolSpk;
+    playlistPlayVol = appAreHeadphonesConnected() ? playlistPlayVolHp : playlistPlayVolSpk;
   }
-  projPlaySpeedQuarter = DEFAULT_SPEED_QUARTER;
-  projPlayLocked = false;
-  projPlayEditHeld = false;
-  projPlayEditModUsed = false;
-  projPlayListCursor = 0;
-  projPlayListScroll = 0;
-  projPlayPlayingIdx = -1;
-  projPlayZone = (projEditSongCount > 0) ? PROJ_PLAY_ZONE_CONTROLS : PROJ_PLAY_ZONE_EXIT;
-  projPlayCtrlCol = PROJ_PLAY_CTRL_PLAY;
-  projPlayAnimMs = 0;
-  projPlayLastTickMs = millis();
-  projModalView = ProjModalView::PlayProject;
-  invalidateSysProjectsModalCache();
+  playlistPlaySpeedQuarter = DEFAULT_SPEED_QUARTER;
+  playlistPlayLocked = false;
+  playlistPlayEditHeld = false;
+  playlistPlayEditModUsed = false;
+  playlistPlayListCursor = 0;
+  playlistPlayListScroll = 0;
+  playlistPlayPlayingIdx = -1;
+  playlistPlayZone = (playlistEditSongCount > 0) ? PLAYLIST_PLAY_ZONE_CONTROLS : PLAYLIST_PLAY_ZONE_EXIT;
+  playlistPlayCtrlCol = PLAYLIST_PLAY_CTRL_PLAY;
+  playlistPlayAnimMs = 0;
+  playlistPlayLastTickMs = millis();
+  playlistModalView = PlaylistModalView::PlayPlaylist;
+  invalidateSysPlaylistsModalCache();
   inputSwallowModalKeys();
-  if (projEditSongCount > 0) {
-    projPlayStartSong(0, true);
+  if (playlistEditSongCount > 0) {
+    playlistPlayStartSong(0, true);
   } else {
-    uiShowToast("PROJECT IS EMPTY");
+    uiShowToast("PLAYLIST IS EMPTY");
     uiForceRedraw();
   }
 }
 
-FLASHMEM void handleSysProjectsModalInput(uint8_t pressed, uint8_t now, uint32_t ms) {
+FLASHMEM void handleSysPlaylistsModalInput(uint8_t pressed, uint8_t now, uint32_t ms) {
   (void)ms;
-  if (projModalView == ProjModalView::Closed) return;
+  if (playlistModalView == PlaylistModalView::Closed) return;
 
-  // 1. Confirmation Overlay ("Delete project?", "Remove song?", or "Save song?")
-  if (projConfirmOpen) {
+  // 1. Confirmation Overlay ("Delete playlist?", "Remove song?", or "Save song?")
+  if (playlistConfirmOpen) {
     int step = ((pressed & (BTN_DOWN | BTN_RIGHT)) ? 1 : 0) -
                ((pressed & (BTN_UP | BTN_LEFT)) ? 1 : 0);
     if (step != 0) {
-      projConfirmCursor = (projConfirmCursor + step + 2) % 2;
+      playlistConfirmCursor = (playlistConfirmCursor + step + 2) % 2;
       uiForceRedraw();
     }
     if (pressed & BTN_EDIT) {
-      bool yes = (projConfirmCursor == 0);
-      projConfirmOpen = false;
-      if (projConfirmKind == ProjConfirmKind::SaveBeforePlay) {
+      bool yes = (playlistConfirmCursor == 0);
+      playlistConfirmOpen = false;
+      if (playlistConfirmKind == PlaylistConfirmKind::SaveBeforePlay) {
         if (yes && !saveCurrentSong()) {
           uiShowToast("SAVE FAILED");
           inputSwallowModalKeys();
@@ -1258,28 +1258,28 @@ FLASHMEM void handleSysProjectsModalInput(uint8_t pressed, uint8_t now, uint32_t
           uiForceRedraw();
           return;
         }
-        enterProjPlayView();
+        enterPlaylistPlayView();
         return;
       }
       if (yes) {
-        if (projConfirmKind == ProjConfirmKind::DeleteProject) {
-          const char *pName = projectNameAt(projManageCursor);
-          if (deleteProjectFile(pName)) {
-            if (projManageCursor >= projectCount() && projectCount() > 0) {
-              projManageCursor = projectCount() - 1;
+        if (playlistConfirmKind == PlaylistConfirmKind::DeletePlaylist) {
+          const char *pName = playlistNameAt(playlistManageCursor);
+          if (deletePlaylistFile(pName)) {
+            if (playlistManageCursor >= playlistCount() && playlistCount() > 0) {
+              playlistManageCursor = playlistCount() - 1;
             }
-            syncProjManageScroll();
-            uiShowToast("PROJECT DELETED");
+            syncPlaylistManageScroll();
+            uiShowToast("PLAYLIST DELETED");
           } else {
             uiShowToast("DELETE FAILED");
           }
-        } else if (projConfirmKind == ProjConfirmKind::RemoveSong) {
-          if (projEditSongCount > 0 && projEditCursor >= 0 && projEditCursor < projEditSongCount) {
-            for (int i = projEditCursor; i < projEditSongCount - 1; i++) {
-              memcpy(projEditSongs[i], projEditSongs[i + 1], sizeof(projEditSongs[i]));
+        } else if (playlistConfirmKind == PlaylistConfirmKind::RemoveSong) {
+          if (playlistEditSongCount > 0 && playlistEditCursor >= 0 && playlistEditCursor < playlistEditSongCount) {
+            for (int i = playlistEditCursor; i < playlistEditSongCount - 1; i++) {
+              memcpy(playlistEditSongs[i], playlistEditSongs[i + 1], sizeof(playlistEditSongs[i]));
             }
-            projEditSongCount--;
-            syncProjEditScroll();
+            playlistEditSongCount--;
+            syncPlaylistEditScroll();
             uiShowToast("SONG REMOVED");
           }
         }
@@ -1287,7 +1287,7 @@ FLASHMEM void handleSysProjectsModalInput(uint8_t pressed, uint8_t now, uint32_t
       inputSwallowModalKeys();
       uiForceRedraw();
     } else if (pressed & BTN_OPT) {
-      projConfirmOpen = false;
+      playlistConfirmOpen = false;
       inputSwallowModalKeys();
       uiForceRedraw();
     }
@@ -1298,62 +1298,62 @@ FLASHMEM void handleSysProjectsModalInput(uint8_t pressed, uint8_t now, uint32_t
   const int dx = ((pressed & BTN_RIGHT) ? 1 : 0) - ((pressed & BTN_LEFT) ? 1 : 0);
   const bool shiftLeft = (pressed & BTN_LEFT) && (now & BTN_SHIFT) && !(now & (BTN_OPT | BTN_EDIT));
 
-  // 2. Manage Projects Table
-  if (projModalView == ProjModalView::ManageList) {
+  // 2. Manage Playlists Table
+  if (playlistModalView == PlaylistModalView::ManageList) {
     if (shiftLeft || (pressed & BTN_OPT)) {
-      closeSysProjectsModal();
+      closeSysPlaylistsModal();
       inputSwallowModalKeys();
       uiForceRedraw();
       return;
     }
     if (!(now & BTN_SHIFT)) {
-      int total = projectCount();
-      int maxRow = projManageRowCount() - 1;
+      int total = playlistCount();
+      int maxRow = playlistManageRowCount() - 1;
       if (dy != 0) {
-        projManageCursor = constrain(projManageCursor + dy, 0, maxRow);
-        syncProjManageScroll();
+        playlistManageCursor = constrain(playlistManageCursor + dy, 0, maxRow);
+        syncPlaylistManageScroll();
         uiForceRedraw();
       }
-      if (dx != 0 && projManageCursor < total) {
-        projManageCol = constrain(projManageCol + dx, 0, PROJ_ACT_COUNT - 1);
+      if (dx != 0 && playlistManageCursor < total) {
+        playlistManageCol = constrain(playlistManageCol + dx, 0, PLAYLIST_ACT_COUNT - 1);
         uiForceRedraw();
       }
       if (pressed & BTN_EDIT) {
-        if (projManageCursor >= total) {
-          openProjectKeyboard(false, "", true);
+        if (playlistManageCursor >= total) {
+          openPlaylistKeyboard(false, "", true);
           inputSwallowModalKeys();
-        } else if (projManageCol == PROJ_ACT_PLAY) {
+        } else if (playlistManageCol == PLAYLIST_ACT_PLAY) {
           if (transport.mode != TransportMode::Stopped) {
             storageStopTransport();
           }
           if (songHasUnsavedChanges()) {
-            projConfirmKind = ProjConfirmKind::SaveBeforePlay;
-            projConfirmCursor = 0;
-            projConfirmOpen = true;
+            playlistConfirmKind = PlaylistConfirmKind::SaveBeforePlay;
+            playlistConfirmCursor = 0;
+            playlistConfirmOpen = true;
             inputSwallowModalKeys();
             uiForceRedraw();
           } else {
-            enterProjPlayView();
+            enterPlaylistPlayView();
           }
-        } else if (projManageCol == PROJ_ACT_EDIT) {
-          snprintf(projEditingName, sizeof(projEditingName), "%s", projectNameAt(projManageCursor));
-          projEditSongCount = loadProjectSongs(projEditingName, projEditSongs, MAX_SONGS_PER_PROJECT);
-          projEditCursor = 0;
-          projEditScroll = 0;
-          projEditCol = PROJ_EDIT_ACT_ADD;
-          projEditInBottomRow = false;
-          projEditBottomCol = 0;
-          projModalView = ProjModalView::EditProject;
-          invalidateSysProjectsModalCache();
+        } else if (playlistManageCol == PLAYLIST_ACT_EDIT) {
+          snprintf(playlistEditingName, sizeof(playlistEditingName), "%s", playlistNameAt(playlistManageCursor));
+          playlistEditSongCount = loadPlaylistSongs(playlistEditingName, playlistEditSongs, MAX_SONGS_PER_PLAYLIST);
+          playlistEditCursor = 0;
+          playlistEditScroll = 0;
+          playlistEditCol = PLAYLIST_EDIT_ACT_ADD;
+          playlistEditInBottomRow = false;
+          playlistEditBottomCol = 0;
+          playlistModalView = PlaylistModalView::EditPlaylist;
+          invalidateSysPlaylistsModalCache();
           inputSwallowModalKeys();
           uiForceRedraw();
-        } else if (projManageCol == PROJ_ACT_RENAME) {
-          openProjectKeyboard(true, projectNameAt(projManageCursor), false);
+        } else if (playlistManageCol == PLAYLIST_ACT_RENAME) {
+          openPlaylistKeyboard(true, playlistNameAt(playlistManageCursor), false);
           inputSwallowModalKeys();
-        } else if (projManageCol == PROJ_ACT_DELETE) {
-          projConfirmKind = ProjConfirmKind::DeleteProject;
-          projConfirmCursor = 0;
-          projConfirmOpen = true;
+        } else if (playlistManageCol == PLAYLIST_ACT_DELETE) {
+          playlistConfirmKind = PlaylistConfirmKind::DeletePlaylist;
+          playlistConfirmCursor = 0;
+          playlistConfirmOpen = true;
           inputSwallowModalKeys();
           uiForceRedraw();
         }
@@ -1362,69 +1362,69 @@ FLASHMEM void handleSysProjectsModalInput(uint8_t pressed, uint8_t now, uint32_t
     return;
   }
 
-  // 3. Edit Project Table
-  if (projModalView == ProjModalView::EditProject) {
+  // 3. Edit Playlist Table
+  if (playlistModalView == PlaylistModalView::EditPlaylist) {
     if (shiftLeft) {
-      projModalView = ProjModalView::ManageList;
-      invalidateSysProjectsModalCache();
+      playlistModalView = PlaylistModalView::ManageList;
+      invalidateSysPlaylistsModalCache();
       inputSwallowModalKeys();
       uiForceRedraw();
       return;
     }
     if (!(now & BTN_SHIFT)) {
       if (dy != 0) {
-        int maxRow = projEditRowCount() - 1;
-        if (projEditInBottomRow) {
+        int maxRow = playlistEditRowCount() - 1;
+        if (playlistEditInBottomRow) {
           if (dy < 0) {
-            projEditInBottomRow = false;
-            projEditCursor = maxRow;
-            syncProjEditScroll();
+            playlistEditInBottomRow = false;
+            playlistEditCursor = maxRow;
+            syncPlaylistEditScroll();
           }
         } else {
-          if (dy > 0 && projEditCursor >= maxRow) {
-            projEditInBottomRow = true;
+          if (dy > 0 && playlistEditCursor >= maxRow) {
+            playlistEditInBottomRow = true;
           } else {
-            projEditCursor = constrain(projEditCursor + dy, 0, maxRow);
-            syncProjEditScroll();
+            playlistEditCursor = constrain(playlistEditCursor + dy, 0, maxRow);
+            syncPlaylistEditScroll();
           }
         }
         uiForceRedraw();
       }
       if (dx != 0) {
-        if (projEditInBottomRow) {
-          projEditBottomCol = constrain(projEditBottomCol + dx, 0, 1);
-        } else if (projEditCursor < projEditSongCount) {
-          projEditCol = constrain(projEditCol + dx, 0, PROJ_EDIT_ACT_COUNT - 1);
+        if (playlistEditInBottomRow) {
+          playlistEditBottomCol = constrain(playlistEditBottomCol + dx, 0, 1);
+        } else if (playlistEditCursor < playlistEditSongCount) {
+          playlistEditCol = constrain(playlistEditCol + dx, 0, PLAYLIST_EDIT_ACT_COUNT - 1);
         }
         uiForceRedraw();
       }
       if (pressed & BTN_EDIT) {
-        if (projEditInBottomRow) {
-          if (projEditBottomCol == 0) {
-            if (saveProjectSongs(projEditingName, projEditSongs, projEditSongCount)) {
-              uiShowToast("PROJECT SAVED");
+        if (playlistEditInBottomRow) {
+          if (playlistEditBottomCol == 0) {
+            if (savePlaylistSongs(playlistEditingName, playlistEditSongs, playlistEditSongCount)) {
+              uiShowToast("PLAYLIST SAVED");
             } else {
               uiShowToast("SAVE FAILED");
             }
           }
-          projModalView = ProjModalView::ManageList;
-          invalidateSysProjectsModalCache();
+          playlistModalView = PlaylistModalView::ManageList;
+          invalidateSysPlaylistsModalCache();
           inputSwallowModalKeys();
           uiForceRedraw();
         } else {
-          int act = (projEditCursor >= projEditSongCount) ? PROJ_EDIT_ACT_ADD : projEditCol;
-          if (act == PROJ_EDIT_ACT_ADD) {
+          int act = (playlistEditCursor >= playlistEditSongCount) ? PLAYLIST_EDIT_ACT_ADD : playlistEditCol;
+          if (act == PLAYLIST_EDIT_ACT_ADD) {
             scanSongFolders();
-            projAddSongCursor = 0;
-            projAddSongScroll = 0;
-            projModalView = ProjModalView::AddSong;
-            invalidateSysProjectsModalCache();
+            playlistAddSongCursor = 0;
+            playlistAddSongScroll = 0;
+            playlistModalView = PlaylistModalView::AddSong;
+            invalidateSysPlaylistsModalCache();
             inputSwallowModalKeys();
             uiForceRedraw();
-          } else if (act == PROJ_EDIT_ACT_REMOVE && projEditCursor < projEditSongCount) {
-            projConfirmKind = ProjConfirmKind::RemoveSong;
-            projConfirmCursor = 0;
-            projConfirmOpen = true;
+          } else if (act == PLAYLIST_EDIT_ACT_REMOVE && playlistEditCursor < playlistEditSongCount) {
+            playlistConfirmKind = PlaylistConfirmKind::RemoveSong;
+            playlistConfirmCursor = 0;
+            playlistConfirmOpen = true;
             inputSwallowModalKeys();
             uiForceRedraw();
           }
@@ -1435,46 +1435,46 @@ FLASHMEM void handleSysProjectsModalInput(uint8_t pressed, uint8_t now, uint32_t
   }
 
   // 4. Add Song Picker Table (/Capstan/SONGS/)
-  if (projModalView == ProjModalView::AddSong) {
+  if (playlistModalView == PlaylistModalView::AddSong) {
     if (shiftLeft || (pressed & BTN_OPT)) {
-      projModalView = ProjModalView::EditProject;
-      invalidateSysProjectsModalCache();
+      playlistModalView = PlaylistModalView::EditPlaylist;
+      invalidateSysPlaylistsModalCache();
       inputSwallowModalKeys();
       uiForceRedraw();
       return;
     }
     if (!(now & BTN_SHIFT)) {
       int total = songCount();
-      int step = dy + dx * PROJ_ADD_VISIBLE_ROWS;
+      int step = dy + dx * PLAYLIST_ADD_VISIBLE_ROWS;
       if (step != 0 && total > 0) {
-        projAddSongCursor = constrain(projAddSongCursor + step, 0, total - 1);
-        syncProjAddSongScroll();
+        playlistAddSongCursor = constrain(playlistAddSongCursor + step, 0, total - 1);
+        syncPlaylistAddSongScroll();
         uiForceRedraw();
       }
       if (pressed & BTN_EDIT) {
         if (total <= 0) {
           uiShowToast("NO SAVED SONGS");
-        } else if (projEditSongCount >= MAX_SONGS_PER_PROJECT) {
-          uiShowToast("PROJECT FULL");
+        } else if (playlistEditSongCount >= MAX_SONGS_PER_PLAYLIST) {
+          uiShowToast("PLAYLIST FULL");
         } else {
-          const char *sName = songNameAt(projAddSongCursor);
-          int insIdx = (projEditCursor >= projEditSongCount)
-                         ? projEditSongCount
-                         : constrain(projEditCursor + 1, 0, projEditSongCount);
-          for (int i = projEditSongCount; i > insIdx; i--) {
-            memcpy(projEditSongs[i], projEditSongs[i - 1], sizeof(projEditSongs[i]));
+          const char *sName = songNameAt(playlistAddSongCursor);
+          int insIdx = (playlistEditCursor >= playlistEditSongCount)
+                         ? playlistEditSongCount
+                         : constrain(playlistEditCursor + 1, 0, playlistEditSongCount);
+          for (int i = playlistEditSongCount; i > insIdx; i--) {
+            memcpy(playlistEditSongs[i], playlistEditSongs[i - 1], sizeof(playlistEditSongs[i]));
           }
-          snprintf(projEditSongs[insIdx], sizeof(projEditSongs[insIdx]), "%s", sName);
-          projEditSongCount++;
-          projEditCursor = insIdx;
-          projEditCol = PROJ_EDIT_ACT_ADD;
-          syncProjEditScroll();
+          snprintf(playlistEditSongs[insIdx], sizeof(playlistEditSongs[insIdx]), "%s", sName);
+          playlistEditSongCount++;
+          playlistEditCursor = insIdx;
+          playlistEditCol = PLAYLIST_EDIT_ACT_ADD;
+          syncPlaylistEditScroll();
           char msg[32];
           snprintf(msg, sizeof(msg), "ADDED: %s", sName);
           uiShowToast(msg);
         }
-        projModalView = ProjModalView::EditProject;
-        invalidateSysProjectsModalCache();
+        playlistModalView = PlaylistModalView::EditPlaylist;
+        invalidateSysPlaylistsModalCache();
         inputSwallowModalKeys();
         uiForceRedraw();
       }
@@ -1482,36 +1482,36 @@ FLASHMEM void handleSysProjectsModalInput(uint8_t pressed, uint8_t now, uint32_t
     return;
   }
 
-  // 5. Project Play View
-  if (projModalView == ProjModalView::PlayProject) {
+  // 5. Playlist Play View
+  if (playlistModalView == PlaylistModalView::PlayPlaylist) {
     if (shiftLeft) {
-      projPlayStopAndRestoreLoadedSong();
-      projModalView = ProjModalView::ManageList;
-      invalidateSysProjectsModalCache();
+      playlistPlayStopAndRestoreLoadedSong();
+      playlistModalView = PlaylistModalView::ManageList;
+      invalidateSysPlaylistsModalCache();
       inputSwallowModalKeys();
       uiForceRedraw();
       return;
     }
 
-    const bool onPlayCell = (projPlayZone == PROJ_PLAY_ZONE_CONTROLS &&
-                             projPlayCtrlCol == PROJ_PLAY_CTRL_PLAY);
-    const bool onVolCell = (projPlayZone == PROJ_PLAY_ZONE_CONTROLS &&
-                            projPlayCtrlCol == PROJ_PLAY_CTRL_VOL);
+    const bool onPlayCell = (playlistPlayZone == PLAYLIST_PLAY_ZONE_CONTROLS &&
+                             playlistPlayCtrlCol == PLAYLIST_PLAY_CTRL_PLAY);
+    const bool onVolCell = (playlistPlayZone == PLAYLIST_PLAY_ZONE_CONTROLS &&
+                            playlistPlayCtrlCol == PLAYLIST_PLAY_CTRL_VOL);
     const bool editJustPressed = (pressed & BTN_EDIT) != 0;
-    const bool editJustReleased = projPlayEditHeld && !(now & BTN_EDIT);
+    const bool editJustReleased = playlistPlayEditHeld && !(now & BTN_EDIT);
     if (editJustPressed) {
-      projPlayEditHeld = true;
-      projPlayEditModUsed = false;
+      playlistPlayEditHeld = true;
+      playlistPlayEditModUsed = false;
     }
     if (!(now & BTN_EDIT)) {
-      projPlayEditHeld = false;
+      playlistPlayEditHeld = false;
     }
 
     // OPT + EDIT on Play/Stop button resets playback speed to 1.00x (same as transport bar)
     if (onPlayCell && (((pressed & BTN_EDIT) && (now & BTN_OPT)) ||
                        ((pressed & BTN_OPT) && (now & BTN_EDIT)))) {
-      projPlayEditModUsed = true;
-      projPlaySpeedQuarter = DEFAULT_SPEED_QUARTER;
+      playlistPlayEditModUsed = true;
+      playlistPlaySpeedQuarter = DEFAULT_SPEED_QUARTER;
       appSetPlaybackSpeedQuarter(DEFAULT_SPEED_QUARTER);
       if (transport.mode == TransportMode::Stopped) {
         appSeekTape(0);
@@ -1526,18 +1526,18 @@ FLASHMEM void handleSysProjectsModalInput(uint8_t pressed, uint8_t now, uint32_t
     // EDIT + UP jumps directly to 1.00x playback; EDIT + DOWN jumps directly to -1.00x playback.
     if (onPlayCell && (now & BTN_EDIT) && !(now & (BTN_SHIFT | BTN_OPT))) {
       if (dx != 0) {
-        projPlayEditModUsed = true;
+        playlistPlayEditModUsed = true;
         appStepPlaybackSpeed(dx);
-        projPlaySpeedQuarter = (int8_t)transport.speedQuarter;
+        playlistPlaySpeedQuarter = (int8_t)transport.speedQuarter;
         uiForceRedraw();
       } else if (dy < 0) {
-        projPlayEditModUsed = true;
-        projPlaySpeedQuarter = DEFAULT_SPEED_QUARTER;
+        playlistPlayEditModUsed = true;
+        playlistPlaySpeedQuarter = DEFAULT_SPEED_QUARTER;
         appSetPlaybackSpeedQuarter(DEFAULT_SPEED_QUARTER);
         uiForceRedraw();
       } else if (dy > 0) {
-        projPlayEditModUsed = true;
-        projPlaySpeedQuarter = REVERSE_1X_SPEED_QUARTER;
+        playlistPlayEditModUsed = true;
+        playlistPlaySpeedQuarter = REVERSE_1X_SPEED_QUARTER;
         appSetPlaybackSpeedQuarter(REVERSE_1X_SPEED_QUARTER);
         uiForceRedraw();
       }
@@ -1547,11 +1547,11 @@ FLASHMEM void handleSysProjectsModalInput(uint8_t pressed, uint8_t now, uint32_t
     // OPT + EDIT on VOL resets master volume to default (50 on Headphones, 40 on Speaker)
     if (onVolCell && (((pressed & BTN_EDIT) && (now & BTN_OPT)) ||
                       ((pressed & BTN_OPT) && (now & BTN_EDIT)))) {
-      projPlayEditModUsed = true;
-      projPlayVol = appDefaultMasterVolume();
-      if (appAreHeadphonesConnected()) projPlayVolHp = projPlayVol;
-      else projPlayVolSpk = projPlayVol;
-      appSetMasterVolume(projPlayVol);
+      playlistPlayEditModUsed = true;
+      playlistPlayVol = appDefaultMasterVolume();
+      if (appAreHeadphonesConnected()) playlistPlayVolHp = playlistPlayVol;
+      else playlistPlayVolSpk = playlistPlayVol;
+      appSetMasterVolume(playlistPlayVol);
       uiForceRedraw();
       return;
     }
@@ -1560,76 +1560,76 @@ FLASHMEM void handleSysProjectsModalInput(uint8_t pressed, uint8_t now, uint32_t
     if (onVolCell && (now & BTN_EDIT) && !(now & (BTN_SHIFT | BTN_OPT))) {
       int step = (dx != 0) ? dx : (-dy * 5);
       if (step != 0) {
-        projPlayEditModUsed = true;
-        projPlayVol = (uint8_t)constrain((int)projPlayVol + step, 0, (int)MASTER_VOLUME_MAX);
-        if (appAreHeadphonesConnected()) projPlayVolHp = projPlayVol;
-        else projPlayVolSpk = projPlayVol;
-        appSetMasterVolume(projPlayVol);
+        playlistPlayEditModUsed = true;
+        playlistPlayVol = (uint8_t)constrain((int)playlistPlayVol + step, 0, (int)MASTER_VOLUME_MAX);
+        if (appAreHeadphonesConnected()) playlistPlayVolHp = playlistPlayVol;
+        else playlistPlayVolSpk = playlistPlayVol;
+        appSetMasterVolume(playlistPlayVol);
         uiForceRedraw();
       }
       return;
     }
 
-    auto toggleProjPlayTransport = [&]() {
-      if (projPlayActive && transport.mode == TransportMode::Running) {
-        projPlayActive = false;
+    auto togglePlaylistPlayTransport = [&]() {
+      if (playlistPlayActive && transport.mode == TransportMode::Running) {
+        playlistPlayActive = false;
         fmSynthSetExportTailPhase(false);
         storageStopTransport();
         fmSynthAllNotesOff();
         uiForceRedraw();
-      } else if (projEditSongCount > 0) {
-        if (projPlayPlayingIdx < 0 || transport.tapeFrame >= MAX_REC_FRAMES) {
-          projPlayStartSong((projPlayPlayingIdx >= 0) ? projPlayPlayingIdx : 0, true);
+      } else if (playlistEditSongCount > 0) {
+        if (playlistPlayPlayingIdx < 0 || transport.tapeFrame >= MAX_REC_FRAMES) {
+          playlistPlayStartSong((playlistPlayPlayingIdx >= 0) ? playlistPlayPlayingIdx : 0, true);
         } else {
-          projPlayActive = true;
-          transport.speedQuarter = projPlaySpeedQuarter;
+          playlistPlayActive = true;
+          transport.speedQuarter = playlistPlaySpeedQuarter;
           transport.loopEnabled = false;
           transport.punchEnabled = false;
           metronomeOn = false;
           storageStartTransport(false, false, false);
           noInterrupts();
           metronomeOn = false;
-          projPlayLastNow = transport.now;
+          playlistPlayLastNow = transport.now;
           interrupts();
           uiForceRedraw();
         }
       }
     };
 
-    // Hardware PLAY button toggles Play/Stop from anywhere on the Project Play screen
+    // Hardware PLAY button toggles Play/Stop from anywhere on the Playlist Play screen
     if ((pressed & BTN_PLAY) && !(now & (BTN_SHIFT | BTN_OPT | BTN_EDIT))) {
-      toggleProjPlayTransport();
+      togglePlaylistPlayTransport();
       return;
     }
 
     if (!(now & (BTN_SHIFT | BTN_EDIT | BTN_OPT))) {
       if (dy != 0) {
-        if (projPlayZone == PROJ_PLAY_ZONE_CONTROLS) {
+        if (playlistPlayZone == PLAYLIST_PLAY_ZONE_CONTROLS) {
           if (dy > 0) {
-            if (projEditSongCount > 0) {
-              projPlayZone = PROJ_PLAY_ZONE_LIST;
-              syncProjPlayScroll();
+            if (playlistEditSongCount > 0) {
+              playlistPlayZone = PLAYLIST_PLAY_ZONE_LIST;
+              syncPlaylistPlayScroll();
             } else {
-              projPlayZone = PROJ_PLAY_ZONE_EXIT;
+              playlistPlayZone = PLAYLIST_PLAY_ZONE_EXIT;
             }
           }
-        } else if (projPlayZone == PROJ_PLAY_ZONE_LIST) {
-          if (dy < 0 && projPlayListCursor <= 0) {
-            projPlayZone = PROJ_PLAY_ZONE_CONTROLS;
-          } else if (dy > 0 && projPlayListCursor >= projEditSongCount - 1) {
-            projPlayZone = PROJ_PLAY_ZONE_EXIT;
+        } else if (playlistPlayZone == PLAYLIST_PLAY_ZONE_LIST) {
+          if (dy < 0 && playlistPlayListCursor <= 0) {
+            playlistPlayZone = PLAYLIST_PLAY_ZONE_CONTROLS;
+          } else if (dy > 0 && playlistPlayListCursor >= playlistEditSongCount - 1) {
+            playlistPlayZone = PLAYLIST_PLAY_ZONE_EXIT;
           } else {
-            projPlayListCursor = constrain(projPlayListCursor + dy, 0, max(0, projEditSongCount - 1));
-            syncProjPlayScroll();
+            playlistPlayListCursor = constrain(playlistPlayListCursor + dy, 0, max(0, playlistEditSongCount - 1));
+            syncPlaylistPlayScroll();
           }
-        } else if (projPlayZone == PROJ_PLAY_ZONE_EXIT) {
+        } else if (playlistPlayZone == PLAYLIST_PLAY_ZONE_EXIT) {
           if (dy < 0) {
-            if (projEditSongCount > 0) {
-              projPlayZone = PROJ_PLAY_ZONE_LIST;
-              projPlayListCursor = constrain(projPlayListCursor, 0, projEditSongCount - 1);
-              syncProjPlayScroll();
+            if (playlistEditSongCount > 0) {
+              playlistPlayZone = PLAYLIST_PLAY_ZONE_LIST;
+              playlistPlayListCursor = constrain(playlistPlayListCursor, 0, playlistEditSongCount - 1);
+              syncPlaylistPlayScroll();
             } else {
-              projPlayZone = PROJ_PLAY_ZONE_CONTROLS;
+              playlistPlayZone = PLAYLIST_PLAY_ZONE_CONTROLS;
             }
           }
         }
@@ -1637,47 +1637,47 @@ FLASHMEM void handleSysProjectsModalInput(uint8_t pressed, uint8_t now, uint32_t
       }
 
       if (dx != 0) {
-        if (projPlayZone == PROJ_PLAY_ZONE_CONTROLS) {
-          projPlayCtrlCol = (uint8_t)constrain((int)projPlayCtrlCol + dx, 0, PROJ_PLAY_CTRL_COUNT - 1);
+        if (playlistPlayZone == PLAYLIST_PLAY_ZONE_CONTROLS) {
+          playlistPlayCtrlCol = (uint8_t)constrain((int)playlistPlayCtrlCol + dx, 0, PLAYLIST_PLAY_CTRL_COUNT - 1);
           uiForceRedraw();
-        } else if (projPlayZone == PROJ_PLAY_ZONE_LIST && dx > 0) {
-          projPlayZone = PROJ_PLAY_ZONE_EXIT;
+        } else if (playlistPlayZone == PLAYLIST_PLAY_ZONE_LIST && dx > 0) {
+          playlistPlayZone = PLAYLIST_PLAY_ZONE_EXIT;
           uiForceRedraw();
-        } else if (projPlayZone == PROJ_PLAY_ZONE_EXIT && dx < 0) {
-          projPlayZone = (projEditSongCount > 0) ? PROJ_PLAY_ZONE_LIST : PROJ_PLAY_ZONE_CONTROLS;
+        } else if (playlistPlayZone == PLAYLIST_PLAY_ZONE_EXIT && dx < 0) {
+          playlistPlayZone = (playlistEditSongCount > 0) ? PLAYLIST_PLAY_ZONE_LIST : PLAYLIST_PLAY_ZONE_CONTROLS;
           uiForceRedraw();
         }
       }
     }
 
     // On Play/Stop cell, trigger toggle on EDIT release (when not used as a modifier for EDIT+L/R or OPT+EDIT)
-    if (onPlayCell && editJustReleased && !projPlayEditModUsed && !(now & (BTN_SHIFT | BTN_OPT))) {
-      toggleProjPlayTransport();
+    if (onPlayCell && editJustReleased && !playlistPlayEditModUsed && !(now & (BTN_SHIFT | BTN_OPT))) {
+      togglePlaylistPlayTransport();
       return;
     }
 
     if (!onPlayCell && (pressed & BTN_EDIT) && !(now & (BTN_SHIFT | BTN_OPT))) {
-      if (projPlayZone == PROJ_PLAY_ZONE_CONTROLS) {
-        if (projPlayCtrlCol == PROJ_PLAY_CTRL_PREV && projEditSongCount > 0) {
-          int prevIdx = (projPlayPlayingIdx > 0) ? (projPlayPlayingIdx - 1) : 0;
-          projPlayListCursor = prevIdx;
-          syncProjPlayScroll();
-          projPlayStartSong(prevIdx, true);
-        } else if (projPlayCtrlCol == PROJ_PLAY_CTRL_NEXT && projEditSongCount > 0) {
-          int nextIdx = (projPlayPlayingIdx >= 0 && projPlayPlayingIdx + 1 < projEditSongCount)
-                          ? (projPlayPlayingIdx + 1) : 0;
-          projPlayListCursor = nextIdx;
-          syncProjPlayScroll();
-          projPlayStartSong(nextIdx, true);
+      if (playlistPlayZone == PLAYLIST_PLAY_ZONE_CONTROLS) {
+        if (playlistPlayCtrlCol == PLAYLIST_PLAY_CTRL_PREV && playlistEditSongCount > 0) {
+          int prevIdx = (playlistPlayPlayingIdx > 0) ? (playlistPlayPlayingIdx - 1) : 0;
+          playlistPlayListCursor = prevIdx;
+          syncPlaylistPlayScroll();
+          playlistPlayStartSong(prevIdx, true);
+        } else if (playlistPlayCtrlCol == PLAYLIST_PLAY_CTRL_NEXT && playlistEditSongCount > 0) {
+          int nextIdx = (playlistPlayPlayingIdx >= 0 && playlistPlayPlayingIdx + 1 < playlistEditSongCount)
+                          ? (playlistPlayPlayingIdx + 1) : 0;
+          playlistPlayListCursor = nextIdx;
+          syncPlaylistPlayScroll();
+          playlistPlayStartSong(nextIdx, true);
         }
-      } else if (projPlayZone == PROJ_PLAY_ZONE_LIST) {
-        if (projEditSongCount > 0 && projPlayListCursor >= 0 && projPlayListCursor < projEditSongCount) {
-          projPlayStartSong(projPlayListCursor, true);
+      } else if (playlistPlayZone == PLAYLIST_PLAY_ZONE_LIST) {
+        if (playlistEditSongCount > 0 && playlistPlayListCursor >= 0 && playlistPlayListCursor < playlistEditSongCount) {
+          playlistPlayStartSong(playlistPlayListCursor, true);
         }
         inputSwallowModalKeys();
-      } else if (projPlayZone == PROJ_PLAY_ZONE_EXIT) {
-        projPlayStopAndRestoreLoadedSong();
-        closeSysProjectsModal();
+      } else if (playlistPlayZone == PLAYLIST_PLAY_ZONE_EXIT) {
+        playlistPlayStopAndRestoreLoadedSong();
+        closeSysPlaylistsModal();
         setPage(Page::Audio);
         inputSwallowModalKeys();
         uiForceRedraw();
@@ -2121,20 +2121,20 @@ FLASHMEM static void sysSettingsDrawPage(bool full) {
     drawSysPresetsModal(full);
     return;
   }
-  if (projModalView == ProjModalView::ManageList) {
-    drawProjManageListModal(full);
+  if (playlistModalView == PlaylistModalView::ManageList) {
+    drawPlaylistManageListModal(full);
     return;
   }
-  if (projModalView == ProjModalView::EditProject) {
-    drawProjEditModal(full);
+  if (playlistModalView == PlaylistModalView::EditPlaylist) {
+    drawPlaylistEditModal(full);
     return;
   }
-  if (projModalView == ProjModalView::AddSong) {
-    drawProjAddSongModal(full);
+  if (playlistModalView == PlaylistModalView::AddSong) {
+    drawPlaylistAddSongModal(full);
     return;
   }
-  if (projModalView == ProjModalView::PlayProject) {
-    drawProjPlayModal(full);
+  if (playlistModalView == PlaylistModalView::PlayPlaylist) {
+    drawPlaylistPlayModal(full);
     return;
   }
   if (midiMapModalOpen) {
@@ -2151,7 +2151,7 @@ FLASHMEM static void sysSettingsDrawPage(bool full) {
     "SCREEN BRIGHTNESS",
     "METRONOME VOLUME",
     "INSTRUMENT PRESETS",
-    "PROJECTS",
+    "PLAYLISTS",
     "MIDI MAPPINGS",
     "USB CHARGE WHILE ON",
     "USB STORAGE DRIVE"
@@ -2179,7 +2179,7 @@ FLASHMEM static void sysSettingsDrawPage(bool full) {
         snprintf(val, sizeof(val), "%d", (int)ss.metroVolume);
         break;
       case SSET_INST_PRESETS:
-      case SSET_PROJECTS:
+      case SSET_PLAYLISTS:
       case SSET_MIDI_MAP:
         isPill = true;
         snprintf(val, sizeof(val), "MANAGE");
@@ -2245,7 +2245,7 @@ FLASHMEM static void sysSettingsOnOptAdjust(int dx, int dy, int delta) {
       applyAndCommitUsbChargeSetting(!ss.usbChargeWhileOn);
       return;
     case SSET_INST_PRESETS:
-    case SSET_PROJECTS:
+    case SSET_PLAYLISTS:
     case SSET_MIDI_MAP:
     case SSET_USB_DRIVE:
       return;
@@ -2318,8 +2318,8 @@ FLASHMEM static void sysSettingsOnEditPress(bool shiftHeld) {
     openSysPresetsModal();
     inputSwallowModalKeys();
     uiForceRedraw();
-  } else if (sysSetRow == SSET_PROJECTS) {
-    openSysProjectsModal();
+  } else if (sysSetRow == SSET_PLAYLISTS) {
+    openSysPlaylistsModal();
     inputSwallowModalKeys();
     uiForceRedraw();
   } else if (sysSetRow == SSET_MIDI_MAP) {

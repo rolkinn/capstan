@@ -19,7 +19,7 @@ enum class Page : uint8_t {
   Midi = 1,           // 2. MIDI recording page (8 MIDI tracks + Piano Roll editor + transport)
   SongSettings = 2,   // 3. Song settings page (Audio Input, Monitor, Thresh, MIDI Clock/Thru, Export)
   Main = 3,           // 4. Main screen (Current Song + Save/New/Load/Delete + Saved Songs List)
-  SystemSettings = 4, // 5. System settings page (Projects, Brightness, Metro Vol, Presets, Global MIDI Map, USB Drive)
+  SystemSettings = 4, // 5. System settings page (Playlists, Brightness, Metro Vol, Presets, Global MIDI Map, USB Drive)
   Instruments = 5,    // 6. Instruments page (table of 8 song instruments I01..I08 + Copy/Paste/Delete/Load/Save)
   InstrumentType = 6, // 7. New instrument type selection page (2-Op FM, PhaseDist, Sampler, NoiseDrone)
   InstrumentEdit = 7, // 8. Synthesizer/Sampler parameter editor & Per-Instrument MIDI CC Map
@@ -120,7 +120,7 @@ enum SysSettingItem : int {
   SSET_BRIGHTNESS    = 0,
   SSET_METRO_VOL     = 1,
   SSET_INST_PRESETS  = 2,
-  SSET_PROJECTS      = 3,
+  SSET_PLAYLISTS     = 3,
   SSET_MIDI_MAP      = 4,
   SSET_USB_CHARGE_ON = 5,
   SSET_USB_DRIVE     = 6,
@@ -240,8 +240,8 @@ constexpr int MASTER_FX_ROW_COLS  = MASTER_FX_COUNT + 1; // 7 boxes (6 FX + 1 VO
 enum class KeyboardTarget : uint8_t {
   Song = 0,
   Instrument = 1,
-  ProjectNew = 2,
-  ProjectRename = 3
+  PlaylistNew = 2,
+  PlaylistRename = 3
 };
 
 // On-screen keyboard constants for naming a song or instrument on Save
@@ -296,7 +296,7 @@ bool isSaveKeyboardOpen();
 KeyboardTarget saveKeyboardTarget();
 void openSaveKeyboard(bool startInGrid = false);
 void openInstrumentKeyboard(int instIdx, bool startInGrid = false);
-void openProjectKeyboard(bool isRename, const char *initialText, bool startInGrid = true);
+void openPlaylistKeyboard(bool isRename, const char *initialText, bool startInGrid = true);
 void closeSaveKeyboard();
 
 // Clear Track Recording confirmation & quick transport/punch/loop modal state
